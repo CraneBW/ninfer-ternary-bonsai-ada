@@ -37,23 +37,42 @@
 
 namespace ninfer::ops::detail {
 
-// One byte -> two weights, unscaled, exactly {-1,0,+1} in bf16.
+// The bias the decode subtracts, in the units the fragment carries. The magic below lands on
+// 8*c, so the fragment is {0,+/-8} rather than {-1,0,+1} and the group scale is premultiplied by
+// this on its way in. Keeping the factor binary means it costs nothing anywhere.
+inline constexpr float kTernarySmallTDecodeUnit = 0.125f;
+
+// One byte -> two weights, unscaled, exactly {-1,0,+1} scaled by 1/0.125, in bf16.
 //
 // Differs from ternary_mma_decode_byte only in that it returns one pair instead of two and leaves
 // the group scale to the caller. The nibble select is by lane parity, because a m16n8k16 A
 // fragment wants columns 2l..2l+1 while a PQ2_0 byte holds columns 4b..4b+3: lanes 2k and 2k+1
 // read the same byte and take opposite halves.
-__device__ __forceinline__ unsigned ternary_small_t_decode_half(std::uint8_t byte, bool high) {
-    const unsigned v = static_cast<unsigned>(byte);
-    const unsigned a = high ? (((v >> 4) & 0x03u) | ((v & 0xC0u) << 2))
-                            : ((v & 0x03u) | ((v & 0x0Cu) << 6));
-    constexpr unsigned kMagic = 0x64006400u; // half 1024.0 in both lanes
-    constexpr unsigned kBias  = 0x64016401u; // half 1025.0 in both lanes
+//
+// The magic is done in bf16, not fp16. The prefill kernel's version lands on {0,+/-1} through an
+// fp16 half2 and then has to widen and re-round to feed a bf16 mma -- two converts per pair. bf16
+// has a seven-bit mantissa, so at exponent 10 its ULP is 8: putting the two-bit code in the
+// mantissa's low bits gives 1024 + 8c, and one bf16 subtract of 1032 gives 8(c-1), which is exact
+// for c in {0,1,2}. That drops both converts and leaves the pair in the register the mma wants.
+// The scale is applied after the K reduction in fp32, so premultiplying it by 1/8 is free and the
+// fragment never has to be scaled back.
+//
+// Worth 3-4% on the verify shapes (0.053 -> 0.052 ms on 5120x17408). It is kept because it is also
+// what bounds the decode's floor: the whole decode is 24% of the kernel, measured by building with
+// the arithmetic compiled out, so this is the share of that which comes off cheaply. Two attempts
+// to take more are recorded as failures in the kernel comment below -- do not repeat them.
+__device__ __forceinline__ unsigned ternary_small_t_decode_byte_bits(std::uint32_t v, bool high) {
+    // 0x80 in each lane's low byte is the front of the 0x4480 bias exponent pattern that
+    // __byte_perm splices in. Folding it here rather than OR-ing it after the perm keeps the
+    // whole assembly at one shift and two LOP3s.
+    const unsigned a = high ? (((v >> 4) & 0x03u) | ((v & 0xC0u) << 2) | 0x8080u)
+                            : ((v & 0x03u) | ((v & 0x0Cu) << 6) | 0x8080u);
+    constexpr unsigned kMagic = 0x44004400u; // bf16 0x4400 in both lanes: exponent of 1024
+    constexpr unsigned kBias  = 0x44814481u; // bf16 1032.0 in both lanes
     const unsigned w          = __byte_perm(a, kMagic, 0x5150u);
-    const __half2 bias        = *reinterpret_cast<const __half2*>(&kBias);
-    const __half2 h = __hsub2(*reinterpret_cast<const __half2*>(&w), bias);
-    const __nv_bfloat162 b = __float22bfloat162_rn(__half22float2(h));
-    return *reinterpret_cast<const unsigned*>(&b);
+    const __nv_bfloat162 bias = *reinterpret_cast<const __nv_bfloat162*>(&kBias);
+    const __nv_bfloat162 h = __hsub2(*reinterpret_cast<const __nv_bfloat162*>(&w), bias);
+    return *reinterpret_cast<const unsigned*>(&h);
 }
 
 struct TernarySmallTSchedule {
@@ -122,15 +141,39 @@ void ternary_small_t_mma_kernel(const __nv_bfloat16* __restrict__ x,
     const int k_groups = k / kGroupK;
     const int groups_per_row = k / 128;
 
-    const auto stage_x = [&](int group_k0) {
-        constexpr int kItemsPerSplit = TileCols * (kTileK / 8);
-#pragma unroll 1
+    // Columns at or past the real token count are never stored by the epilogue, so staging them
+    // every group is pure waste -- and it is the larger half of the staging. A warp stages
+    // TileCols columns of its 128-wide K slice per group, so at T=3 the mma's eight-wide n axis
+    // makes five of those columns dead: 10 KB of the 16 KB a CTA moves per group, and it is
+    // re-moved on every one of the k/1024 group iterations. Measured on the 5120x17408 shape,
+    // small_t16 costs 30% more than small_t8 while doing identical work, which is this term.
+    //
+    // The dead columns still have to hold *something* the mma can read, so they are zeroed once
+    // before the group loop. They are outside the staging loop from then on, so the zero survives
+    // every group and no stale value from a previous kernel can reach an mma operand.
+    const int live_cols = tokens < TileCols ? tokens : TileCols;
+    constexpr int kItemsPerSplit = TileCols * (kTileK / 8);
+    if (live_cols < TileCols) {
         for (int item = lane; item < kItemsPerSplit; item += 32) {
+            const int col = item / (kTileK / 8);
+            const int k8  = item - col * (kTileK / 8);
+            if (col >= live_cols) {
+                *reinterpret_cast<int4*>(
+                    &x_shared[warp][col * kTileK + ternary_mma_swizzle(col, k8 * 8)]) =
+                    make_int4(0, 0, 0, 0);
+            }
+        }
+    }
+
+    const auto stage_x = [&](int group_k0) {
+        const int items = live_cols * (kTileK / 8);
+#pragma unroll 1
+        for (int item = lane; item < items; item += 32) {
             const int col = item / (kTileK / 8);
             const int k8  = item - col * (kTileK / 8);
             auto* dst     = &x_shared[warp][col * kTileK + ternary_mma_swizzle(col, k8 * 8)];
             const int kk  = group_k0 + warp * kTileK + k8 * 8;
-            if (col < tokens && kk + 8 <= k) {
+            if (kk + 8 <= k) {
                 cp_async<16>(dst, &x[static_cast<std::int64_t>(col) * k + kk]);
             } else {
                 *reinterpret_cast<int4*>(dst) = make_int4(0, 0, 0, 0);
@@ -187,18 +230,31 @@ void ternary_small_t_mma_kernel(const __nv_bfloat16* __restrict__ x,
         const int group_k0      = gi * kGroupK;
         float group_acc[kNt][4] = {};
 
+        // This lane's two code rows and its byte column within them, hoisted out of the K loop so
+        // that with the K axis unrolled every offset is a compile-time constant.
+        //
+        // The decode below is 24% of this kernel, measured by rebuilding with the arithmetic
+        // compiled out (gate_up then runs at 644 GB/s, the card's measured ceiling -- so the
+        // memory path is not what is left). Two ways to take more of it were tried and both lost:
+        // slicing whole words in registers instead of loading bytes, which trades two LDS for four
+        // shifts and costs 6% (0.055 against 0.052 on 5120x17408), and hoisting these row pointers
+        // still further, which changed nothing at all because nvcc had already done it. What
+        // remains is the byte assembly plus the perm, four times per K step, and it is issue-bound.
+        const std::uint8_t* const code_lo = &code_shared[gid][0];
+        const std::uint8_t* const code_hi = &code_shared[gid + 8][0];
+        const bool high  = (lid & 1) != 0;
+        const int  coff0 = warp * Schedule::kCodeBytesPerWarp + (lid >> 1);
+
 #pragma unroll
         for (int ks = 0; ks < kMmaKSteps; ++ks) {
             // A fragment: lane (gid, lid) needs rows gid and gid+8, columns 2*lid (already in the
             // low or high nibble of the byte) and 2*lid+8 (two bytes further along the row).
             // The warp offset is what selects this warp's own group out of the shared row.
-            const int byte_col = warp * Schedule::kCodeBytesPerWarp + ks * 4 + (lid >> 1);
-            const bool high    = (lid & 1) != 0;
-            const unsigned af0 = ternary_small_t_decode_half(code_shared[gid][byte_col], high);
-            const unsigned af1 = ternary_small_t_decode_half(code_shared[gid + 8][byte_col], high);
-            const unsigned af2 = ternary_small_t_decode_half(code_shared[gid][byte_col + 2], high);
-            const unsigned af3 =
-                ternary_small_t_decode_half(code_shared[gid + 8][byte_col + 2], high);
+            const int coff     = coff0 + ks * 4;
+            const unsigned af0 = ternary_small_t_decode_byte_bits(code_lo[coff], high);
+            const unsigned af1 = ternary_small_t_decode_byte_bits(code_hi[coff], high);
+            const unsigned af2 = ternary_small_t_decode_byte_bits(code_lo[coff + 2], high);
+            const unsigned af3 = ternary_small_t_decode_byte_bits(code_hi[coff + 2], high);
 #pragma unroll
             for (int nt = 0; nt < kNt; ++nt) {
                 unsigned bf0, bf1;
@@ -212,11 +268,12 @@ void ternary_small_t_mma_kernel(const __nv_bfloat16* __restrict__ x,
         }
 
         // The warp owned exactly one group, so its scale is a single fp32 multiply after the K
-        // reduction -- and the weights it multiplied against were exact.
+        // reduction -- and the weights it multiplied against were exact. The fragment carries
+        // 8*(weight), so the scale arrives premultiplied by 1/8 (see the decode's comment).
         const float top_scale =
-            __half2float(__ushort_as_half(scale_shared[gid][warp]));
+            __half2float(__ushort_as_half(scale_shared[gid][warp])) * kTernarySmallTDecodeUnit;
         const float bot_scale =
-            __half2float(__ushort_as_half(scale_shared[gid + 8][warp]));
+            __half2float(__ushort_as_half(scale_shared[gid + 8][warp])) * kTernarySmallTDecodeUnit;
 #pragma unroll
         for (int nt = 0; nt < kNt; ++nt) {
             acc[nt][0] = fmaf(group_acc[nt][0], top_scale, acc[nt][0]);
