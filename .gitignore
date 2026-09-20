@@ -17,3 +17,4 @@ fix_cost.py
 _build_*/
 __pycache__/
 *.pyc
+profiles/
