@@ -8,6 +8,7 @@
 #include "ops/linear/ternary/ternary_launch.h"
 #include "ops/linear/ternary/ternary_rowsplit_gemv.cuh"
 #include "ops/linear/ternary/ternary_rowsplit_mma.cuh"
+#include "ops/linear/ternary/ternary_rowsplit_mma_small_t.cuh"
 
 #include <cstdint>
 #include <cstdlib>
@@ -209,6 +210,31 @@ void launch_pq2_gemv_tile_block(const Tensor& x, const Weight& w, Tensor& out,
     else { shape(integral_constant<int, 4>{}, integral_constant<int, 8>{}); }
 }
 
+// The speculative verify pass (T = 2..4) gets its own tensor-core entry point, because the prefill
+// one tiles the token axis at 128 and would be 97% empty on three tokens. NINFER_TERNARY_VERIFY=tile
+// forces the SIMT token-tile GEMV back, as the A/B arm.
+bool verify_uses_small_t() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("NINFER_TERNARY_VERIFY");
+        return value == nullptr || std::string(value) != "tile";
+    }();
+    return enabled;
+}
+
+// A warp takes one whole 128-wide quant group, so K has to hold whole K groups.
+inline constexpr std::int32_t kSmallTGroupK = 8 * 128;
+
+void launch_small_t(const Tensor& x, const Weight& w, Tensor& out, std::int32_t out_row_stride,
+                    cudaStream_t stream) {
+    const std::int32_t rows = w.n;
+    const dim3 grid(static_cast<unsigned>(div_up(rows, TernarySmallTSchedule::kRowsPerCta)), 1u, 1u);
+    ternary_small_t_mma_kernel<8, 4><<<grid, TernarySmallTSchedule::kThreads, 0, stream>>>(
+        static_cast<const __nv_bfloat16*>(x.data), static_cast<const std::uint8_t*>(w.qdata),
+        static_cast<const std::uint8_t*>(w.scales), static_cast<__nv_bfloat16*>(out.data), rows,
+        w.k, x.ne[1], out_row_stride);
+    CUDA_CHECK(cudaGetLastError());
+}
+
 // The measured winner of the K=64 sweep on the target card: 64 output rows, a 128-token tile, 8
 // warps laid out 2x4, two cp.async stages, two CTAs per SM. It beat 64x64, 128x64, 16-warp and
 // 32-warp variants (37.0 ms against 41.4-54.8 on the 248320x5120 head at T=1024).
@@ -275,6 +301,10 @@ void launch_ternary_gemm_t8(const Tensor& x, const Weight& w, Tensor& out,
     // weight traffic. That is why raising the draft count, which amortises the per-group 2-bit
     // decode over more tokens, is the productive lever here; see the plan document.
     if (gemv_admits(x, w, 4)) {
+        if (verify_uses_small_t() && (w.k % kSmallTGroupK) == 0) {
+            launch_small_t(x, w, out, out_row_stride, stream);
+            return;
+        }
         launch_pq2_gemv_tile(x, w, out, out_row_stride, x.ne[1], stream);
         return;
     }
