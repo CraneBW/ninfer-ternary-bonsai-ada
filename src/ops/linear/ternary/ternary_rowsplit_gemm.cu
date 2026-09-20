@@ -162,7 +162,7 @@ void launch_pq2_gemv_tile_block(const Tensor& x, const Weight& w, Tensor& out,
     static const int rows_block = [] {
         const char* value = std::getenv("NINFER_TERNARY_ROWS");
         const int parsed  = value == nullptr ? 0 : std::atoi(value);
-        return (parsed == 1 || parsed == 2 || parsed == 4) ? parsed : 4;
+        return (parsed == 1 || parsed == 2 || parsed == 4 || parsed == 8) ? parsed : 4;
     }();
     static const int token_block = [] {
         const char* value = std::getenv("NINFER_TERNARY_TILE");
@@ -183,6 +183,9 @@ void launch_pq2_gemv_tile_block(const Tensor& x, const Weight& w, Tensor& out,
     else if (rows_block == 2 && token_block == 2) { shape(integral_constant<int, 2>{}, integral_constant<int, 2>{}); }
     else if (rows_block == 2 && token_block == 4) { shape(integral_constant<int, 2>{}, integral_constant<int, 4>{}); }
     else if (rows_block == 2) { shape(integral_constant<int, 2>{}, integral_constant<int, 8>{}); }
+    else if (rows_block == 8 && token_block == 2) { shape(integral_constant<int, 8>{}, integral_constant<int, 2>{}); }
+    else if (rows_block == 8 && token_block == 4) { shape(integral_constant<int, 8>{}, integral_constant<int, 4>{}); }
+    else if (rows_block == 8) { shape(integral_constant<int, 8>{}, integral_constant<int, 8>{}); }
     else if (token_block == 2) { shape(integral_constant<int, 4>{}, integral_constant<int, 2>{}); }
     else if (token_block == 4) { shape(integral_constant<int, 4>{}, integral_constant<int, 4>{}); }
     else { shape(integral_constant<int, 4>{}, integral_constant<int, 8>{}); }

@@ -40,6 +40,13 @@ inline constexpr int kGemvCodeBytesPerGroup  = 32;
 inline constexpr int kGemvScaleBytesPerGroup = 2;
 inline constexpr int kGemvGroupK             = 128;
 
+// Resident-CTA floor for the blocked prefill GEMV. Raising it forces ptxas to spend fewer
+// registers, which buys resident warps at the cost of some recomputation. Measured on the target
+// card: unpinned 116 regs -> 162.4 t/s, 3 CTAs 80 regs -> 175.4 t/s, 4 CTAs 64 regs -> 68.2 t/s.
+// The last one spills 268 bytes per thread and loses more than the occupancy gains, so 3 is the
+// measured optimum, not a conservative default.
+inline constexpr int kBlockMinCtasPerSm = 3;
+
 __device__ __forceinline__ float gemv_scale(const std::uint8_t* scale_ptr) {
     // One 16-bit load instead of two byte loads plus a shift/or; the scale plane is 2-byte aligned.
     const std::uint16_t bits = *reinterpret_cast<const std::uint16_t*>(scale_ptr);
@@ -187,22 +194,39 @@ void ternary_pq2_gemv_tile_kernel(const __nv_bfloat16* __restrict__ x,
 //
 // R=1,kT=8 gives 0.53; R=2,kT=8 gives 0.28; R=4,kT=4 gives 0.19. The cost is registers
 // (kR*kT accumulators plus 2*kT activation pairs), which is why both axes are capped small.
+//
+// The min-CTAs bound matters more than it looks. ptxas gives the 4x8 shape 116 registers
+// unpinned, which fits only two 256-thread CTAs per SM -- 16 of 48 warps. The T=1 GEMV below
+// runs 43 registers at ~83% occupancy, and this file's own note says occupancy is what the
+// GEMV family is tuned for. Pinning the bound makes ptxas trade registers for resident warps;
+// the measured effect is in the plan document.
 template <int kR, int kT>
-__global__ __launch_bounds__(kGemvWarpsPerBlock * 32)
+__global__ __launch_bounds__(kGemvWarpsPerBlock * 32, kBlockMinCtasPerSm)
 void ternary_pq2_gemv_tile_block_kernel(const __nv_bfloat16* __restrict__ x,
                                         const std::uint8_t* __restrict__ codes,
                                         const std::uint8_t* __restrict__ scales,
                                         __nv_bfloat16* __restrict__ out, std::int32_t rows,
                                         std::int32_t groups_per_row, std::int32_t tokens,
                                         std::int32_t out_row_stride) {
-    static_assert(kR >= 1 && kR <= 4, "row block must keep accumulators in registers");
+    static_assert(kR >= 1 && kR <= 8, "row block must keep accumulators in registers");
     static_assert(kT >= 1 && kT <= 8, "token block must keep accumulators in registers");
-    const int lane = static_cast<int>(threadIdx.x) & 31;
-    const int warp =
-        static_cast<int>(blockIdx.x) * kGemvWarpsPerBlock + (static_cast<int>(threadIdx.x) >> 5);
+    const int lane          = static_cast<int>(threadIdx.x) & 31;
+    const int warp_in_block = static_cast<int>(threadIdx.x) >> 5;
+    const int warp = static_cast<int>(blockIdx.x) * kGemvWarpsPerBlock + warp_in_block;
     const int row0    = warp * kR;
     const int token0  = static_cast<int>(blockIdx.y) * kT;
-    if (row0 >= rows) { return; }
+    // CTA-uniform early exit only: a per-warp exit here would leave the other warps waiting at the
+    // flush barrier below. A partially covered CTA (rows not a multiple of kR*warps) keeps every
+    // warp alive and guards its own work with `active` instead.
+    if (static_cast<int>(blockIdx.x) * kGemvWarpsPerBlock * kR >= rows) { return; }
+    const bool active = row0 < rows;
+
+    // Results land here first so the global write can be coalesced. Writing straight out from lane 0
+    // costs one 2-byte store per (row, token) -- 32 of them per warp, each its own 32-byte sector,
+    // which NCU flags as "only 2.0 of the 32 bytes transmitted per sector are utilized". A CTA owns
+    // a contiguous row range and a contiguous token range, so staging and flushing per token turns
+    // that into one 64-byte write per token.
+    __shared__ __nv_bfloat16 staged[kT][kGemvWarpsPerBlock * kR];
 
     float accumulator[kR][kT];
 #pragma unroll
@@ -211,7 +235,7 @@ void ternary_pq2_gemv_tile_block_kernel(const __nv_bfloat16* __restrict__ x,
         for (int t = 0; t < kT; ++t) { accumulator[r][t] = 0.0f; }
     }
 
-    for (int group = 0; group < groups_per_row; ++group) {
+    for (int group = 0; active && group < groups_per_row; ++group) {
         const std::int32_t base = group * kGemvGroupK + lane * 4;
 
         // Activations: loaded ONCE per group and reused by every row this warp owns. This is the
@@ -272,13 +296,27 @@ void ternary_pq2_gemv_tile_block_kernel(const __nv_bfloat16* __restrict__ x,
             for (int offset = 16; offset > 0; offset >>= 1) {
                 value += __shfl_down_sync(0xffffffffu, value, offset);
             }
-            const int row   = row0 + r;
-            const int token = token0 + t;
-            if (lane == 0 && row < rows && token < tokens) {
-                // Token-major output: element (row, token) lives at token * out_row_stride + row.
-                out[static_cast<std::int64_t>(token) * out_row_stride + row] =
-                    __float2bfloat16_rn(value);
+            if (lane == 0 && active) {
+                // Row order inside the CTA matches the global row order: warp_in_block owns rows
+                // [warp_in_block*kR, ...) of the block's contiguous range.
+                staged[t][warp_in_block * kR + r] = __float2bfloat16_rn(value);
             }
+        }
+    }
+    __syncthreads();
+
+    // Coalesced flush. Token-major output puts element (row, token) at token * out_row_stride + row,
+    // and this CTA owns one contiguous row range, so a fixed token is a contiguous run.
+    constexpr int kRowsPerBlock = kGemvWarpsPerBlock * kR;
+    const int row_base          = static_cast<int>(blockIdx.x) * kRowsPerBlock;
+#pragma unroll
+    for (int i = threadIdx.x; i < kT * kRowsPerBlock; i += kGemvWarpsPerBlock * 32) {
+        const int t     = i / kRowsPerBlock;
+        const int r     = i % kRowsPerBlock;
+        const int token = token0 + t;
+        const int row   = row_base + r;
+        if (token < tokens && row < rows) {
+            out[static_cast<std::int64_t>(token) * out_row_stride + row] = staged[t][r];
         }
     }
 }
