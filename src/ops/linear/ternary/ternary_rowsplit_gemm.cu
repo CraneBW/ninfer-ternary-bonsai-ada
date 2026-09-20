@@ -31,6 +31,7 @@ bool prefill_gemv_enabled() {
     return enabled;
 }
 
+
 // Decode (T == 1) takes the warp-per-row GEMV for PQ2_0. K is a whole number of 128-groups for
 // every width in this model, so that kernel needs no column guard.
 void launch_pq2_gemv(const Tensor& x, const Weight& w, Tensor& out, cudaStream_t stream) {
@@ -197,6 +198,20 @@ void launch_ternary_gemm_t8(const Tensor& x, const Weight& w, Tensor& out,
     // five of its eight token slots at that size and needs a 128-thread CTA plus seven barriers per
     // output row, which cost more than the whole decode step it was verifying. The small-tile GEMV
     // reads each weight once for all four tokens instead.
+    //
+    // The row-blocked kernel below was measured on this same path and LOST: routing T = 2..4 to it
+    // dropped the MTP decode from 43.0 to 32.8 t/s (en) and 57.7 to 43.9 (zh). NCU says why, and
+    // the reason rules the whole family out for the verify shape rather than just that one config.
+    // On the 248320-row head the tile kernel already sits at 95.47% achieved occupancy, 36
+    // registers and 78% SM throughput -- the ALU pipe ("integer and logic operations") is the top
+    // utilizer, 909e6 instructions in 1.70 ms against a 1.32 ms pure-issue floor. It is issue-bound
+    // with no occupancy left to buy, so trading registers for fewer loads can only lose: the same
+    // head under the row block runs at 63 registers, 65.67% occupancy and 47.95% SM throughput.
+    //
+    // The verify pass is nonetheless NOT re-reading weights -- nsys shows one forward pass, 401
+    // launches, against 407 for a T=1 decode step -- so the cost is per-token issue work, not
+    // weight traffic. That is why raising the draft count, which amortises the per-group 2-bit
+    // decode over more tokens, is the productive lever here; see the plan document.
     if (gemv_admits(x, w, 4)) {
         launch_pq2_gemv_tile(x, w, out, out_row_stride, x.ne[1], stream);
         return;
