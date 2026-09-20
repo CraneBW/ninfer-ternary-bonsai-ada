@@ -18,9 +18,14 @@ quantization of Bonsai 2 27B and lands it on **NINFER**'s Ada line, adding the t
 the ternary format needs and measuring every change on a physical RTX 4070 Ti SUPER.
 
 Ternary weights are packed `{−1, 0, +1}` at 2 bits per code plus one fp16 scale per 128-weight
-group — **2.125 bits per weight**. That is roughly half the weight traffic of a 4-bit format,
-which is the entire reason the numbers below are where they are: the model reads 7.12 GiB of
-weights per verify round, and the card reads at a measured 637 GB/s.
+group. This is the ternary family usually called **1.58-bit** — that figure is log₂3, the
+information content of a ternary symbol — while the format as stored costs **2.125 bits per
+weight** once the codes and their group scales are counted. Both numbers are correct and they
+measure different things; the second one is what the memory system actually pays.
+
+That is roughly half the weight traffic of a 4-bit format, which is the entire reason the numbers
+below are where they are: the model reads 7.12 GiB of weights per verify round, and the card reads
+at a measured 637 GB/s.
 
 | | |
 |---|---|
@@ -41,10 +46,31 @@ This work stands entirely on **NINFER** and the forks around it. In lineage orde
 | [natpate/ninfer-windows](https://github.com/natpate/ninfer-windows) | Win32/MSVC portability layer, unbuffered async I/O |
 | [headpiece747/ninfer-5090-windows](https://github.com/headpiece747/ninfer-5090-windows) | Native Windows MSVC compilation base |
 | [Don-Chad/ninfer-3090](https://github.com/Don-Chad/ninfer-3090) | Ampere work and early compatibility bridges |
-| **[Ambolio/ninfer-4090-windows](https://github.com/Ambolio/ninfer-4090-windows)** | **The direct base of this repository** — the Windows Ada line whose source tree this branch starts from |
+| **[Ambolio/ninfer-4090-windows](https://github.com/Ambolio/ninfer-4090-windows)** | **The direct base of the source tree** — the Windows Ada line this branch's engine code starts from |
 
-Model foundations (weights carry their own licenses): **Qwen Team** (Alibaba Cloud) for the Qwen3.8
-architecture, and the Bonsai 2 27B ternary quantization.
+Two of those are the direct inputs, and they deserve to be named before the rest:
+**[shensanshu/ninfer-ada-ternary](https://www.modelscope.cn/shensanshu/ninfer-ada-ternary)** on
+ModelScope (*"NInfer on Ada · 三元 Bonsai 2 27B 实战移植"*, Apache-2.0) is **the source of the ternary
+port itself** — its `patches/` are the engine-side changes, its `tools/` are the packer and the
+verification harness, and its `docs/` are the technical record. Ambolio's branch is where the engine
+source tree comes from.
+
+### Model weights — not distributed here
+
+The model is **Ternary Bonsai 2 27B**, built on `Qwen/Qwen3.8-27B` with the architecture unchanged
+and the weights quantized to ternary over a Hadamard-rotated basis. **Weight copyright belongs to
+its authors and publishers — PrismML and the upstream Qwen lineage — and this repository does not
+contain or redistribute any model weights.** Obtain them from the official channels and observe
+their own terms, which may not be Apache-2.0. A `.ninfer` artifact produced from them is a
+weight-derived work, so its redistribution obligations follow the *weight* licence, not this
+repository's.
+
+### Method references
+
+Ternary encode/decode semantics follow `ggml-quants.c` in the llama.cpp ecosystem. The folded
+Hadamard basis follows PrismML's published runtime and its `prism.hadamard.*` metadata contract.
+The tensor-core FWT design was informed by the public HadaCore and TurboQuant work. These are
+method references only; the code here is an independent implementation.
 
 The upstream `NOTICE` and `LICENSE` are retained verbatim. Every file this branch modifies carries a
 prominent notice at the top, as Apache-2.0 §4(b) requires.
