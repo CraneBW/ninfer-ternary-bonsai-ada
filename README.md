@@ -1,3 +1,6 @@
+[![English](https://img.shields.io/badge/Language-English-2ea44f?style=flat-square)](README.md)
+[![简体中文](https://img.shields.io/badge/Language-%E7%AE%80%E4%BD%93%E4%B8%AD%E6%96%87-d73a49?style=flat-square)](README.zh-CN.md)
+
 # Ternary Bonsai 2 27B on **NINFER** (Ada / `sm_89`, Linux)
 
 > A **ternary — 2.125 bits per weight — quantization port** of Bonsai 2 27B onto the **NINFER**
