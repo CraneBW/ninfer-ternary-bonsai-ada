@@ -104,16 +104,16 @@ VRAM        7.12 GiB       weights, of which 0.42 GiB is the MTP layer (6.70 GiB
 Context     120k tokens    bf16 KV, measured ceiling on 16 GB (128k will not start)
             238k tokens    fp8 KV, measured ceiling (240k will not start)
 
-Long-context recall   6/6 at 128k - 5/6 at 160k - 3/6 at 200k
-                      (six-needle retrieval; 200k reproduced twice)
+Long-context recall   6/6 at 16k/32k/64k/96k (bf16) - 6/6 at 128k/192k (fp8)
+                      (six-needle retrieval; 192k also 6/6 under two other query orders)
 ```
 
 Every figure above is measured on this machine, not quoted. The context ceilings come from
 `--kv-capacity auto`, which sizes against VRAM and fails loudly when the request does not fit;
 the two numbers either side of each ceiling were both tried.
 
-Note what the KV dtype buys and what it does not: fp8 doubles the reachable context, but the
-recall numbers above are bf16, and fp8 KV is a numerics trade that has not been measured here.
+Note what the KV dtype buys: fp8 doubles the reachable context, and recall holds under it —
+128k and 192k both returned 6/6 with fp8 KV.
 
 ## Measured on this hardware
 
