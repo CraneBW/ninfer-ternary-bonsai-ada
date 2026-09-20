@@ -16,8 +16,13 @@
 **NINFER** 的 Ada 线上，补上三元格式需要的 tensor-core 路径，并且每一处改动都在实机
 （RTX 4070 Ti SUPER）上量过。
 
-三元权重按 `{−1, 0, +1}` 打包成每码 2 bit，外加每 128 权重一组一个 fp16 scale ——
-**每权重 2.125 bit**。这大约是 4-bit 格式一半的权重流量，也正是下面那些数字的来源：
+三元权重按 `{−1, 0, +1}` 打包成每码 2 bit，外加每 128 权重一组一个 fp16 scale。
+
+这里有两个容易混的数：这类三元权重通常被称作 **1.58-bit**，那是 **log₂3** —— 一个三元符号的
+信息量；而**实际存储**代价（把码和分组 scale 都算上）是 **每权重 2.125 bit**。
+两个数都对，量的是不同的东西——**内存系统真正付出的是后一个**。
+
+这大约是 4-bit 格式一半的权重流量，也正是下面那些数字的来源：
 模型每验证轮要读 7.12 GiB 权重，而这张卡的实测读带宽是 637 GB/s。
 
 | | |
@@ -39,9 +44,27 @@
 | [natpate/ninfer-windows](https://github.com/natpate/ninfer-windows) | Win32/MSVC 可移植层、无缓冲异步 I/O |
 | [headpiece747/ninfer-5090-windows](https://github.com/headpiece747/ninfer-5090-windows) | 原生 Windows MSVC 编译基座 |
 | [Don-Chad/ninfer-3090](https://github.com/Don-Chad/ninfer-3090) | Ampere 早期工作与兼容桥接 |
-| **[Ambolio/ninfer-4090-windows](https://github.com/Ambolio/ninfer-4090-windows)** | **本仓库的直接基座** —— 本分支的源码树从这里开始 |
+| **[Ambolio/ninfer-4090-windows](https://github.com/Ambolio/ninfer-4090-windows)** | **源码树的直接基座** —— 本分支的引擎代码从这里开始 |
 
-模型基础（权重各自持有许可证）：**Qwen Team**（阿里云）的 Qwen3.8 架构，以及 Bonsai 2 27B 的三元量化。
+上面两条是本仓库的**直接输入**，应当排在其余之前单独点名：
+
+- **[shensanshu/ninfer-ada-ternary](https://www.modelscope.cn/shensanshu/ninfer-ada-ternary)（魔搭 ModelScope）**
+  —— 标题《NInfer on Ada · 三元 Bonsai 2 27B 实战移植》，Apache-2.0。**三元移植本身的出处**：
+  它的 `patches/` 是引擎侧改动、`tools/` 是打包器与验证工具、`docs/` 是技术记录。
+- **Ambolio/ninfer-4090-windows** —— 引擎源码树的来源。
+
+### 模型权重：本仓不分发
+
+模型是 **Ternary Bonsai 2 27B**，底座 `Qwen/Qwen3.8-27B`，架构未改，权重为三元量化 + Hadamard 旋转基。
+**权重版权归其原作者与发布方所有 —— PrismML 及其上游 Qwen 体系 —— 本仓库不包含、也不重新分发任何模型权重。**
+请自行从官方渠道获取，并遵守其各自的许可条款（可能并非 Apache-2.0）。由权重产出的 `.ninfer`
+制品属于**权重派生品**，其再分发义务**以权重原许可为准，与代码许可无关**。
+
+### 方法参考
+
+三元编解码语义对齐 llama.cpp 生态的 `ggml-quants.c`；折叠 Hadamard 基的语义参考 PrismML 的公开运行时
+与其 `prism.hadamard.*` 元数据契约；张量核 FWT 的设计思路受公开的 HadaCore / TurboQuant 工作启发。
+以上仅为**方法参考**，本仓代码为独立实现。
 
 上游的 `NOTICE` 与 `LICENSE` 原样保留。本分支修改过的每个文件都在顶部带上显著声明，
 这是 Apache-2.0 §4(b) 的要求。
