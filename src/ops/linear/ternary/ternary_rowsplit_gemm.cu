@@ -7,6 +7,7 @@
 #include "ops/common/math.h"
 #include "ops/linear/ternary/ternary_launch.h"
 #include "ops/linear/ternary/ternary_rowsplit_gemv.cuh"
+#include "ops/linear/ternary/ternary_rowsplit_mma.cuh"
 
 #include <cstdint>
 #include <cstdlib>
@@ -18,17 +19,28 @@
 namespace ninfer::ops::detail {
 namespace {
 
-// NINFER_TERNARY_PREFILL=ref forces the correctness-first reference kernel for every T >= 5, so a
-// two-run A/B can qualify the token-blocked GEMV against it engine-side. That comparison is the
-// only one that can catch a token-tile or activation-layout error: at T == 1 the token-major and
+// Which kernel serves prefill (T >= 5).
+//
+//   unset / mma  tensor-core path (ternary_rowsplit_mma.cuh) -- the measured default
+//   block        token-blocked SIMT GEMV, kept as the fallback and as an A/B arm
+//   ref          the correctness-first reference kernel, the oracle for both
+//
+// A two-run A/B against `ref` is what qualifies a new path engine-side: it is the only comparison
+// that can catch a token-tile or activation-layout error, because at T == 1 the token-major and
 // row-major activation layouts coincide exactly. Read once, because the choice decides which
 // kernel enters a captured CUDA graph.
-bool prefill_gemv_enabled() {
-    static const bool enabled = [] {
+enum class PrefillRoute { Mma, Block, Reference };
+
+PrefillRoute prefill_route() {
+    static const PrefillRoute route = [] {
         const char* value = std::getenv("NINFER_TERNARY_PREFILL");
-        return value == nullptr || std::string(value) != "ref";
+        if (value == nullptr) { return PrefillRoute::Mma; }
+        const std::string text(value);
+        if (text == "ref") { return PrefillRoute::Reference; }
+        if (text == "block") { return PrefillRoute::Block; }
+        return PrefillRoute::Mma;
     }();
-    return enabled;
+    return route;
 }
 
 
@@ -192,6 +204,40 @@ void launch_pq2_gemv_tile_block(const Tensor& x, const Weight& w, Tensor& out,
     else { shape(integral_constant<int, 4>{}, integral_constant<int, 8>{}); }
 }
 
+// The measured winner of the K=64 sweep on the target card: 64 output rows, a 128-token tile, 8
+// warps laid out 2x4, two cp.async stages, two CTAs per SM. It beat 64x64, 128x64, 16-warp and
+// 32-warp variants (37.0 ms against 41.4-54.8 on the 248320x5120 head at T=1024).
+using TernaryMmaPrefillSchedule = TernaryMmaSchedule<64, 128, 64, 32, 32, 2, 2>;
+
+// A token tile narrower than half the block wastes the pipeline, so short verification-shaped T
+// stays on the SIMT path even though the kernel would be correct there.
+inline constexpr std::int32_t kMmaMinTokens = 64;
+
+template <class Schedule>
+void launch_ternary_mma(const Tensor& x, const Weight& w, Tensor& out,
+                        std::int32_t out_row_stride, cudaStream_t stream) {
+    const std::int32_t rows   = w.n;
+    const std::int32_t k      = w.k;
+    const std::int32_t tokens = x.ne[1];
+    const dim3 grid(static_cast<unsigned>(div_up(rows, Schedule::kBlockRows)),
+                    static_cast<unsigned>(div_up(tokens, Schedule::kBlockCols)), 1u);
+    const bool full = (rows % Schedule::kBlockRows) == 0 && (tokens % Schedule::kBlockCols) == 0;
+
+    const auto* x_ptr     = static_cast<const __nv_bfloat16*>(x.data);
+    const auto* codes     = static_cast<const std::uint8_t*>(w.qdata);
+    const auto* scales    = static_cast<const std::uint8_t*>(w.scales);
+    auto* out_ptr         = static_cast<__nv_bfloat16*>(out.data);
+
+    if (full) {
+        ternary_rowsplit_mma_kernel<Schedule, true><<<grid, Schedule::kThreads, 0, stream>>>(
+            x_ptr, codes, scales, out_ptr, rows, k, tokens, w.padded_shape[1], out_row_stride);
+    } else {
+        ternary_rowsplit_mma_kernel<Schedule, false><<<grid, Schedule::kThreads, 0, stream>>>(
+            x_ptr, codes, scales, out_ptr, rows, k, tokens, w.padded_shape[1], out_row_stride);
+    }
+    CUDA_CHECK(cudaGetLastError());
+}
+
 void launch_ternary_gemm_t8(const Tensor& x, const Weight& w, Tensor& out,
                             std::int32_t out_row_stride, cudaStream_t stream) {
     // The speculative verify pass runs T = draft + 1 (2..4 here). The reference tiled kernel wastes
@@ -217,12 +263,22 @@ void launch_ternary_gemm_t8(const Tensor& x, const Weight& w, Tensor& out,
         return;
     }
     // Prefill reaches this branch with T >= 128: the CLI requires the prefill chunk to be a
-    // multiple of 128, so the verify-shaped entry above never covers it. Dispatch to the
-    // token-blocked GEMV instead of the correctness-first reference kernel, which measured 7% of
-    // the card's sustained read ceiling where the GEMV shape reaches 66% on the same weights.
-    // NINFER_TERNARY_PREFILL=ref forces the reference kernel, so an A/B run can qualify the two
-    // engine-side (T = 1 alone cannot catch a token-tile or layout error).
-    if (prefill_gemv_enabled() &&
+    // multiple of 128, so the verify-shaped entry above never covers it.
+    //
+    // The tensor-core path is the default because the SIMT one is issue-bound and has no occupancy
+    // left: NCU on the 248320-row head put the token-blocked GEMV at 95.47% occupancy, ALU the top
+    // pipe, and 909e6 instructions against a 1.32 ms pure-issue floor. Measured across every
+    // prefill shape in this model at T=1024, MMA is 8.3-9.8x faster than that GEMV.
+    if (prefill_route() == PrefillRoute::Mma && x.ne[1] >= kMmaMinTokens &&
+        gemv_admits(x, w, std::numeric_limits<std::int32_t>::max())) {
+        launch_ternary_mma<TernaryMmaPrefillSchedule>(x, w, out, out_row_stride, stream);
+        return;
+    }
+    // Fallback and A/B arm. It still beats the correctness-first reference kernel, which measured
+    // 7% of the card's sustained read ceiling where the GEMV shape reaches 66% on the same
+    // weights. NINFER_TERNARY_PREFILL=ref forces the reference kernel, so an A/B run can qualify
+    // either fast path engine-side (T = 1 alone cannot catch a token-tile or layout error).
+    if (prefill_route() != PrefillRoute::Reference &&
         gemv_admits(x, w, std::numeric_limits<std::int32_t>::max())) {
         launch_pq2_gemv_tile_block(x, w, out, out_row_stride, stream);
         return;
