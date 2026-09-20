@@ -6,6 +6,7 @@
 #include <cuda_bf16.h>
 
 #include <cstdint>
+#include <cstdlib>
 #include <stdexcept>
 #include <type_traits>
 
@@ -66,6 +67,18 @@ void launch_recurrent_batch_update_fixed(const Tensor& q, const Tensor& k, const
     CUDA_CHECK(cudaGetLastError());
 }
 
+// Residency target for the record kernel. See the note on the kernel itself: it moves ~148 MB of
+// state a round at 265 GB/s, and the question is whether that is a register/occupancy limit or the
+// serial dependency chain of the recurrence. Env-selectable so one build can answer it.
+int record_min_blocks() {
+    static const int mb = [] {
+        const char* value = std::getenv("NINFER_GDN_RECORD_MINBLOCKS");
+        const int parsed  = value == nullptr ? 0 : std::atoi(value);
+        return (parsed == 2 || parsed == 6 || parsed == 8) ? parsed : 2;
+    }();
+    return mb;
+}
+
 template <bool Masked>
 void launch_recurrent_record_fixed(const Tensor& q, const Tensor& k, const Tensor& v,
                                    const Tensor& g, const Tensor& beta, float scale,
@@ -97,7 +110,11 @@ void launch_recurrent_record_fixed(const Tensor& q, const Tensor& k, const Tenso
         state_slot_stride,
         scale,
     };
-    recurrent_record_kernel<Masked><<<grid, block, 0, stream>>>(access);
+    switch (record_min_blocks()) {
+    case 6: recurrent_record_kernel<Masked, 6><<<grid, block, 0, stream>>>(access); break;
+    case 8: recurrent_record_kernel<Masked, 8><<<grid, block, 0, stream>>>(access); break;
+    default: recurrent_record_kernel<Masked><<<grid, block, 0, stream>>>(access); break;
+    }
     CUDA_CHECK(cudaGetLastError());
 }
 

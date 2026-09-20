@@ -672,8 +672,29 @@ __global__ void __launch_bounds__(kWarpSize* kNumWarps, 2)
     store_state_tile(state, access.state_write_base(coord), coord);
 }
 
-template <bool Masked>
-__global__ void __launch_bounds__(kWarpSize* kNumWarps, 2)
+// kMinBlocks is a knob rather than the file's constant 2 because the obvious suspicion here was
+// residency, and it has now been measured: it is WRONG.
+//
+// This kernel reads a whole layer's recurrent state (kValueHeads * kStateDim^2 floats) to produce
+// the per-token records -- about 148 MB a round over 48 launches -- and it moves that at 265 GB/s,
+// 42% of the card's measured ceiling. ptxas picks 112 registers under launch_bounds(..., 2), which
+// caps residency at four 128-thread blocks per SM, 16 of 48 warps, so occupancy looked like the
+// constraint. Forcing it down (verified with cuobjdump, no spills in either arm) and re-running
+// the engine twice gives:
+//
+//     minblocks=2  REG:112  16 warps/SM   100.8 / 100.5 tok/s
+//     minblocks=6  REG:80   24 warps/SM   100.4 / 100.2
+//     minblocks=8  REG:64   32 warps/SM    99.3 /  99.2
+//
+// Monotone in the wrong direction, consistently across both passes, acceptance bit-identical. The
+// kernel is limited by the dependency chain in run_recurrent_sequence -- the accepted tokens are
+// walked in order, each step needing the previous state -- so extra warps only idle, while the
+// registers ptxas gives up to make room for them cost more than the residency buys. Same shape of
+// result as kBlockMinCtasPerSm in the ternary gemv, and the same conclusion: default 2, do not
+// raise it. The switch is kept so the next person can re-run the A/B rather than re-add the arm.
+// 4 is deliberately absent -- it caps registers at 128, which ptxas already satisfies at 112.
+template <bool Masked, int kMinBlocks = 2>
+__global__ void __launch_bounds__(kWarpSize* kNumWarps, kMinBlocks)
     recurrent_record_kernel(RecordAccess<Masked> access) {
     const RecurrentCoordinates coord = access.coordinates();
     const std::int32_t valid         = access.active_columns(coord);
