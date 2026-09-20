@@ -74,6 +74,22 @@ __device__ __forceinline__ unsigned ternary_small_t_decode_pair(std::uint32_t v,
     return *reinterpret_cast<const unsigned*>(&h);
 }
 
+// Rows per CTA is the lever that sets this kernel's load mix, and the ratio is not guessable from
+// the shape. Per K group a CTA stages
+//
+//     codes       = kRowsPerCta * kGroupK / 4        bytes, from DRAM (each row is read once)
+//     activations = kGroupK * live_cols * 2          bytes, from L2 (every CTA reads the same slice)
+//
+// so activations/codes = 8 * live_cols / kRowsPerCta. At 16 rows and 4 live tokens that is 2.0 --
+// the activations are TWICE the weight traffic -- and measured, four shapes with wildly different
+// grids (2176, 320, 384, 256 CTAs) and group counts (5, 17, 5, 5) all land on the same 1.3-1.6 TB/s
+// of COMBINED traffic. That is an L2 ceiling, not the measured 637 GB/s DRAM one, and it shows up
+// as DRAM rates of only 453-571 GB/s. Raising the row block to 32 takes the ratio to 1.0, which
+// puts the L2 ceiling at ~2x1.45 TB/s and leaves DRAM as the binding constraint again.
+//
+// The row block is a kernel template parameter rather than a member of a templated schedule
+// because templating the struct makes cudafe++ die outright under this build's -rdc=true
+// ("memory region allocation must not occur after front end processing has ended").
 struct TernarySmallTSchedule {
     static constexpr int kKWarps            = 8;
     static constexpr int kTileKPerWarp      = 128; // exactly one ternary quant group
@@ -100,7 +116,8 @@ struct TernarySmallTSchedule {
 
 // TileCols is the token tile; mma n is 8, so 8 is the smallest useful value and is what the verify
 // pass (T <= 4) uses. A larger tile amortises the weight decode over more tokens.
-template <int TileCols, int LaunchBoundsMinBlocks>
+template <int TileCols, int LaunchBoundsMinBlocks,
+          int kRowsPerCta = TernarySmallTSchedule::kRowsPerCta>
 __launch_bounds__(TernarySmallTSchedule::kThreads, LaunchBoundsMinBlocks) __global__
 void ternary_small_t_mma_kernel(const __nv_bfloat16* __restrict__ x,
                                 const std::uint8_t* __restrict__ codes,
@@ -110,13 +127,26 @@ void ternary_small_t_mma_kernel(const __nv_bfloat16* __restrict__ x,
                                 std::int32_t out_row_stride) {
     using Schedule = TernarySmallTSchedule;
     static_assert(TileCols >= 8 && TileCols <= 32 && (TileCols % 8) == 0);
+    static_assert(kRowsPerCta % TernarySmallTSchedule::kKWarps == 0,
+                  "rows per CTA must divide evenly over the warps");
 
     constexpr int kWarps     = Schedule::kKWarps;
     constexpr int kTileK     = Schedule::kTileKPerWarp;
     constexpr int kGroupK    = Schedule::kGroupK;
-    constexpr int kRowsPerCta = Schedule::kRowsPerCta;
     constexpr int kNt        = TileCols / 8;
     constexpr int kMmaKSteps = Schedule::kMmaKSteps;
+    // mma m is 16, so one A-fragment pass covers exactly 16 output rows; a wider CTA owns several
+    // such row blocks and runs the SAME staged activations against each of them. That reuse is the
+    // entire point of the parameter -- activations are L2-resident and cost more of the load pipe
+    // than the codes do.
+    constexpr int kRowBlock   = 16;
+    constexpr int kRowBlocks  = kRowsPerCta / kRowBlock;
+    // Derived from the template parameter, NOT from Schedule: the schedule's own
+    // kRowsPerLoaderWarp is pinned at 16/8 and silently stages only half the rows when the
+    // kernel is instantiated at a wider row block. That reads as a 1.6x speedup with wrong
+    // output, which is exactly the shape of bug the harness comparison is here to catch.
+    constexpr int kRowsPerLoaderWarp = kRowsPerCta / kWarps;
+    static_assert((kRowsPerCta % kRowBlock) == 0, "rows per CTA must be a whole number of mma m-tiles");
 
     union SharedStorage {
         struct {
@@ -124,7 +154,7 @@ void ternary_small_t_mma_kernel(const __nv_bfloat16* __restrict__ x,
             __nv_bfloat16 activations[kWarps][TileCols * kTileK];
             std::uint16_t scales[kRowsPerCta][kWarps];
         } staging;
-        float partial[kWarps * kNt * 32 * 4];
+        float partial[kRowBlocks * kWarps * kNt * 32 * 4];
     };
     __shared__ __align__(16) SharedStorage shared;
     auto& code_shared  = shared.staging.codes;
@@ -186,10 +216,10 @@ void ternary_small_t_mma_kernel(const __nv_bfloat16* __restrict__ x,
     const auto stage_weight = [&](int group_k0) {
         constexpr int kChunksPerRow = Schedule::kCodeRowBytes / 16;
 #pragma unroll
-        for (int item = lane; item < Schedule::kRowsPerLoaderWarp * kChunksPerRow; item += 32) {
+        for (int item = lane; item < kRowsPerLoaderWarp * kChunksPerRow; item += 32) {
             const int row_item = item / kChunksPerRow;
             const int chunk    = item - row_item * kChunksPerRow;
-            const int row      = warp * Schedule::kRowsPerLoaderWarp + row_item;
+            const int row      = warp * kRowsPerLoaderWarp + row_item;
             const int grow     = row0 + row;
             auto* dst          = &code_shared[row][chunk * 16];
             if (grow < rows) {
@@ -216,7 +246,7 @@ void ternary_small_t_mma_kernel(const __nv_bfloat16* __restrict__ x,
 
     const int b_rin     = lane & 7;
     const int b_koff    = ((lane >> 3) & 1) << 3;
-    float acc[kNt][4]   = {};
+    float acc[kRowBlocks][kNt][4] = {};
 
     stage_weight(0);
     stage_x(0);
@@ -227,6 +257,10 @@ void ternary_small_t_mma_kernel(const __nv_bfloat16* __restrict__ x,
 #pragma unroll 1
     for (int gi = 0; gi < k_groups; ++gi) {
         const int group_k0      = gi * kGroupK;
+
+#pragma unroll
+        for (int rb = 0; rb < kRowBlocks; ++rb) {
+        const int r0            = rb * kRowBlock;
         float group_acc[kNt][4] = {};
 
         // This lane's two code rows and its byte column within them, hoisted out of the K loop so
@@ -239,8 +273,8 @@ void ternary_small_t_mma_kernel(const __nv_bfloat16* __restrict__ x,
         // shifts and costs 6% (0.055 against 0.052 on 5120x17408), and hoisting these row pointers
         // still further, which changed nothing at all because nvcc had already done it. What
         // remains is the byte assembly plus the perm, four times per K step, and it is issue-bound.
-        const std::uint8_t* const code_lo = &code_shared[gid][0];
-        const std::uint8_t* const code_hi = &code_shared[gid + 8][0];
+        const std::uint8_t* const code_lo = &code_shared[r0 + gid][0];
+        const std::uint8_t* const code_hi = &code_shared[r0 + gid + 8][0];
         const unsigned nibble = lid & 1;
         const int coff0       = warp * Schedule::kCodeBytesPerWarp + (lid >> 1);
 
@@ -269,16 +303,17 @@ void ternary_small_t_mma_kernel(const __nv_bfloat16* __restrict__ x,
         // The warp owned exactly one group, so its scale is a single fp32 multiply after the K
         // reduction -- and the weights it multiplied against were exact.
         const float top_scale =
-            __half2float(__ushort_as_half(scale_shared[gid][warp]));
+            __half2float(__ushort_as_half(scale_shared[r0 + gid][warp]));
         const float bot_scale =
-            __half2float(__ushort_as_half(scale_shared[gid + 8][warp]));
+            __half2float(__ushort_as_half(scale_shared[r0 + gid + 8][warp]));
 #pragma unroll
         for (int nt = 0; nt < kNt; ++nt) {
-            acc[nt][0] = fmaf(group_acc[nt][0], top_scale, acc[nt][0]);
-            acc[nt][1] = fmaf(group_acc[nt][1], top_scale, acc[nt][1]);
-            acc[nt][2] = fmaf(group_acc[nt][2], bot_scale, acc[nt][2]);
-            acc[nt][3] = fmaf(group_acc[nt][3], bot_scale, acc[nt][3]);
+            acc[rb][nt][0] = fmaf(group_acc[nt][0], top_scale, acc[rb][nt][0]);
+            acc[rb][nt][1] = fmaf(group_acc[nt][1], top_scale, acc[rb][nt][1]);
+            acc[rb][nt][2] = fmaf(group_acc[nt][2], bot_scale, acc[rb][nt][2]);
+            acc[rb][nt][3] = fmaf(group_acc[nt][3], bot_scale, acc[rb][nt][3]);
         }
+        } // row block
 
         if (gi + 1 < k_groups) {
             __syncthreads();
@@ -292,27 +327,40 @@ void ternary_small_t_mma_kernel(const __nv_bfloat16* __restrict__ x,
 
     __syncthreads();
     auto* partial = shared.partial;
-    if ((warp & 1) != 0) {
+    // partial is indexed [rb][warp][kNt][lane], so each row block reduces over the same eight
+    // warps independently. The tree is otherwise untouched -- only the slot addressing moved.
+    const auto pslot = [&](int rb, int w, int nt) {
+        return partial + (((rb * kWarps + w) * kNt + nt) * 32 + lane) * 4;
+    };
+
 #pragma unroll
-        for (int nt = 0; nt < kNt; ++nt) {
-            store_vec(partial + ((warp * kNt + nt) * 32 + lane) * 4,
-                      make_float4(acc[nt][0], acc[nt][1], acc[nt][2], acc[nt][3]));
+    for (int rb = 0; rb < kRowBlocks; ++rb) {
+        if ((warp & 1) != 0) {
+#pragma unroll
+            for (int nt = 0; nt < kNt; ++nt) {
+                store_vec(pslot(rb, warp, nt),
+                          make_float4(acc[rb][nt][0], acc[rb][nt][1], acc[rb][nt][2],
+                                      acc[rb][nt][3]));
+            }
         }
     }
     __syncthreads();
 
-    if ((warp & 1) == 0) {
 #pragma unroll
-        for (int nt = 0; nt < kNt; ++nt) {
-            const float4 partner =
-                load_vec<float4>(partial + (((warp + 1) * kNt + nt) * 32 + lane) * 4);
-            acc[nt][0] += partner.x;
-            acc[nt][1] += partner.y;
-            acc[nt][2] += partner.z;
-            acc[nt][3] += partner.w;
-            if (warp != 0) {
-                store_vec(partial + ((warp * kNt + nt) * 32 + lane) * 4,
-                          make_float4(acc[nt][0], acc[nt][1], acc[nt][2], acc[nt][3]));
+    for (int rb = 0; rb < kRowBlocks; ++rb) {
+        if ((warp & 1) == 0) {
+#pragma unroll
+            for (int nt = 0; nt < kNt; ++nt) {
+                const float4 partner = load_vec<float4>(pslot(rb, warp + 1, nt));
+                acc[rb][nt][0] += partner.x;
+                acc[rb][nt][1] += partner.y;
+                acc[rb][nt][2] += partner.z;
+                acc[rb][nt][3] += partner.w;
+                if (warp != 0) {
+                    store_vec(pslot(rb, warp, nt),
+                              make_float4(acc[rb][nt][0], acc[rb][nt][1], acc[rb][nt][2],
+                                          acc[rb][nt][3]));
+                }
             }
         }
     }
@@ -320,20 +368,22 @@ void ternary_small_t_mma_kernel(const __nv_bfloat16* __restrict__ x,
 
     if (warp == 0) {
 #pragma unroll
+        for (int rb = 0; rb < kRowBlocks; ++rb) {
+#pragma unroll
         for (int nt = 0; nt < kNt; ++nt) {
-            float4 sum = make_float4(acc[nt][0], acc[nt][1], acc[nt][2], acc[nt][3]);
+            float4 sum = make_float4(acc[rb][nt][0], acc[rb][nt][1], acc[rb][nt][2],
+                                     acc[rb][nt][3]);
 #pragma unroll
             for (int split = 2; split < kWarps; split += 2) {
-                const float4 value =
-                    load_vec<float4>(partial + ((split * kNt + nt) * 32 + lane) * 4);
+                const float4 value = load_vec<float4>(pslot(rb, split, nt));
                 sum.x += value.x;
                 sum.y += value.y;
                 sum.z += value.z;
                 sum.w += value.w;
             }
             const int col0 = nt * 8 + 2 * lid;
-            const int row_lo = row0 + gid;
-            const int row_hi = row0 + gid + 8;
+            const int row_lo = row0 + rb * kRowBlock + gid;
+            const int row_hi = row0 + rb * kRowBlock + gid + 8;
             if (col0 < tokens && row_lo < rows) {
                 out[static_cast<std::int64_t>(col0) * out_row_stride + row_lo] =
                     __float2bfloat16_rn(sum.x);
@@ -351,6 +401,7 @@ void ternary_small_t_mma_kernel(const __nv_bfloat16* __restrict__ x,
                     __float2bfloat16_rn(sum.w);
             }
         }
+        } // row block
     }
 }
 

@@ -224,14 +224,47 @@ bool verify_uses_small_t() {
 // A warp takes one whole 128-wide quant group, so K has to hold whole K groups.
 inline constexpr std::int32_t kSmallTGroupK = 8 * 128;
 
+// Row block per CTA, i.e. how many mma m-tiles share one activation staging. 16 is the shape the
+// kernel was written at and stays the reference; 32 and 48 exist because activations cost more of
+// the load pipe than codes do, so widening the block should leave that cost flat while the codes
+// grow. Measured on the six verify shapes at tokens=4 that is worth 6-15% on the largest one
+// (34816x5120: 84 -> 77 -> 71 us) and is inside noise on the rest -- a net ~0.5-0.9 ms a round,
+// which is small enough that the engine-level A/B, not the kernel harness, decides it.
+//
+// It is NOT the free win the load-mix argument predicts: dropping activation traffic by a third
+// only moved the effective rate from 453 to 480 GB/s against a 637 GB/s ceiling, so the kernel is
+// not L2-bandwidth-bound after all. Kept env-selectable rather than hardcoded for that reason.
+int small_t_rows_per_cta() {
+    static const int rows = [] {
+        const char* value = std::getenv("NINFER_TERNARY_SMALL_T_ROWS");
+        const int parsed  = value == nullptr ? 0 : std::atoi(value);
+        return (parsed == 16 || parsed == 32 || parsed == 48) ? parsed : 32;
+    }();
+    return rows;
+}
+
 void launch_small_t(const Tensor& x, const Weight& w, Tensor& out, std::int32_t out_row_stride,
                     cudaStream_t stream) {
     const std::int32_t rows = w.n;
-    const dim3 grid(static_cast<unsigned>(div_up(rows, TernarySmallTSchedule::kRowsPerCta)), 1u, 1u);
-    ternary_small_t_mma_kernel<8, 4><<<grid, TernarySmallTSchedule::kThreads, 0, stream>>>(
-        static_cast<const __nv_bfloat16*>(x.data), static_cast<const std::uint8_t*>(w.qdata),
-        static_cast<const std::uint8_t*>(w.scales), static_cast<__nv_bfloat16*>(out.data), rows,
-        w.k, x.ne[1], out_row_stride);
+    const auto* x_ptr       = static_cast<const __nv_bfloat16*>(x.data);
+    const auto* codes       = static_cast<const std::uint8_t*>(w.qdata);
+    const auto* scales      = static_cast<const std::uint8_t*>(w.scales);
+    auto* out_ptr           = static_cast<__nv_bfloat16*>(out.data);
+    const auto grid_for     = [rows](int row_block) {
+        return dim3(static_cast<unsigned>(div_up(rows, row_block)), 1u, 1u);
+    };
+    const auto args = [&](auto tag) {
+        constexpr int kRows = decltype(tag)::value;
+        ternary_small_t_mma_kernel<8, (kRows == 16 ? 4 : (kRows == 32 ? 3 : 2)), kRows>
+            <<<grid_for(kRows), TernarySmallTSchedule::kThreads, 0, stream>>>(
+                x_ptr, codes, scales, out_ptr, rows, w.k, x.ne[1], out_row_stride);
+    };
+    using std::integral_constant;
+    switch (small_t_rows_per_cta()) {
+    case 16: args(integral_constant<int, 16>{}); break;
+    case 48: args(integral_constant<int, 48>{}); break;
+    default: args(integral_constant<int, 32>{}); break;
+    }
     CUDA_CHECK(cudaGetLastError());
 }
 
