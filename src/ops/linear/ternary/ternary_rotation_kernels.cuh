@@ -74,8 +74,14 @@ __global__ void ternary_rotate_bf16_kernel(const __nv_bfloat16* __restrict__ x,
                                            const float* __restrict__ signs, int n_blk, int k,
                                            int tokens, int perm_hd, int perm_nk, int perm_rep,
                                            int inverse) {
-    const int lane   = threadIdx.x & (kThreadsPerWarp - 1);
-    const int warp   = static_cast<int>(blockIdx.x) * kWarpsPerBlock + (threadIdx.x >> 5);
+    // blockDim, not the kWarpsPerBlock constant: this kernel is one warp per (1024-block, token)
+    // pair, so the grid is tiny and fixed by the data -- k=5120 at T=3 is 15 warps total. Packing
+    // them 8 to a block puts the whole launch on two SMs out of 66 and exposes the full latency of
+    // 32 dependent loads per warp. Reading the block size from the special register costs nothing
+    // and lets the launcher choose how to spread those 15 warps.
+    const int lane            = threadIdx.x & (kThreadsPerWarp - 1);
+    const int warps_per_block = static_cast<int>(blockDim.x) >> 5;
+    const int warp   = static_cast<int>(blockIdx.x) * warps_per_block + (threadIdx.x >> 5);
     const int blocks = k >> 10;
     if (warp >= blocks * tokens) { return; }
     const int block = warp % blocks;
@@ -138,8 +144,9 @@ __global__ void ternary_rotate_bf16_kernel(const __nv_bfloat16* __restrict__ x,
 __global__ void ternary_rotate_inverse_inplace_bf16_kernel(__nv_bfloat16* __restrict__ data,
                                                            const float* __restrict__ signs,
                                                            int n_blk, int k, int tokens) {
-    const int lane   = threadIdx.x & (kThreadsPerWarp - 1);
-    const int warp   = static_cast<int>(blockIdx.x) * kWarpsPerBlock + (threadIdx.x >> 5);
+    const int lane            = threadIdx.x & (kThreadsPerWarp - 1);
+    const int warps_per_block = static_cast<int>(blockDim.x) >> 5;
+    const int warp   = static_cast<int>(blockIdx.x) * warps_per_block + (threadIdx.x >> 5);
     const int blocks = k >> 10;
     if (warp >= blocks * tokens) { return; }
     const int block = warp % blocks;
