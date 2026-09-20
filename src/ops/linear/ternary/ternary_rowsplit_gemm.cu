@@ -262,8 +262,10 @@ void launch_ternary_gemm_t8(const Tensor& x, const Weight& w, Tensor& out,
         launch_pq2_gemv_tile(x, w, out, out_row_stride, x.ne[1], stream);
         return;
     }
-    // Prefill reaches this branch with T >= 128: the CLI requires the prefill chunk to be a
-    // multiple of 128, so the verify-shaped entry above never covers it.
+    // The verify-shaped entry above requires T <= 4, so everything from a short prompt (T as low
+    // as 5) to a full prefill chunk lands here. The CLI constrains the CHUNK to a multiple of 128
+    // (apps/cli/options.cpp), not the actual token count, so T is only a multiple of 128 for a
+    // prompt that fills a whole chunk.
     //
     // The tensor-core path is the default because the SIMT one is issue-bound and has no occupancy
     // left: NCU on the 248320-row head put the token-blocked GEMV at 95.47% occupancy, ALU the top
