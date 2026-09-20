@@ -1,3 +1,104 @@
+# Ternary Bonsai 2 27B on **NINFER** (Ada / `sm_89`, Linux)
+
+> A **ternary — 2.125 bits per weight — quantization port** of Bonsai 2 27B onto the **NINFER**
+> C++20/CUDA inference engine, targeting native Linux on Ada Lovelace (`sm_89`).
+>
+> **This repository is a derivative work. It is not upstream NINFER.** Everything below the
+> horizontal rule is the upstream README, unchanged.
+
+---
+
+## What this is
+
+**NINFER** is a single-GPU C++20/CUDA inference engine. This branch takes the ternary (PQ2_0)
+quantization of Bonsai 2 27B and lands it on **NINFER**'s Ada line, adding the tensor-core paths
+the ternary format needs and measuring every change on a physical RTX 4070 Ti SUPER.
+
+Ternary weights are packed `{−1, 0, +1}` at 2 bits per code plus one fp16 scale per 128-weight
+group — **2.125 bits per weight**. That is roughly half the weight traffic of a 4-bit format,
+which is the entire reason the numbers below are where they are: the model reads 7.12 GiB of
+weights per verify round, and the card reads at a measured 637 GB/s.
+
+| | |
+|---|---|
+| Engine | **NINFER** — v1.0.8 Ada line |
+| Weights | Ternary Bonsai 2 27B, `PQ2_0_G128` |
+| Hardware | RTX 4070 Ti SUPER (16 GiB, `sm_89`, 637 GB/s measured read ceiling) |
+| Toolchain | CUDA 13.4, GCC 15, Linux |
+
+## Project lineage and credits
+
+This work stands entirely on **NINFER** and the forks around it. In lineage order:
+
+| Project | Contribution |
+|---|---|
+| **[Neroued/ninfer](https://github.com/Neroued/ninfer)** | **Canonical upstream NINFER** — C++20/CUDA architecture, DFlash2, ReplaySSM, Paged KV Cache. Apache-2.0. |
+| [UDPSendToFailed/ninfer-4090](https://github.com/UDPSendToFailed/ninfer-4090) | Original RTX 4090 fork; WDDM evictable-budget bypass and the E8-lattice `rk4v4-e8` KV storage |
+| [sergiuszm/ninfer-4090](https://github.com/sergiuszm/ninfer-4090) | Ada `sm_89` kernel optimizations, `rk4v4-e8` adaptation, GDN cooperative-launch fix |
+| [natpate/ninfer-windows](https://github.com/natpate/ninfer-windows) | Win32/MSVC portability layer, unbuffered async I/O |
+| [headpiece747/ninfer-5090-windows](https://github.com/headpiece747/ninfer-5090-windows) | Native Windows MSVC compilation base |
+| [Don-Chad/ninfer-3090](https://github.com/Don-Chad/ninfer-3090) | Ampere work and early compatibility bridges |
+| **[Ambolio/ninfer-4090-windows](https://github.com/Ambolio/ninfer-4090-windows)** | **The direct base of this repository** — the Windows Ada line whose source tree this branch starts from |
+
+Model foundations (weights carry their own licenses): **Qwen Team** (Alibaba Cloud) for the Qwen3.8
+architecture, and the Bonsai 2 27B ternary quantization.
+
+The upstream `NOTICE` and `LICENSE` are retained verbatim. Every file this branch modifies carries a
+prominent notice at the top, as Apache-2.0 §4(b) requires.
+
+## What this branch changes
+
+Seven commits on top of the upstream baseline, each with its measurements in the message:
+
+- **Ternary tensor-core prefill path** — 6.8x over the blocked GEMV on the same weights, then
+  3.51x more from NCU-guided tuning (`prefill-3.2x`, `prefill-3.51x` tags).
+- **A small-T tensor-core path for the speculative verify pass.** The prefill kernel tiles the token
+  axis at 128, which is 97% empty at T=3; the verify path keeps all of K inside one CTA so the
+  weights are read exactly once for all drafted tokens. This is where most of the decode speed came
+  from, and it moved MTP from net-negative to net-positive.
+- **Two rounds of decode optimisation found by reading SASS**, not by reasoning: a ternary that the
+  compiler had emitted as both arms plus a SEL, and a bias prefix left over from an earlier magic
+  constant. Both are bit-identical in and out.
+- **Rotation launch packing** — the rotation is one warp per (K-block, token) pair, so its grid is
+  fixed by the data; the only free parameter is how those warps are packed, and at 8 per block a
+  decode-shaped rotation put 20 warps on 3 of 66 SMs.
+
+## Measured on this hardware
+
+Decode, `en-code.json`, 300 tokens, MTP at draft 3, best of two passes with the engine's own
+acceptance accounting identical in every arm:
+
+| Configuration | decode |
+|---|---:|
+| Speculative verify on the SIMT tile kernel | 43.2 t/s |
+| Verify on the small-T tensor-core path | 89.9 t/s |
+| + draft-window tuning and the SASS-driven decode work | 99.0 t/s |
+| + rotation launch packing, row-block reuse | **100.8 t/s** |
+
+Prefill: **1.23k t/s** on the tensor-core path (177 t/s blocked GEMV, 50 t/s on the reference
+kernel). Numerical equivalence against the reference prefill kernel holds to a PPL difference of
+0.015%.
+
+## What was tried and did not work
+
+Recorded here because the negative results took as long to establish as the positive ones, and
+three of them are structural rather than a matter of tuning:
+
+- Lowering the verify kernel's activation traffic by widening the row block. The load-mix argument
+  said activations were two thirds of the L2 traffic; dropping them by a third moved the effective
+  rate only from 453 to 480 GB/s against a 637 ceiling. The kernel is not L2-bandwidth-bound. The
+  0.45% it does buy is kept, on an engine A/B rather than on the theory.
+- Raising resident warps in the GDN record kernel. Occupancy was the obvious suspect at 16 of 48
+  warps; forcing registers down to fit 32 warps made it monotonically **slower**, twice. It is
+  limited by the serial recurrence over accepted tokens, not by residency.
+- Fusing the rotation calls. **NINFER** already does this — one rotation serves all four attention
+  projections, because the activation is the same width for all of them.
+
+The largest single line item, the verify pass at 13.3 ms against a 10.7 ms floor, has no lever I was
+able to find. It is not for lack of measuring: 80% of the throughput floor would need 117 t/s.
+
+---
+
 # NInfer 4090 Windows
 
 > Windows port of NInfer for the NVIDIA GeForce RTX 4090 (`sm_89`, Ada Lovelace). Selected checkpoints. Maximum single-GPU inference performance. **100% Native Windows MSVC (no WSL2 required).**
