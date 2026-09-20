@@ -47,10 +47,30 @@ void require_rotation_operands(const Tensor& x, const Weight& weight, const char
     }
 }
 
-unsigned rotation_grid(std::int32_t k, std::int32_t tokens) {
-    const std::int64_t warps =
-        static_cast<std::int64_t>(k / kBlockSize) * static_cast<std::int64_t>(tokens);
-    return static_cast<unsigned>((warps + kWarpsPerBlock - 1) / kWarpsPerBlock);
+// The transform is one warp per (1024-block, token) pair, so the grid is fixed by the data and
+// there is no tiling to do -- the only free parameter is how those warps are PACKED, and it is
+// worth measuring rather than assuming. A decode-shaped rotation (k=5120, T=3) is 15 warps: at 8
+// per block that is two blocks on two of the card's 66 SMs and costs 4.74 us, against 3.40 at one
+// warp per block. What is being paid is the latency of one warp's 32-load chain, not bandwidth --
+// the wpb=1 time is FLAT in k (17408 costs the same as 5120) and flat in block count (5, 15 and 51
+// blocks all measure 3.40 us), so spreading the warps over more SMs is free and packing them
+// together is not.
+//
+// The prefill regime is the opposite case: 5120 warps at one per block would sit on the
+// 32-blocks-per-SM resident limit instead of the 48-warp one, so a large grid keeps the original
+// packing. The threshold is where one block per SM stops covering the card.
+int rotation_warps_per_block(std::int64_t warps) {
+    static const int configured = [] {
+        const char* value = std::getenv("NINFER_TERNARY_ROTATE_WPB");
+        const int parsed  = value == nullptr ? 0 : std::atoi(value);
+        return (parsed == 1 || parsed == 2 || parsed == 4 || parsed == 8) ? parsed : 0;
+    }();
+    if (configured != 0) { return configured; }
+    return warps <= 128 ? 1 : kWarpsPerBlock;
+}
+
+std::int64_t rotation_warps(std::int32_t k, std::int32_t tokens) {
+    return static_cast<std::int64_t>(k / kBlockSize) * static_cast<std::int64_t>(tokens);
 }
 
 } // namespace
@@ -82,8 +102,10 @@ void launch_ternary_rotation(const Tensor& x, Tensor& out, const Weight& weight,
     const std::int32_t perm_nk  = permuted ? weight.hadamard_perm_nk : 0;
     const std::int32_t perm_rep = permuted ? weight.hadamard_perm_rep : 1;
 
-    ternary_rotate_bf16_kernel<<<rotation_grid(weight.k, x.ne[1]),
-                                 kWarpsPerBlock * kThreadsPerWarp, 0, stream>>>(
+    const std::int64_t warps = rotation_warps(weight.k, x.ne[1]);
+    const int warp_block     = rotation_warps_per_block(warps);
+    ternary_rotate_bf16_kernel<<<static_cast<unsigned>((warps + warp_block - 1) / warp_block),
+                                 warp_block * kThreadsPerWarp, 0, stream>>>(
         static_cast<const __nv_bfloat16*>(x.data), static_cast<__nv_bfloat16*>(out.data),
         weight.hadamard_signs, weight.hadamard_n_blk, weight.k, x.ne[1], perm_hd, perm_nk,
         perm_rep, /*inverse=*/0);
@@ -100,8 +122,11 @@ void launch_ternary_rotation_inverse_inplace(Tensor& data, const Weight& weight,
             "ternary rotation: the embedding path does not carry a folded permutation");
     }
 
-    ternary_rotate_inverse_inplace_bf16_kernel<<<rotation_grid(weight.k, data.ne[1]),
-                                                 kWarpsPerBlock * kThreadsPerWarp, 0, stream>>>(
+    const std::int64_t warps = rotation_warps(weight.k, data.ne[1]);
+    const int warp_block     = rotation_warps_per_block(warps);
+    ternary_rotate_inverse_inplace_bf16_kernel<<<
+        static_cast<unsigned>((warps + warp_block - 1) / warp_block),
+        warp_block * kThreadsPerWarp, 0, stream>>>(
         static_cast<__nv_bfloat16*>(data.data), weight.hadamard_signs, weight.hadamard_n_blk,
         weight.k, data.ne[1]);
     CUDA_CHECK(cudaGetLastError());
