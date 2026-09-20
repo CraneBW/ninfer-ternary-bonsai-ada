@@ -161,4 +161,126 @@ void ternary_pq2_gemv_tile_kernel(const __nv_bfloat16* __restrict__ x,
     }
 }
 
+// Token-blocked variant, for PREFILL: the prefill chunk.
+//
+// The verify kernel above takes the whole T at once and is capped at kT <= 8 by register
+// pressure, so it cannot serve a prefill chunk -- the CLI requires that chunk to be a multiple
+// of 128 (apps/cli/options.cpp: "--prefill-chunk must be a multiple of 128"). Without this
+// kernel, every prefill therefore falls through to the correctness-first reference kernel in
+// ternary_rowsplit_gemm.cuh, whose shape is one 128-thread CTA per output row plus seven
+// block-wide barriers per row and a four-way duplicated code load (threads index>>2 share a
+// byte). Published patch state measured that kernel at 42 GiB/s against this card's 638.7 GB/s
+// sustained-read ceiling -- 7%.
+//
+// This kernel keeps the GEMV shape -- lane l reads code byte l and so covers columns 4l..4l+3,
+// weights are decoded once per group and reused for the whole token tile, and the only reduction
+// is five shuffle steps -- but tiles BOTH axes: the token axis across blockIdx.y (kT tokens) and
+// the row axis across kR rows per warp.
+//
+// Why the row axis matters: measured on the target card the R=1/kT=8 shape reaches 125.7 t/s at
+// an effective weight bandwidth of only 112 GB/s, while the T=1 GEMV reads at 422 GB/s. The
+// kernel is therefore NOT weight-bandwidth-bound -- it is bound by the activation side, which
+// loads kT*4 elements per lane per group against a single weight byte. Since activations are
+// identical for every output row of the same token, widening the warp over rows amortises them:
+//
+//   loads per FMA  =  (2*kT + kR) / (4 * kR * kT)
+//
+// R=1,kT=8 gives 0.53; R=2,kT=8 gives 0.28; R=4,kT=4 gives 0.19. The cost is registers
+// (kR*kT accumulators plus 2*kT activation pairs), which is why both axes are capped small.
+template <int kR, int kT>
+__global__ __launch_bounds__(kGemvWarpsPerBlock * 32)
+void ternary_pq2_gemv_tile_block_kernel(const __nv_bfloat16* __restrict__ x,
+                                        const std::uint8_t* __restrict__ codes,
+                                        const std::uint8_t* __restrict__ scales,
+                                        __nv_bfloat16* __restrict__ out, std::int32_t rows,
+                                        std::int32_t groups_per_row, std::int32_t tokens,
+                                        std::int32_t out_row_stride) {
+    static_assert(kR >= 1 && kR <= 4, "row block must keep accumulators in registers");
+    static_assert(kT >= 1 && kT <= 8, "token block must keep accumulators in registers");
+    const int lane = static_cast<int>(threadIdx.x) & 31;
+    const int warp =
+        static_cast<int>(blockIdx.x) * kGemvWarpsPerBlock + (static_cast<int>(threadIdx.x) >> 5);
+    const int row0    = warp * kR;
+    const int token0  = static_cast<int>(blockIdx.y) * kT;
+    if (row0 >= rows) { return; }
+
+    float accumulator[kR][kT];
+#pragma unroll
+    for (int r = 0; r < kR; ++r) {
+#pragma unroll
+        for (int t = 0; t < kT; ++t) { accumulator[r][t] = 0.0f; }
+    }
+
+    for (int group = 0; group < groups_per_row; ++group) {
+        const std::int32_t base = group * kGemvGroupK + lane * 4;
+
+        // Activations: loaded ONCE per group and reused by every row this warp owns. This is the
+        // whole point of kR -- with kR == 1 they are re-loaded for each row the warp covers.
+        float2 low[kT];
+        float2 high[kT];
+#pragma unroll
+        for (int t = 0; t < kT; ++t) {
+            const std::int32_t token = token0 + t;
+            low[t]  = make_float2(0.0f, 0.0f);
+            high[t] = make_float2(0.0f, 0.0f);
+            if (token < tokens) {
+                const __nv_bfloat16* x_token =
+                    x + static_cast<std::int64_t>(token) * groups_per_row * kGemvGroupK;
+                low[t]  = __bfloat1622float2(
+                    *reinterpret_cast<const __nv_bfloat162*>(x_token + base));
+                high[t] = __bfloat1622float2(
+                    *reinterpret_cast<const __nv_bfloat162*>(x_token + base + 2));
+            }
+        }
+
+#pragma unroll
+        for (int r = 0; r < kR; ++r) {
+            const int row = row0 + r;
+            if (row < rows) {
+                const std::uint8_t* code_row =
+                    codes + static_cast<std::int64_t>(row) * groups_per_row *
+                                kGemvCodeBytesPerGroup;
+                const std::uint8_t* scale_row =
+                    scales + static_cast<std::int64_t>(row) * groups_per_row *
+                                 kGemvScaleBytesPerGroup;
+                const std::uint8_t raw = code_row[group * kGemvCodeBytesPerGroup + lane];
+                const float scale = gemv_scale(scale_row + group * kGemvScaleBytesPerGroup);
+                const float weight0 = static_cast<float>(static_cast<int>(raw & 3u) - 1);
+                const float weight1 = static_cast<float>(static_cast<int>((raw >> 2) & 3u) - 1);
+                const float weight2 = static_cast<float>(static_cast<int>((raw >> 4) & 3u) - 1);
+                const float weight3 = static_cast<float>(static_cast<int>((raw >> 6) & 3u) - 1);
+#pragma unroll
+                for (int t = 0; t < kT; ++t) {
+                    if (token0 + t < tokens) {
+                        const float dot =
+                            fmaf(weight0, low[t].x,
+                                 fmaf(weight1, low[t].y,
+                                      fmaf(weight2, high[t].x, weight3 * high[t].y)));
+                        accumulator[r][t] = fmaf(scale, dot, accumulator[r][t]);
+                    }
+                }
+            }
+        }
+    }
+
+#pragma unroll
+    for (int r = 0; r < kR; ++r) {
+#pragma unroll
+        for (int t = 0; t < kT; ++t) {
+            float value = accumulator[r][t];
+#pragma unroll
+            for (int offset = 16; offset > 0; offset >>= 1) {
+                value += __shfl_down_sync(0xffffffffu, value, offset);
+            }
+            const int row   = row0 + r;
+            const int token = token0 + t;
+            if (lane == 0 && row < rows && token < tokens) {
+                // Token-major output: element (row, token) lives at token * out_row_stride + row.
+                out[static_cast<std::int64_t>(token) * out_row_stride + row] =
+                    __float2bfloat16_rn(value);
+            }
+        }
+    }
+}
+
 } // namespace ninfer::ops::detail
