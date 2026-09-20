@@ -129,12 +129,17 @@ void launch_by_qtype(const Tensor& x, const Weight& w, Tensor& out, std::int32_t
 
 } // namespace
 
-// A PQ2_0 weight can take the GEMV family whenever the layout did not pad K past the real width --
+// A PQ2_0 weight can take the fast family whenever the layout did not pad K past the real width --
 // true for every width in this model (5120/6144/10240/17408 are all whole 128-groups), and checked
-// here rather than assumed, because the GEMV reads whole groups without a column guard.
+// here rather than assumed, because these kernels read whole groups without a column guard.
+//
+// Every one of them walks the activation as x[token * w.k + column], so the x row pitch has to BE
+// w.k. That holds for both callers today (the raw path's hidden and the folded activation both
+// report w.k as ne[0]), but it is assumed rather than enforced anywhere else, and a mismatch would
+// read the wrong rows instead of failing. Checked here so all three routes agree on the gate.
 bool gemv_admits(const Tensor& x, const Weight& w, std::int32_t max_tokens) {
     return w.qtype == QType::PQ2_0_G128 && w.qhigh == nullptr && w.padded_shape[1] == w.k &&
-           (w.k % 128) == 0 && x.ne[1] >= 1 && x.ne[1] <= max_tokens;
+           (w.k % 128) == 0 && x.ne[1] >= 1 && x.ne[1] <= max_tokens && x.ne[0] == w.k;
 }
 
 void launch_ternary_gemm_t1(const Tensor& x, const Weight& w, Tensor& out,
@@ -219,6 +224,17 @@ void launch_ternary_mma(const Tensor& x, const Weight& w, Tensor& out,
     const std::int32_t rows   = w.n;
     const std::int32_t k      = w.k;
     const std::int32_t tokens = x.ne[1];
+    // The reference launcher checks this too (launch_gemm does), and an undersized stride would
+    // silently scatter the tile across neighbouring rows rather than fail.
+    if (out_row_stride < rows) {
+        throw std::invalid_argument("ternary mma: output row stride is smaller than the tile");
+    }
+    // Restated here rather than left to gemv_admits alone: the kernel stages whole 64-wide K tiles
+    // and reads exactly two planes, so a padded K or a high plane would index out of the group.
+    // Both call sites pass through gemv_admits today; this is the guard for the next one.
+    if (w.padded_shape[1] != k || (k % 128) != 0) {
+        throw std::invalid_argument("ternary mma: needs a whole-group K with no padding");
+    }
     const dim3 grid(static_cast<unsigned>(div_up(rows, Schedule::kBlockRows)),
                     static_cast<unsigned>(div_up(tokens, Schedule::kBlockCols)), 1u);
     const bool full = (rows % Schedule::kBlockRows) == 0 && (tokens % Schedule::kBlockCols) == 0;
