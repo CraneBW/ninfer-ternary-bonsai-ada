@@ -37,38 +37,37 @@
 
 namespace ninfer::ops::detail {
 
-// The bias the decode subtracts, in the units the fragment carries. The magic below lands on
-// 8*c, so the fragment is {0,+/-8} rather than {-1,0,+1} and the group scale is premultiplied by
-// this on its way in. Keeping the factor binary means it costs nothing anywhere.
-inline constexpr float kTernarySmallTDecodeUnit = 0.125f;
-
-// One byte -> two weights, unscaled, exactly {-1,0,+1} scaled by 1/0.125, in bf16.
+// One code byte -> two weights, exact, already in bf16.
 //
 // Differs from ternary_mma_decode_byte only in that it returns one pair instead of two and leaves
 // the group scale to the caller. The nibble select is by lane parity, because a m16n8k16 A
 // fragment wants columns 2l..2l+1 while a PQ2_0 byte holds columns 4b..4b+3: lanes 2k and 2k+1
-// read the same byte and take opposite halves.
+// read the same byte and take opposite halves. `nibble` is that parity.
 //
-// The magic is done in bf16, not fp16. The prefill kernel's version lands on {0,+/-1} through an
-// fp16 half2 and then has to widen and re-round to feed a bf16 mma -- two converts per pair. bf16
-// has a seven-bit mantissa, so at exponent 10 its ULP is 8: putting the two-bit code in the
-// mantissa's low bits gives 1024 + 8c, and one bf16 subtract of 1032 gives 8(c-1), which is exact
-// for c in {0,1,2}. That drops both converts and leaves the pair in the register the mma wants.
-// The scale is applied after the K reduction in fp32, so premultiplying it by 1/8 is free and the
-// fragment never has to be scaled back.
+// Two things here are load-bearing and easy to undo by accident:
 //
-// Worth 3-4% on the verify shapes (0.053 -> 0.052 ms on 5120x17408). It is kept because it is also
-// what bounds the decode's floor: the whole decode is 24% of the kernel, measured by building with
-// the arithmetic compiled out, so this is the share of that which comes off cheaply. Two attempts
-// to take more are recorded as failures in the kernel comment below -- do not repeat them.
-__device__ __forceinline__ unsigned ternary_small_t_decode_byte_bits(std::uint32_t v, bool high) {
-    // 0x80 in each lane's low byte is the front of the 0x4480 bias exponent pattern that
-    // __byte_perm splices in. Folding it here rather than OR-ing it after the perm keeps the
-    // whole assembly at one shift and two LOP3s.
-    const unsigned a = high ? (((v >> 4) & 0x03u) | ((v & 0xC0u) << 2) | 0x8080u)
-                            : ((v & 0x03u) | ((v & 0x0Cu) << 6) | 0x8080u);
-    constexpr unsigned kMagic = 0x44004400u; // bf16 0x4400 in both lanes: exponent of 1024
-    constexpr unsigned kBias  = 0x44814481u; // bf16 1032.0 in both lanes
+// 1. The nibble select is a variable shift, not a ternary. Both halves assemble the same way --
+//    shift the wanted two-bit field down to bits 1:0, copy it to 1:0, and copy its neighbour to
+//    9:8 -- so `v >> 4*nibble` covers both and the branch disappears. Written as a conditional the
+//    compiler emits both arms plus a SEL, which is one extra instruction on a path that runs four
+//    times per K step.
+//
+// 2. The magic is bf16 at exponent 7, not fp16 and not bf16 at exponent 10. bf16 stores seven
+//    mantissa bits, so at exponent 7 its ULP is exactly 1: splicing the code into the mantissa's
+//    low bits gives 128 + c, whose bias byte is 0x00 -- so the splice needs no OR to prime it.
+//    One bf16 subtract of 129 gives c - 1 in {0,+/-1}, exactly, and the pair is already the width
+//    the mma wants. The prefill kernel's fp16 version instead lands on {0,+/-1} in half precision
+//    and pays two converts to get to bf16; the exponent-10 version lands on 8*(c-1) and pays an OR
+//    per pair plus a 1/8 premultiply on the scale. This costs neither.
+//
+// Worth ~8% on the verify shapes. The whole decode is 24% of the kernel -- measured by rebuilding
+// with the arithmetic compiled out, which puts 34816x5120 at 644 GB/s, this card's measured read
+// ceiling -- and this is what came off cheaply. What is left is the PRMT and the assembly.
+__device__ __forceinline__ unsigned ternary_small_t_decode_pair(std::uint32_t v, unsigned nibble) {
+    const unsigned t = v >> (nibble * 4);
+    const unsigned a = (t & 0x03u) | ((t & 0x0Cu) << 6);
+    constexpr unsigned kMagic = 0x43004300u; // bf16 0x4300 in both lanes: exponent of 128
+    constexpr unsigned kBias  = 0x43014301u; // bf16 129.0 in both lanes
     const unsigned w          = __byte_perm(a, kMagic, 0x5150u);
     const __nv_bfloat162 bias = *reinterpret_cast<const __nv_bfloat162*>(&kBias);
     const __nv_bfloat162 h = __hsub2(*reinterpret_cast<const __nv_bfloat162*>(&w), bias);
@@ -242,8 +241,8 @@ void ternary_small_t_mma_kernel(const __nv_bfloat16* __restrict__ x,
         // remains is the byte assembly plus the perm, four times per K step, and it is issue-bound.
         const std::uint8_t* const code_lo = &code_shared[gid][0];
         const std::uint8_t* const code_hi = &code_shared[gid + 8][0];
-        const bool high  = (lid & 1) != 0;
-        const int  coff0 = warp * Schedule::kCodeBytesPerWarp + (lid >> 1);
+        const unsigned nibble = lid & 1;
+        const int coff0       = warp * Schedule::kCodeBytesPerWarp + (lid >> 1);
 
 #pragma unroll
         for (int ks = 0; ks < kMmaKSteps; ++ks) {
@@ -251,10 +250,10 @@ void ternary_small_t_mma_kernel(const __nv_bfloat16* __restrict__ x,
             // low or high nibble of the byte) and 2*lid+8 (two bytes further along the row).
             // The warp offset is what selects this warp's own group out of the shared row.
             const int coff     = coff0 + ks * 4;
-            const unsigned af0 = ternary_small_t_decode_byte_bits(code_lo[coff], high);
-            const unsigned af1 = ternary_small_t_decode_byte_bits(code_hi[coff], high);
-            const unsigned af2 = ternary_small_t_decode_byte_bits(code_lo[coff + 2], high);
-            const unsigned af3 = ternary_small_t_decode_byte_bits(code_hi[coff + 2], high);
+            const unsigned af0 = ternary_small_t_decode_pair(code_lo[coff], nibble);
+            const unsigned af1 = ternary_small_t_decode_pair(code_hi[coff], nibble);
+            const unsigned af2 = ternary_small_t_decode_pair(code_lo[coff + 2], nibble);
+            const unsigned af3 = ternary_small_t_decode_pair(code_hi[coff + 2], nibble);
 #pragma unroll
             for (int nt = 0; nt < kNt; ++nt) {
                 unsigned bf0, bf1;
@@ -268,12 +267,11 @@ void ternary_small_t_mma_kernel(const __nv_bfloat16* __restrict__ x,
         }
 
         // The warp owned exactly one group, so its scale is a single fp32 multiply after the K
-        // reduction -- and the weights it multiplied against were exact. The fragment carries
-        // 8*(weight), so the scale arrives premultiplied by 1/8 (see the decode's comment).
+        // reduction -- and the weights it multiplied against were exact.
         const float top_scale =
-            __half2float(__ushort_as_half(scale_shared[gid][warp])) * kTernarySmallTDecodeUnit;
+            __half2float(__ushort_as_half(scale_shared[gid][warp]));
         const float bot_scale =
-            __half2float(__ushort_as_half(scale_shared[gid + 8][warp])) * kTernarySmallTDecodeUnit;
+            __half2float(__ushort_as_half(scale_shared[gid + 8][warp]));
 #pragma unroll
         for (int nt = 0; nt < kNt; ++nt) {
             acc[nt][0] = fmaf(group_acc[nt][0], top_scale, acc[nt][0]);
