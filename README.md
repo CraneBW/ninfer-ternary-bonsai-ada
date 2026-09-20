@@ -92,6 +92,29 @@ Seven commits on top of the upstream baseline, each with its measurements in the
   fixed by the data; the only free parameter is how those warps are packed, and at 8 per block a
   decode-shaped rotation put 20 warps on 3 of 66 SMs.
 
+## Specification
+
+```
+Device      NVIDIA GeForce RTX 4070 Ti SUPER - 16 GB (16376 MiB) - sm_89 (Ada) - driver 615.71.09
+Model       Ternary Bonsai 2 27B - 2.125 bit per weight - native context ceiling 256k
+
+Decode      100.8 t/s      MTP draft 3, 300 tokens, en-code
+Prefill     1230  t/s      tensor-core path
+VRAM        7.12 GiB       weights, of which 0.42 GiB is the MTP layer (6.70 GiB without --spec)
+Context     120k tokens    bf16 KV, measured ceiling on 16 GB (128k will not start)
+            238k tokens    fp8 KV, measured ceiling (240k will not start)
+
+Long-context recall   6/6 at 128k - 5/6 at 160k - 3/6 at 200k
+                      (six-needle retrieval; 200k reproduced twice)
+```
+
+Every figure above is measured on this machine, not quoted. The context ceilings come from
+`--kv-capacity auto`, which sizes against VRAM and fails loudly when the request does not fit;
+the two numbers either side of each ceiling were both tried.
+
+Note what the KV dtype buys and what it does not: fp8 doubles the reachable context, but the
+recall numbers above are bf16, and fp8 KV is a numerics trade that has not been measured here.
+
 ## Measured on this hardware
 
 Decode, `en-code.json`, 300 tokens, MTP at draft 3, best of two passes with the engine's own
