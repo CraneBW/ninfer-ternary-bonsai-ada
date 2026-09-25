@@ -151,3 +151,38 @@ prefill token 1335/1368 → 823/856，TTFT 34.6s → 22.4s/23.3s，回答不变�
 "丢中段、留尾部"的收益。要拿到后者需要在注意力里表达非连续子序列，并让 continuation
 契约支持 `KV 页数 ≠ frontier`（位置原点另行携带）；查询驱动的尾部保留与对应的重铸记账
 都在那一层。
+
+## 8. 窗口化 continuation 的契约扩展（设计，未实现）
+
+目标：窗口 = `[0, S)`（sink/头部）+ `[TB, T)`（最近尾部），T = 本轮 prompt+生成的结束。
+中段 `[S, TB)` 从 KV 里彻底移除（既不是"保持原位置做稀疏注意力"，也不做零页稀释）。
+尾部块由 K2 重铸到紧凑位置 `[S, S+Wr)`，于是窗口位置 = `window_tokens = S + Wr`，
+新 token 的位置从 `window_tokens` 起算。
+
+**必须扩展的契约**（`ref.frontier` 与 KV 几何解耦）：
+
+| 量 | 含义 | 谁用 |
+|---|---|---|
+| `prompt_frontier = T` | 本轮已"消费"的 prompt token 数（用于匹配与下一轮计数） | 复用匹配、digest |
+| `kv_frontier = window_tokens` | 地址 frontier / 页数 / pin 范围 | `text_kv_valid`、`trim_sequence_kv`、`set_checkpoint_requirement`、`ensure_mapped_to_tokens` |
+| `position_origin = window_tokens` | 新 token 的 RoPE 位置起点 | prefill 位置推导、`rope_delta` |
+| `WindowGeometry{S, TB, Wr}` | 窗口几何，用于匹配 | catalog 精确校验 |
+
+- 尾部重铸不需要新内核：`kvmem_compact(handle, budget, stream, mandatory, sink_only=false)`
+  的 K0 选择（sink/recent/quota）+ `kvmem_rerope_page` 已经就位，`remap_count/remap_abs_delta`
+  双阈值账本也已在 `set_selection` 里维护（K3 的"重铸记账"由此覆盖）。
+- `prefix_matches` 无法表达"跳段"：匹配改为 **几何相等 + `prefix_digests.at(T)` 相等**。
+  这要求 finish 时**保留** digest 到 T（不要截到 `window_tokens`），并把该 digest 显式存进
+  检查点（`checkpoint_summary` 目前从 `sequence.prefix_digests.at(frontier)` 取，窗口化
+  情况需要覆写来源）。resident `ledger`/`prefix_identity` 则按窗口顺序重排（= 抽掉中段），
+  它们描述的是"当前驻留的 token 序列"，正好也是下一轮追加的起点。
+- `inspect_lane` 对窗口化 continuation 走 `PrivateEndpoint` 形态：`reuse_base = T`（prompt
+  切片起点），同时把 `kv_frontier`/`position_origin` 带进 plan；`start_sequence` 用
+  `kv_frontier` 做地址/state 操作、用 `reuse_base` 做 prompt 切片。
+- prefill 位置：suffix 的位置必须是 `window_tokens + (index - T)`，即对 prompt 的
+  positions 施加 `window_tokens - T` 的偏移；`io.pos`/`rope_positions` 的 staging 站点
+  （`schedule::prefill_text_chunk` 一路到 `TextContext`）是唯一需要改的落点，
+  生成段则用 `append_generated(count, rope_delta = window_tokens - T)`。
+
+**验收**（与 §6 同一套环境）：第二轮 `cache` 应 ≈ T（而非窗口长度）、窗口页数 =
+`(S+Wr)/64`、回答质量应接近全量注意力（尾部可见）；对比 §6 的头窗口（中段与尾部都不可见）。
