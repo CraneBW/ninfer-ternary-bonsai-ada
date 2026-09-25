@@ -7,11 +7,14 @@
 #include "ops/common/math.h"
 #include "ops/linear/ternary/ternary_launch.h"
 #include "ops/linear/ternary/ternary_rowsplit_gemv.cuh"
+#include "ops/linear/ternary/ternary_rowsplit_gemv_ptq1.cuh"
 #include "ops/linear/ternary/ternary_rowsplit_mma.cuh"
 #include "ops/linear/ternary/ternary_rowsplit_mma_small_t.cuh"
 
+#include <cstdio>
 #include <cstdint>
 #include <cstdlib>
+#include <vector>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -19,6 +22,12 @@
 
 namespace ninfer::ops::detail {
 namespace {
+
+// Forward declaration: the PTQ1 debug path below launches the reference kernel for the
+// same weight and diffs the two outputs.
+template <int kTileT>
+void launch_by_qtype(const Tensor& x, const Weight& w, Tensor& out, std::int32_t out_row_stride,
+                     cudaStream_t stream);
 
 // Which kernel serves prefill (T >= 5).
 //
@@ -45,33 +54,85 @@ PrefillRoute prefill_route() {
 }
 
 
-// Decode (T == 1) takes the warp-per-row GEMV for PQ2_0. K is a whole number of 128-groups for
-// every width in this model, so that kernel needs no column guard.
-void launch_pq2_gemv(const Tensor& x, const Weight& w, Tensor& out, cudaStream_t stream) {
-    if ((w.k % 128) != 0 || x.ne[1] != 1) {
-        throw std::invalid_argument("ternary gemv: expected one token and a whole-group K");
-    }
-    const std::int32_t groups_per_row = w.k / 128;
-    const unsigned grid               = static_cast<unsigned>(div_up(w.n, kGemvWarpsPerBlock));
-    ternary_pq2_gemv_kernel<<<grid, kGemvWarpsPerBlock * 32, 0, stream>>>(
-        static_cast<const __nv_bfloat16*>(x.data), static_cast<const std::uint8_t*>(w.qdata),
-        static_cast<const std::uint8_t*>(w.scales), static_cast<__nv_bfloat16*>(out.data), w.n,
-        groups_per_row);
-    CUDA_CHECK(cudaGetLastError());
-}
-
-// Small-token-tile GEMV: weights are read once for up to 4 tokens, which is what makes the
+// Small-token-tile GEMV: weights are read once for up to 8 tokens, which is what makes the
 // speculative verify pass (T = draft + 1) cheap. Falls back to the reference tiled kernel beyond
-// that, and for PTQ1_0 / padded-K weights.
-void launch_pq2_gemv_tile(const Tensor& x, const Weight& w, Tensor& out,
-                          std::int32_t out_row_stride, std::int32_t tokens,
-                          cudaStream_t stream) {
+// that. Dispatches both ternary formats: PQ2_0 has a dedicated kernel family; PTQ1_0 rides the
+// same structure with its own lane map and high-plane reads (ternary_rowsplit_gemv_ptq1.cuh).
+void launch_ternary_gemv_tile(const Tensor& x, const Weight& w, Tensor& out,
+                              std::int32_t out_row_stride, std::int32_t tokens,
+                              cudaStream_t stream) {
     if ((w.k % 128) != 0) {
         throw std::invalid_argument("ternary gemv: K must be a whole number of 128-groups");
     }
     const std::int32_t groups_per_row = w.k / 128;
     const unsigned grid               = static_cast<unsigned>(div_up(w.n, kGemvWarpsPerBlock));
     const dim3 block(kGemvWarpsPerBlock * 32, 1u, 1u);
+    if (w.qtype == QType::PTQ1_0_G128) {
+        if (tokens <= 1) {
+            // NINFER_TERNARY_PTQ1_DEBUG=1: for the first two T == 1 calls, run BOTH this
+            // kernel and the reference kernel on the real activation and diff the outputs.
+            static const bool debug_ptq1 = [] {
+                const char* value = std::getenv("NINFER_TERNARY_PTQ1_DEBUG");
+                return value != nullptr && std::string(value) == "1";
+            }();
+            static int debug_runs_left = debug_ptq1 ? 2 : 0;
+            if (debug_runs_left > 0) {
+                --debug_runs_left;
+                static __nv_bfloat16* tmp   = nullptr;
+                static std::int64_t tmp_rows = 0;
+                if (tmp_rows < w.n) {
+                    if (tmp != nullptr) { cudaFree(tmp); }
+                    cudaMalloc(&tmp, static_cast<std::int64_t>(w.n) * 2);
+                    tmp_rows = w.n;
+                }
+                ternary_ptq1_gemv_kernel<<<grid, block, 0, stream>>>(
+                    static_cast<const __nv_bfloat16*>(x.data),
+                    static_cast<const std::uint8_t*>(w.qdata),
+                    static_cast<const std::uint8_t*>(w.qhigh),
+                    static_cast<const std::uint8_t*>(w.scales),
+                    tmp, w.n, groups_per_row);
+                launch_by_qtype<1>(x, w, out, out_row_stride, stream);
+                CUDA_CHECK(cudaStreamSynchronize(stream));
+                std::vector<__nv_bfloat16> mine(w.n), ref(w.n);
+                cudaMemcpy(mine.data(), tmp, static_cast<std::int64_t>(w.n) * 2,
+                           cudaMemcpyDeviceToHost);
+                cudaMemcpy(ref.data(), out.data, static_cast<std::int64_t>(w.n) * 2,
+                           cudaMemcpyDeviceToHost);
+                int bad         = 0;
+                double worst    = 0.0;
+                std::int32_t worst_i = -1;
+                for (std::int32_t i = 0; i < w.n; ++i) {
+                    const double a = __bfloat162float(mine[i]);
+                    const double b = __bfloat162float(ref[i]);
+                    const double d = std::fabs(a - b) / (1.0 + std::fabs(b));
+                    if (d > worst) { worst = d; worst_i = i; }
+                    if (d > 1e-2) { ++bad; }
+                }
+                std::printf(
+                    "[ptq1-debug] n=%d k=%d bad=%d worst=%.4f at %d (mine=%f ref=%f)\n", w.n,
+                    w.k, bad, worst, worst_i,
+                    worst_i >= 0 ? __bfloat162float(mine[worst_i]) : 0.0,
+                    worst_i >= 0 ? __bfloat162float(ref[worst_i]) : 0.0);
+                return;
+            }
+            ternary_ptq1_gemv_kernel<<<grid, block, 0, stream>>>(
+                static_cast<const __nv_bfloat16*>(x.data),
+                static_cast<const std::uint8_t*>(w.qdata),
+                static_cast<const std::uint8_t*>(w.qhigh),
+                static_cast<const std::uint8_t*>(w.scales),
+                static_cast<__nv_bfloat16*>(out.data), w.n, groups_per_row);
+        } else {
+            ternary_ptq1_gemv_tile_kernel<4><<<grid, block, 0, stream>>>(
+                static_cast<const __nv_bfloat16*>(x.data),
+                static_cast<const std::uint8_t*>(w.qdata),
+                static_cast<const std::uint8_t*>(w.qhigh),
+                static_cast<const std::uint8_t*>(w.scales),
+                static_cast<__nv_bfloat16*>(out.data), w.n, groups_per_row, tokens,
+                out_row_stride);
+        }
+        CUDA_CHECK(cudaGetLastError());
+        return;
+    }
     if (tokens <= 1) {
         ternary_pq2_gemv_kernel<<<grid, block, 0, stream>>>(
             static_cast<const __nv_bfloat16*>(x.data), static_cast<const std::uint8_t*>(w.qdata),
@@ -132,30 +193,82 @@ void launch_by_qtype(const Tensor& x, const Weight& w, Tensor& out, std::int32_t
 
 } // namespace
 
-// A PQ2_0 weight can take the fast family whenever the layout did not pad K past the real width --
-// true for every width in this model (5120/6144/10240/17408 are all whole 128-groups), and checked
-// here rather than assumed, because these kernels read whole groups without a column guard.
+// A ternary weight can take the fast family whenever the layout did not pad K past the real
+// width -- true for every width in this model (5120/6144/10240/17408 are all whole 128-groups),
+// and checked here rather than assumed, because these kernels read whole groups without a
+// column guard. Both ternary formats are admitted: PQ2_0 (no high plane) and PTQ1_0 (whose
+// high plane the PTQ1 GEMV kernels read alongside the base plane).
 //
 // Every one of them walks the activation as x[token * w.k + column], so the x row pitch has to BE
 // w.k. That holds for both callers today (the raw path's hidden and the folded activation both
 // report w.k as ne[0]), but it is assumed rather than enforced anywhere else, and a mismatch would
 // read the wrong rows instead of failing. Checked here so all three routes agree on the gate.
 bool gemv_admits(const Tensor& x, const Weight& w, std::int32_t max_tokens) {
-    return w.qtype == QType::PQ2_0_G128 && w.qhigh == nullptr && w.padded_shape[1] == w.k &&
-           (w.k % 128) == 0 && x.ne[1] >= 1 && x.ne[1] <= max_tokens && x.ne[0] == w.k;
+    const bool pq2  = w.qtype == QType::PQ2_0_G128 && w.qhigh == nullptr;
+    const bool ptq1 = w.qtype == QType::PTQ1_0_G128 && w.qhigh != nullptr;
+    return (pq2 || ptq1) && w.padded_shape[1] == w.k && (w.k % 128) == 0 && x.ne[1] >= 1 &&
+           x.ne[1] <= max_tokens && x.ne[0] == w.k;
 }
 
 void launch_ternary_gemm_t1(const Tensor& x, const Weight& w, Tensor& out,
                             std::int32_t out_row_stride, cudaStream_t stream) {
-    if (gemv_admits(x, w, 1)) {
-        launch_pq2_gemv_tile(x, w, out, out_row_stride, x.ne[1], stream);
+    // NINFER_TERNARY_T1_REF=1 forces the reference kernel for T == 1 as well, to bisect
+    // engine-side decode failures between the GEMV family and everything else.
+    static const bool force_ref_t1 = [] {
+        const char* value = std::getenv("NINFER_TERNARY_T1_REF");
+        return value != nullptr && std::string(value) == "1";
+    }();
+    if (!force_ref_t1 && gemv_admits(x, w, 1)) {
+        launch_ternary_gemv_tile(x, w, out, out_row_stride, x.ne[1], stream);
         return;
     }
     launch_by_qtype<1>(x, w, out, out_row_stride, stream);
 }
 
 // One (kR, kT) instantiation of the blocked GEMV: grid.x tiles the rows in strides of
-// warps*kR, grid.y tiles the tokens in kT.
+// warps*kR, grid.y tiles the tokens in kT. (The launchers below inline this shape selection
+// so the same ladder dispatches both ternary formats.)
+
+// Blocked GEMV launcher, for prefill. Both block shapes are occupancy levers rather than fixed
+// constants, and the measured behaviour on the target card is that the kernel is
+// activation-bound, not weight-bound (R=1/kT=8 reached 125.7 t/s at an effective weight
+// bandwidth of only 112 GB/s, against 422 GB/s for the T=1 GEMV). So the row block -- which
+// amortises activation loads across output rows -- is the stronger knob, and the token block
+// then trades weight traffic against register pressure. Both are env-selectable so one build
+// can sweep; the defaults are the measured winners. The shape selection is shared by both
+// ternary formats; only the kernel body differs.
+void selected_gemv_block_shape(int& rows_block, int& token_block) {
+    static const int rows = [] {
+        const char* value = std::getenv("NINFER_TERNARY_ROWS");
+        const int parsed  = value == nullptr ? 0 : std::atoi(value);
+        return (parsed == 1 || parsed == 2 || parsed == 4 || parsed == 8) ? parsed : 4;
+    }();
+    static const int token = [] {
+        const char* value = std::getenv("NINFER_TERNARY_TILE");
+        const int parsed  = value == nullptr ? 0 : std::atoi(value);
+        return (parsed == 2 || parsed == 4 || parsed == 8) ? parsed : 8;
+    }();
+    rows_block  = rows;
+    token_block = token;
+}
+
+// One (kR, kT) instantiation of the blocked GEMV, per format: grid.x tiles the rows in
+// strides of warps*kR, grid.y tiles the tokens in kT. Kept as helpers because nvcc cannot
+// parse decltype template arguments inline in a <<<>>> launch configuration.
+template <int kR, int kT>
+void launch_ptq1_gemv_tile_block_shape(const Tensor& x, const Weight& w, Tensor& out,
+                                       std::int32_t out_row_stride, std::int32_t groups_per_row,
+                                       std::int32_t tokens, cudaStream_t stream) {
+    const dim3 grid(static_cast<unsigned>(div_up(w.n, kGemvWarpsPerBlock * kR)),
+                    static_cast<unsigned>(div_up(tokens, kT)), 1u);
+    const dim3 block(kGemvWarpsPerBlock * 32, 1u, 1u);
+    ternary_ptq1_gemv_tile_block_kernel<kR, kT><<<grid, block, 0, stream>>>(
+        static_cast<const __nv_bfloat16*>(x.data), static_cast<const std::uint8_t*>(w.qdata),
+        static_cast<const std::uint8_t*>(w.qhigh), static_cast<const std::uint8_t*>(w.scales),
+        static_cast<__nv_bfloat16*>(out.data), w.n, groups_per_row, tokens, out_row_stride);
+    CUDA_CHECK(cudaGetLastError());
+}
+
 template <int kR, int kT>
 void launch_pq2_gemv_tile_block_shape(const Tensor& x, const Weight& w, Tensor& out,
                                       std::int32_t out_row_stride, std::int32_t groups_per_row,
@@ -167,34 +280,28 @@ void launch_pq2_gemv_tile_block_shape(const Tensor& x, const Weight& w, Tensor& 
         static_cast<const __nv_bfloat16*>(x.data), static_cast<const std::uint8_t*>(w.qdata),
         static_cast<const std::uint8_t*>(w.scales), static_cast<__nv_bfloat16*>(out.data), w.n,
         groups_per_row, tokens, out_row_stride);
+    CUDA_CHECK(cudaGetLastError());
 }
 
-// Blocked GEMV launcher, for prefill. Both block shapes are occupancy levers rather than fixed
-// constants, and the measured behaviour on the target card is that the kernel is
-// activation-bound, not weight-bound (R=1/kT=8 reached 125.7 t/s at an effective weight
-// bandwidth of only 112 GB/s, against 422 GB/s for the T=1 GEMV). So the row block -- which
-// amortises activation loads across output rows -- is the stronger knob, and the token block
-// then trades weight traffic against register pressure. Both are env-selectable so one build
-// can sweep; the defaults are the measured winners.
-void launch_pq2_gemv_tile_block(const Tensor& x, const Weight& w, Tensor& out,
-                                std::int32_t out_row_stride, cudaStream_t stream) {
+void launch_ternary_gemv_tile_block(const Tensor& x, const Weight& w, Tensor& out,
+                                    std::int32_t out_row_stride, cudaStream_t stream) {
     const std::int32_t groups_per_row = w.k / 128;
     const std::int32_t tokens         = x.ne[1];
-    static const int rows_block = [] {
-        const char* value = std::getenv("NINFER_TERNARY_ROWS");
-        const int parsed  = value == nullptr ? 0 : std::atoi(value);
-        return (parsed == 1 || parsed == 2 || parsed == 4 || parsed == 8) ? parsed : 4;
-    }();
-    static const int token_block = [] {
-        const char* value = std::getenv("NINFER_TERNARY_TILE");
-        const int parsed  = value == nullptr ? 0 : std::atoi(value);
-        return (parsed == 2 || parsed == 4 || parsed == 8) ? parsed : 8;
-    }();
+    int rows_block                    = 4;
+    int token_block                   = 8;
+    selected_gemv_block_shape(rows_block, token_block);
 
+    const bool ptq1 = w.qtype == QType::PTQ1_0_G128;
     const auto shape = [&](auto rows_tag, auto token_tag) {
-        launch_pq2_gemv_tile_block_shape<decltype(rows_tag)::value, decltype(token_tag)::value>(
-            x, w, out, out_row_stride, groups_per_row, tokens, stream);
-        CUDA_CHECK(cudaGetLastError());
+        if (ptq1) {
+            launch_ptq1_gemv_tile_block_shape<decltype(rows_tag)::value,
+                                              decltype(token_tag)::value>(
+                x, w, out, out_row_stride, groups_per_row, tokens, stream);
+        } else {
+            launch_pq2_gemv_tile_block_shape<decltype(rows_tag)::value,
+                                             decltype(token_tag)::value>(
+                x, w, out, out_row_stride, groups_per_row, tokens, stream);
+        }
     };
     using std::integral_constant;
 
@@ -336,11 +443,15 @@ void launch_ternary_gemm_t8(const Tensor& x, const Weight& w, Tensor& out,
     // weight traffic. That is why raising the draft count, which amortises the per-group 2-bit
     // decode over more tokens, is the productive lever here; see the plan document.
     if (gemv_admits(x, w, 4)) {
-        if (verify_uses_small_t() && (w.k % kSmallTGroupK) == 0) {
+        // Both tensor-core paths below read exactly two planes (codes + scales), so they are
+        // PQ2_0-only; PTQ1_0's high plane would index out of its group. PTQ1_0 verify and
+        // prefill ride the PTQ1 GEMV family instead.
+        if (w.qtype == QType::PQ2_0_G128 && verify_uses_small_t() &&
+            (w.k % kSmallTGroupK) == 0) {
             launch_small_t(x, w, out, out_row_stride, stream);
             return;
         }
-        launch_pq2_gemv_tile(x, w, out, out_row_stride, x.ne[1], stream);
+        launch_ternary_gemv_tile(x, w, out, out_row_stride, x.ne[1], stream);
         return;
     }
     // The verify-shaped entry above requires T <= 4, so everything from a short prompt (T as low
@@ -352,7 +463,8 @@ void launch_ternary_gemm_t8(const Tensor& x, const Weight& w, Tensor& out,
     // left: NCU on the 248320-row head put the token-blocked GEMV at 95.47% occupancy, ALU the top
     // pipe, and 909e6 instructions against a 1.32 ms pure-issue floor. Measured across every
     // prefill shape in this model at T=1024, MMA is 8.3-9.8x faster than that GEMV.
-    if (prefill_route() == PrefillRoute::Mma && x.ne[1] >= kMmaMinTokens &&
+    if (prefill_route() == PrefillRoute::Mma && w.qtype == QType::PQ2_0_G128 &&
+        x.ne[1] >= kMmaMinTokens &&
         gemv_admits(x, w, std::numeric_limits<std::int32_t>::max())) {
         launch_ternary_mma<TernaryMmaPrefillSchedule>(x, w, out, out_row_stride, stream);
         return;
@@ -363,7 +475,7 @@ void launch_ternary_gemm_t8(const Tensor& x, const Weight& w, Tensor& out,
     // either fast path engine-side (T = 1 alone cannot catch a token-tile or layout error).
     if (prefill_route() != PrefillRoute::Reference &&
         gemv_admits(x, w, std::numeric_limits<std::int32_t>::max())) {
-        launch_pq2_gemv_tile_block(x, w, out, out_row_stride, stream);
+        launch_ternary_gemv_tile_block(x, w, out, out_row_stride, stream);
         return;
     }
     launch_by_qtype<8>(x, w, out, out_row_stride, stream);
