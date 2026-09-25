@@ -859,6 +859,9 @@ public:
                     kvmem_budget_ = static_cast<std::uint32_t>(
                         std::min<long long>(parsed, static_cast<long long>(page_capacity) *
                                                             kPagedKVPageSize));
+                    // Page-aligned once here so the completion-time window and the
+                    // window-edge anchor frontier are the same number.
+                    kvmem_budget_ -= kvmem_budget_ % kPagedKVPageSize;
                 }
             }
             kvmem_repos_.resize(address_capacity);
@@ -1511,6 +1514,26 @@ public:
         address.page_count = target;
         if (kvmem_enabled_) {
             auto& repo          = kvmem_repos_[address_index];
+            // A resumed window -- or any fork/snapshot membership -- hands this
+            // address pages that no append registered. Register them born-placed at
+            // the slot their writer already baked, so the ledger stays aligned with
+            // the address before the new tail is appended.
+            while (repo.block_count() < begin) {
+                const std::uint32_t id = repo.block_count();
+                ninfer::kvmem::KvBlockMeta m;
+                m.id             = id;
+                m.token_begin    = static_cast<std::uint64_t>(id) * kPagedKVPageSize;
+                m.n_tokens       = static_cast<std::uint32_t>(kPagedKVPageSize);
+                m.baked_pos      = static_cast<std::int64_t>(m.token_begin);
+                m.in_working_set = true;
+                repo.append(m);
+                repo.set_tier(id, ninfer::kvmem::KvTier::Gpu);
+                if (kvmem_block_pages_.size() > static_cast<std::size_t>(address_index)) {
+                    auto& block_pages = kvmem_block_pages_[static_cast<std::size_t>(address_index)];
+                    if (block_pages.size() <= id) { block_pages.resize(id + 1); }
+                    block_pages[id] = membership(address, id);
+                }
+            }
             std::uint32_t added_i = 0;
             for (const LogicalKVPageHandle page : added) {
                 ninfer::kvmem::KvBlockMeta m;
@@ -1592,6 +1615,9 @@ public:
             pages_->destructive_truncate(membership(address, target - 1U), columns);
         }
         address.committed_frontier = frontier;
+        if (kvmem_enabled_) {
+            kvmem_forget_window_tail(static_cast<std::size_t>(&address - addresses_.data()), target);
+        }
     }
 
     [[nodiscard]] bool can_destructive_truncate_inactive(
@@ -1648,6 +1674,9 @@ public:
         address.committed_frontier  = frontier;
         address.checkpoint_frontier = 0;
         rebuild_checkpoint_protection();
+        if (kvmem_enabled_) {
+            kvmem_forget_window_tail(static_cast<std::size_t>(&address - addresses_.data()), target);
+        }
     }
 
     void set_checkpoint_requirement(KVAddressSpaceHandle handle, std::uint32_t protected_frontier) {
@@ -1689,6 +1718,9 @@ public:
         address.committed_frontier  = frontier;
         address.checkpoint_frontier = std::min(address.checkpoint_frontier, frontier);
         rebuild_checkpoint_protection();
+        if (kvmem_enabled_) {
+            kvmem_forget_window_tail(static_cast<std::size_t>(&address - addresses_.data()), target);
+        }
     }
 
     [[nodiscard]] std::uint32_t mapped_pages(KVAddressSpaceHandle handle) const {
@@ -1933,6 +1965,26 @@ private:
     // at its window slot. Blocks evicted by kvmem_compact (tier Host, bytes
     // parked in its host arena) stay in the ledger and are NOT part of the
     // window; the address's page_count only ever counts the window.
+
+    // KVMem K1b: the address shrank to its window, so the tracker must forget the
+    // blocks the window no longer covers. A destructive truncate is exactly the case
+    // K0's truncate describes -- the dropped tail leaves the repository for good --
+    // so its host copies are handed back too. The surviving ledger is the head
+    // prefix, still resident at its own window slots.
+    void kvmem_forget_window_tail(std::size_t index, std::uint32_t window_pages) {
+        auto& repo        = kvmem_repos_[index];
+        auto& block_pages = kvmem_block_pages_[index];
+        auto& block_hosts = kvmem_block_hosts_[index];
+        if (repo.block_count() <= window_pages) { return; }
+        for (std::uint32_t id = window_pages; id < repo.block_count(); ++id) {
+            if (block_pages.size() > id) { block_pages[id] = {}; }
+            if (block_hosts.size() > id && block_hosts[id].valid()) { block_hosts[id].release(); }
+        }
+        block_pages.resize(window_pages);
+        block_hosts.resize(window_pages);
+        repo.truncate(window_pages);
+    }
+
     void kvmem_plan_passthrough(std::size_t index, const Address& address) {
         auto& repo        = kvmem_repos_[index];
         auto& block_pages = kvmem_block_pages_[index];
@@ -2204,6 +2256,15 @@ public:
     }
 
     [[nodiscard]] std::uint32_t kvmem_budget_tokens() const noexcept { return kvmem_budget_; }
+
+    // KVMem K1b: the window edge a completion-time compaction would retain, or 0
+    // when this request needs no compaction (disabled, no budget, or the prompt is
+    // already inside the budget). This is the frontier the window-edge anchor
+    // capture uses, and the window `kvmem_compact_round_boundary` produces.
+    [[nodiscard]] std::uint32_t kvmem_window_edge(std::uint64_t prompt_tokens) const noexcept {
+        if (!kvmem_enabled_ || kvmem_budget_ == 0) { return 0; }
+        return kvmem_budget_ < prompt_tokens ? kvmem_budget_ : 0U;
+    }
 
 private:
     bool kvmem_enabled_ = false;

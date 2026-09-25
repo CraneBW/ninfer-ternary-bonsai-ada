@@ -1,4 +1,4 @@
-#include "targets/qwen3_6/impl/runtime/instance.h"
+﻿#include "targets/qwen3_6/impl/runtime/instance.h"
 #include "targets/qwen3_6/impl/runtime/program.h"
 #include "targets/qwen3_6/impl/runtime/rebuild_work.h"
 
@@ -365,6 +365,28 @@ RequestBasePlan ProgramImplCore::plan_request(const PreparedPromptData& prompt,
                         opportunity.kind == PromptCacheMarkerKind::PrivateLongAnchor,
                         opportunity.evidence);
         }
+        // KVMem K1b: a completed request compacts its KV to the head window, which
+        // discards the full-context endpoint. Capture a private long anchor exactly
+        // on that window edge while the prefill still holds the truthful state
+        // there, so the retained head stays a resume point for the next request.
+        // A window edge inside a media consumer would divide it from the truncation
+        // side, so KVMem stays inert for such a request.
+        const std::uint32_t kvmem_edge =
+            text_kv_addresses->kvmem_window_edge(base->summary.prompt_tokens);
+        const bool kvmem_edge_splits_media =
+            std::any_of(prompt.vision_items.begin(), prompt.vision_items.end(),
+                        [kvmem_edge](const qwen3_6::VisionItem& item) {
+                            return std::any_of(item.token_spans.begin(), item.token_spans.end(),
+                                               [kvmem_edge](const qwen3_6::TokenSpan& span) {
+                                                   return span.begin < kvmem_edge &&
+                                                          kvmem_edge < span.begin + span.count;
+                                               });
+                        });
+        if (kvmem_edge != 0 &&
+            context_cache.max_long_anchors_per_continuation.value_or(0) != 0 &&
+            !kvmem_edge_splits_media) {
+            add_capture(kvmem_edge, 0, std::nullopt, false, true, SharedCandidateEvidence::None);
+        }
         std::sort(base->capture_groups.begin(), base->capture_groups.end(),
                   [](const CaptureGroup& left, const CaptureGroup& right) {
                       return std::tie(left.frontier, left.input_order) <
@@ -477,7 +499,9 @@ std::optional<AdmissionCandidate> ProgramImplCore::inspect_lane(
             !state_store->valid(shared_source->state)) {
             throw std::logic_error("catalog shared-prefix summary disagrees with Program state");
         }
-        if (!base.allow_prefix_reuse || !prompt.identity.reusable) { return std::nullopt; }
+        if (!base.allow_prefix_reuse || !prompt.identity.reusable) {
+            return std::nullopt;
+        }
         const auto* shared_identity = shared_source->identity->prefix_identity();
         if (shared_identity == nullptr ||
             !qwen3_6::detail::prefix_matches(prompt, shared_source->identity->ledger(),
@@ -493,7 +517,9 @@ std::optional<AdmissionCandidate> ProgramImplCore::inspect_lane(
         plan->source_mode                     = must_retain_private_source
                                                     ? runtime::PrivateSourceMode::Retain
                                                     : runtime::PrivateSourceMode::ConsumeToActive;
-        if (!base.allow_prefix_reuse || !prompt.identity.reusable) { return std::nullopt; }
+        if (!base.allow_prefix_reuse || !prompt.identity.reusable) {
+            return std::nullopt;
+        }
         if (selected.kind == runtime::CheckpointKind::SessionEndpoint) {
             if (selected.ordinal != 0) {
                 throw std::logic_error("private endpoint checkpoint ordinal is invalid");
@@ -524,6 +550,13 @@ std::optional<AdmissionCandidate> ProgramImplCore::inspect_lane(
             plan->reuse       = ReusePath::PrivateLongAnchor;
             plan->reuse_base  = selected.frontier;
             plan->source_mode = runtime::PrivateSourceMode::Retain;
+            // The KVMem window-edge anchor is re-captured from the reused state at
+            // the start of this request, so it does not need to survive in the
+            // source: consuming it lets the image become the active state directly
+            // instead of leaving an unsettled fork, which would forbid the capture.
+            if (selected.frontier == text_kv_addresses->kvmem_window_edge(prompt.token_ids.size())) {
+                plan->source_mode = runtime::PrivateSourceMode::ConsumeToActive;
+            }
         } else {
             if (selected.ordinal != 0) {
                 throw std::logic_error("private rewrite checkpoint ordinal is invalid");
@@ -670,7 +703,14 @@ std::optional<AdmissionCandidate> ProgramImplCore::inspect_lane(
 
     plan->capture_groups.reserve(base.capture_groups.size());
     for (CaptureGroup group : base.capture_groups) {
-        if (group.frontier <= plan->reuse_base) { continue; }
+        // A KVMem window-edge anchor is re-armed at its own frontier: the reused
+        // prefix already carries the state that frontier describes, so renewing the
+        // anchor costs one snapshot instead of a re-derivation from root.
+        const bool rearmed_window_anchor = group.long_anchor && group.frontier == plan->reuse_base;
+        if (group.frontier < plan->reuse_base ||
+            (group.frontier == plan->reuse_base && !rearmed_window_anchor)) {
+            continue;
+        }
         if (group.rewrite &&
             (plan->rewrite_disposition !=
                  RewriteCheckpointDisposition::ReplaceAtCommittedFrontier ||

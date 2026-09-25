@@ -1068,6 +1068,15 @@ private:
     continuation_summary(const SequenceState& sequence) const;
     void populate_continuation_summary(const SequenceState& sequence,
                                        qwen3_6::ContinuationSummary& summary) const;
+    // KVMem K1b: the completed-window edge this sequence may compact to. Nonzero
+    // only when a private long anchor already sits exactly on that edge, because
+    // the truncation drops the full-context endpoint and the anchor is then the
+    // continuation's only truthful resume point.
+    [[nodiscard]] std::uint32_t kvmem_compaction_edge(const SequenceState& sequence) const;
+    // Commits a completed compaction window to the continuation bookkeeping:
+    // truncates the token ledger to the window, drops the now-unmaterializable
+    // endpoint, and rebases the rebuild accounting onto the window anchor.
+    void kvmem_apply_window(SequenceState& sequence, std::uint32_t window);
     [[nodiscard]] qwen3_6::SharedPrefixSummary
     shared_prefix_summary(const SharedPrefixState& shared) const;
     [[nodiscard]] std::optional<MaterializationSourceProtection>

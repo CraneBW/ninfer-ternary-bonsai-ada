@@ -1,7 +1,8 @@
 # KVMem K0+K1 设计：宿主块仓库与窗口组装（zatfung）
 
-状态：K0 实现中；K1 为下一步。基线见 `perf-baseline-sm86.md`；机制评估见
-`kvmem-reference-assessment.md`。参考实现：`laamaafung/kvmem/`（v26 线）。
+状态：K0/K1a/K1b/K2 已实现（K1b 的 serve 语义见 §6）；K3 见 §7。基线见
+`perf-baseline-sm86.md`；机制评估见 `kvmem-reference-assessment.md`。参考实现：
+`laamaafung/kvmem/`（v26 线）。
 
 ## 0. 本文档修正一处早前判断
 
@@ -109,3 +110,44 @@ PQ2_0 权重 6.70 GiB，启动后仅剩 ~12 MiB —— **在 PQ2_0 上做 K1b �
 要么降低 kv-capacity（现有 auto 会按剩余显存算）、要么用 PTQ1_0（5.52 GiB 权重，
 1.0 GiB 可用于 KV+工作区，int8 KV 4096 token 仅 132 MiB）。
 **建议 K1b 的性能对比用 PQ2_0、功能开发用 PTQ1_0**，与基线文档口径一致。
+
+## 6. K1b serve 语义：窗口 + 窗口边缘锚点（已实现）
+
+**问题**：`finish()` 处的轮末压实把 token 账本截到头窗口，却没有同步序列的
+`rebuild_work`，于是 `checkpoint rebuild work does not match its frontier` 被吞掉，
+**整条 continuation 根本没进目录** —— 表现为每轮 base=0、全量重预填充，压实只换来显存封顶。
+
+**契约**：continuation 的每个 checkpoint 都带 `required_kv.main_frontier/pages`，页数与
+frontier 一一对应，且 checkpoints 的 StateImage 必须真的处于那个 frontier。窗口若截到
+`W < frontier`，全上下文 endpoint 就不可物化，必须连同 turn-closure rewrite 一起丢弃。
+
+**解法**（窗口边缘的真实复原点）：
+
+1. `plan_request` 为 KVMem 地址追加一个 frontier = `kvmem_window_edge(prompt)` 的私有
+   **long anchor** capture（= 页对齐后的 `NINFER_KVMEM_BUDGET`；会切开 media consumer 的
+   边界直接放弃，本轮 KVMem 不生效）。prefill 走到该 frontier 时快照出的 state 就是窗口
+   边缘的 state，代价只有一次状态快照。
+2. `finish` 只在**该锚点存在**时才允许压实（`kvmem_compaction_edge`）。压实成功后
+   `kvmem_apply_window` 截断 ledger/prefix_identity/prefix_digests/`text_kv_valid`/
+   `execution_frontier`，把 `rebuild_work` 重挂到锚点的 build work，并**丢弃 endpoint**
+   （连同其 StateImage）——从此锚点是这条 continuation 唯一诚实的复原点。
+3. 下一轮 `inspect_lane` 走 `PrivateLongAnchor`，base = 窗口长度。窗口是连续头前缀，
+   位置天然对齐，**无需 K2 重铸**；新 token 位置从 `total_window_tokens` 起算（K1a 约定）。
+4. 该锚点**每轮重新捕获**：reuse 时以 `ConsumeToActive` 消费它（锚点 image 直接成为
+   active state），于是在 `cursor == base` 处捕获不会落在未结算的 state fork 后面
+   （引擎禁止未结算 fork 上开 capture transaction）。因此锚点自续，不需要跨轮继承。
+5. tracker 账本跟随地址：resume/分叉带来的既有页在 `ensure_mapped_to_tokens` 里按
+   born-placed 补登记；`destructive_truncate*` 走 `kvmem_forget_window_tail` 忘掉窗口外的
+   块并交还宿主副本。
+
+**验收**（RTX 3060 Ti / PTQ1_0 / int8 KV / `NINFER_KVMEM=1 NINFER_KVMEM_BUDGET=512`
+`--max-shared-prefixes 0`）：turn 2/3 的 `cache` = 512（路径 `private_long_anchor`），
+prefill token 1335/1368 → 823/856，TTFT 34.6s → 22.4s/23.3s，回答不变；KVMem 关闭时
+默认路径仍复用整段 turn-closure 前缀（97%）。
+
+## 7. K3 仍待做
+
+窗口现在是**连续头前缀**，因此省下的是"预算那么大"的 prefill，而不是 KVMem 论文里
+"丢中段、留尾部"的收益。要拿到后者需要在注意力里表达非连续子序列，并让 continuation
+契约支持 `KV 页数 ≠ frontier`（位置原点另行携带）；查询驱动的尾部保留与对应的重铸记账
+都在那一层。
