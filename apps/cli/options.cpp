@@ -58,6 +58,14 @@ KvCacheStorage parse_kv_cache(std::string_view text) {
     if (text == "fp8") { return KvCacheStorage::Fp8E4M3Row256; }
     if (text == "nvfp4") { return KvCacheStorage::Nvfp4Group16; }
     if (text == "k8v4") { return KvCacheStorage::Fp8KeyNvfp4Value; }
+    // Packed int4 (port sergiuszm/ninfer-4090); only the sm_89 build registers the kernels, and
+    // the planner refuses to start on anything else. The server has taken these two values all
+    // along -- src/serve/serve_options.cpp:57 -- but this parser is a second copy and never got
+    // them, so `ninfer --kv-dtype rk4v4` failed with "invalid kv-dtype" while `ninfer-serve`
+    // accepted the same string. On a 16 GB card the difference is the whole context window:
+    // 262,144 tokens fit in 4.71 GiB here, against 8.54 GiB for bf16/fp8, which do not fit at all.
+    if (text == "rk4v4") { return KvCacheStorage::RotatedInt4KeyInt4ValueGroup64; }
+    if (text == "rk4v4-e8") { return KvCacheStorage::RK4V4E8; }
     throw std::invalid_argument("invalid kv-dtype: " + std::string(text));
 }
 
@@ -80,7 +88,8 @@ std::string usage_text(const char* argv0) {
            " <model.ninfer> (--prompt <text>|--messages <messages.json>)\n"
            "       [--max-context N] [--kv-capacity N|auto] [--prefill-chunk N] [--max-new N]\n"
            "       [--device N]\n"
-           "       [--kv-dtype bf16|int8|fp8|nvfp4|k8v4] [--spec mtp|dflash|dflash2 --draft-tokens "
+           "       [--kv-dtype bf16|int8|fp8|nvfp4|k8v4|rk4v4|rk4v4-e8] [--spec mtp|dflash|dflash2 "
+           "--draft-tokens "
            "N]\n"
            "       [--lm-head-draft]\n"
            "       [--temperature F] [--top-p F] [--top-k N] [--min-p F]\n"
