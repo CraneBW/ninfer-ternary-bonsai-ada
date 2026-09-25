@@ -1,8 +1,10 @@
 #pragma once
 
 #include "core/paged_kv_cache.h"
+#include "kvmem/kvmem_blocks.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -843,6 +845,13 @@ public:
             page_capacity != tables.logical_page_capacity()) {
             throw std::invalid_argument("KV address-space geometry is invalid");
         }
+        // KVMem K1a: NINFER_KVMEM=1 mirrors the page lifecycle into a K0 block
+        // repository per address and re-plans the (passthrough) window on every
+        // frontier commit. Purely observational -- no engine state is redirected.
+        if (const char* env = std::getenv("NINFER_KVMEM"); env != nullptr && env[0] == '1') {
+            kvmem_enabled_ = true;
+            kvmem_repos_.resize(address_capacity);
+        }
         for (std::uint32_t index = 0; index < address_capacity; ++index) {
             free_[index] = address_capacity - 1U - index;
         }
@@ -1474,6 +1483,26 @@ public:
         }
         for (const LogicalKVPageHandle page : added) { pages_->retain_active_reference(page); }
         address.page_count = target;
+        if (kvmem_enabled_) {
+            auto& repo          = kvmem_repos_[address_index];
+            std::uint32_t added_i = 0;
+            for (const LogicalKVPageHandle page : added) {
+                ninfer::kvmem::KvBlockMeta m;
+                m.id          = repo.block_count();
+                m.token_begin = static_cast<std::uint64_t>(begin + added_i) *
+                                static_cast<std::uint32_t>(kPagedKVPageSize);
+                m.n_tokens = static_cast<std::uint32_t>(kPagedKVPageSize);
+                // Appended blocks are BORN PLACED: the append kernel already baked
+                // their K at the current end of window (= this natural slot), so
+                // they register as resident with valid phases, exactly like
+                // laamaafung's register_append.
+                m.baked_pos       = m.token_begin;  // window-token units
+                m.in_working_set  = true;
+                repo.append(m);
+                repo.set_tier(m.id, ninfer::kvmem::KvTier::Gpu);
+                ++added_i;
+            }
+        }
     }
 
     void commit_frontier(KVAddressSpaceHandle handle, std::uint32_t frontier) {
@@ -1494,6 +1523,10 @@ public:
             }
         }
         address.committed_frontier = frontier;
+        if (kvmem_enabled_) {
+            kvmem_plan_passthrough(static_cast<std::size_t>(&address - addresses_.data()),
+                                   address);
+        }
     }
 
     void destructive_truncate(KVAddressSpaceHandle handle, std::uint32_t frontier) {
@@ -1731,6 +1764,7 @@ public:
         address                        = Address{};
         address.generation             = generation;
         free_[free_count_++]           = index;
+        if (kvmem_enabled_) { kvmem_repos_[index] = {}; }
         rebuild_checkpoint_protection();
         return true;
     }
@@ -1851,6 +1885,63 @@ private:
         }
         tables_->publish(address.row->handle(), 0, publish_scratch_, stream);
     }
+
+    // ---- KVMem K1a (observational passthrough) ----
+    // Mirrors the page lifecycle into K0 block repositories and re-plans the
+    // window on every frontier commit. In passthrough the selection is "every
+    // mapped page in order", so the plan must always cover exactly the mapped
+    // tokens and every remap must be skip-or-first-placement. The executor
+    // contract is applied right after planning: staged-in ids become Gpu.
+    void kvmem_plan_passthrough(std::size_t index, const Address& address) {
+        auto& repo = kvmem_repos_[index];
+        const std::uint32_t want = address.page_count;
+        if (repo.block_count() > want) { repo.truncate(want); }
+        for (std::uint32_t id = repo.block_count(); id < want; ++id) {
+            ninfer::kvmem::KvBlockMeta m;
+            m.id          = id;
+            m.token_begin = static_cast<std::uint64_t>(id) *
+                            static_cast<std::uint32_t>(kPagedKVPageSize);
+            m.n_tokens = static_cast<std::uint32_t>(kPagedKVPageSize);
+            // Shared/forked memberships skip ensure_mapped_to_tokens; their pages
+            // were baked by the source at the SAME window slots, so they are also
+            // born-placed.
+            m.baked_pos      = m.token_begin;  // window-token units
+            m.in_working_set = true;
+            repo.append(m);
+            repo.set_tier(id, ninfer::kvmem::KvTier::Gpu);
+        }
+        ninfer::kvmem::KvSelection sel;
+        sel.block_ids.reserve(repo.block_count());
+        for (std::uint32_t id = 0; id < repo.block_count(); ++id) { sel.block_ids.push_back(id); }
+        ninfer::kvmem::KvSelectConfig cfg;
+        cfg.budget_tokens =
+            static_cast<std::uint32_t>(repo.block_count()) * static_cast<std::uint32_t>(kPagedKVPageSize);
+        ninfer::kvmem::KvWindowPlan plan = repo.set_selection(sel, cfg);
+        if (plan.total_window_tokens !=
+            static_cast<std::uint64_t>(address.page_count) *
+                static_cast<std::uint64_t>(kPagedKVPageSize)) {
+            throw std::logic_error("KVMem passthrough window accounting diverged");
+        }
+        for (const ninfer::kvmem::KvRemap& rm : plan.remaps) {
+            if (!rm.skip && !rm.raw_refresh) {
+                const ninfer::kvmem::KvBlockMeta& b = kvmem_repos_[index].blocks()[rm.block_id];
+                throw std::logic_error(
+                    "KVMem passthrough remap must be skip or first placement: id=" +
+                    std::to_string(rm.block_id) + " baked=" + std::to_string(rm.from_base) +
+                    " to=" + std::to_string(rm.to_base) + " tier=" +
+                    std::to_string(static_cast<int>(b.tier)) + " in_ws=" +
+                    std::to_string(static_cast<int>(b.in_working_set)) + " pages=" +
+                    std::to_string(address.page_count) + " plans=" +
+                    std::to_string(kvmem_plans_));
+            }
+        }
+        for (const std::uint32_t id : plan.stage_in) { repo.set_tier(id, ninfer::kvmem::KvTier::Gpu); }
+        ++kvmem_plans_;
+    }
+
+    bool kvmem_enabled_ = false;
+    std::vector<ninfer::kvmem::KvBlockRepository> kvmem_repos_;
+    std::uint64_t kvmem_plans_ = 0;
 
     LogicalKVPageStore* pages_    = nullptr;
     KVExecutionTablePool* tables_ = nullptr;

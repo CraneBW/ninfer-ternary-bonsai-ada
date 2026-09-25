@@ -266,6 +266,15 @@ public:
         return blocks_.empty() ? 0 : blocks_.back().token_begin + blocks_.back().n_tokens;
     }
 
+    // Drops tail blocks beyond `count` (the destructive-truncate analogue). Only
+    // valid while the dropped tail was never part of a committed working set.
+    void truncate(std::uint32_t count) {
+        if (count > blocks_.size()) {
+            throw std::invalid_argument("kvmem: truncate count exceeds block count");
+        }
+        blocks_.resize(count);
+    }
+
     void set_tier(std::uint32_t id, KvTier tier) {
         if (id >= blocks_.size()) { throw std::invalid_argument("kvmem: bad block id"); }
         blocks_[id].tier = tier;
