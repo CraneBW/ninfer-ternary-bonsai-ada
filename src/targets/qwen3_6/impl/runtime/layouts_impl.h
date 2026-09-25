@@ -713,8 +713,13 @@ void validate_target_options(DeviceContext& device, const EngineOptions& options
         }
         break;
     }
-    if (device.compute_capability() != 120 && device.compute_capability() != 89) {
-        throw std::invalid_argument("Qwen3.6 family runtime requires compute capability 12.0 or 8.9");
+    // sm_86 joins 89/120a: the FP8-only kernels are filtered out at build time
+    // (see src/CMakeLists.txt and ops/fp8_legacy_stubs.cpp), so every route the
+    // planner can pick below exists in an SM86 build.
+    if (device.compute_capability() != 120 && device.compute_capability() != 89 &&
+        device.compute_capability() != 86) {
+        throw std::invalid_argument(
+            "Qwen3.6 family runtime requires compute capability 12.0, 8.9 or 8.6");
     }
 }
 
