@@ -264,18 +264,22 @@ void require_ternary_attn_parents(const Weight& query_key_weight,
 }
 
 // The activation is `hidden` wide for all four projections, so one rotation serves all of them.
+// `scratch` is the int8 rung's activation-quantization scratch (empty = stay on the bf16 rungs);
+// the caller allocates it from its arena because this function never sees one -- see
+// allocate_ternary_s8_scratch. Passing it is what lets these four projections take the s8 rung on a
+// long prefill, where they would otherwise fall all the way back to bf16.
 void launch_ternary_attn(const Tensor& activation, const Weight& query_key_weight,
                          const Weight& gate_value_weight, Tensor& q, Tensor& gate, Tensor& k,
                          Tensor& v, std::int32_t query_rows, std::int32_t kv_rows,
-                         cudaStream_t stream) {
+                         detail::TernaryS8Scratch scratch, cudaStream_t stream) {
     const Weight q_head = detail::ternary_row_view(query_key_weight, 0, query_rows);
     const Weight k_tail = detail::ternary_row_view(query_key_weight, query_rows, kv_rows);
     const Weight g_head = detail::ternary_row_view(gate_value_weight, 0, query_rows);
     const Weight v_tail = detail::ternary_row_view(gate_value_weight, query_rows, kv_rows);
-    detail::ternary_dispatch_basis(activation, q_head, q, LinearPolicy::A16Only, stream);
-    detail::ternary_dispatch_basis(activation, g_head, gate, LinearPolicy::A16Only, stream);
-    detail::ternary_dispatch_basis(activation, k_tail, k, LinearPolicy::A16Only, stream);
-    detail::ternary_dispatch_basis(activation, v_tail, v, LinearPolicy::A16Only, stream);
+    detail::ternary_dispatch_basis(activation, q_head, q, LinearPolicy::A16Only, stream, scratch);
+    detail::ternary_dispatch_basis(activation, g_head, gate, LinearPolicy::A16Only, stream, scratch);
+    detail::ternary_dispatch_basis(activation, k_tail, k, LinearPolicy::A16Only, stream, scratch);
+    detail::ternary_dispatch_basis(activation, v_tail, v, LinearPolicy::A16Only, stream, scratch);
 }
 
 } // namespace
@@ -303,7 +307,7 @@ void attn_input_proj(const Tensor& x, const Weight& query_key_weight,
                 "(or NINFER_TERNARY_HADAMARD=0 to measure without the rotation)");
         }
         launch_ternary_attn(x, query_key_weight, gate_value_weight, q, gate, k, v, kQRows, kKvRows,
-                            stream);
+                            detail::TernaryS8Scratch{}, stream);
         return;
     }
 
@@ -333,12 +337,16 @@ void attn_input_proj(const Tensor& x, const Weight& query_key_weight,
     }
     require_ternary_attn_parents(query_key_weight, gate_value_weight, kQRows + kKvRows, kHidden);
     // Scoped: the rotation scratch is handed back when this call returns, so it does not
-    // accumulate across the (many) graph constructions of one load.
+    // accumulate across the (many) graph constructions of one load. The int8 scratch rides in the
+    // same scope, and the arena capacity already counts its bytes (ternary_rotation_workspace_bytes
+    // is this op's capacity statement).
     auto scope = workspace.scope();
     const Tensor activation =
         detail::folded_activation(x, query_key_weight, workspace, stream);
+    const detail::TernaryS8Scratch s8_scratch =
+        detail::allocate_ternary_s8_scratch(workspace, kHidden, cols);
     launch_ternary_attn(activation, query_key_weight, gate_value_weight, q, gate, k, v, kQRows,
-                        kKvRows, stream);
+                        kKvRows, s8_scratch, stream);
 }
 
 void attn_input_proj(const Tensor& x, const Weight& query_key_gate_value_weight, Tensor& q,

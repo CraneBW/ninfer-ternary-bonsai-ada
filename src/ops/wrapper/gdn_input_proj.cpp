@@ -763,10 +763,14 @@ void require_ternary_split_parents(const Weight& qk_weight, const Weight& value_
     }
 }
 
+// `scratch` is the int8 rung's activation-quantization scratch (empty = stay on the bf16 rungs);
+// the caller allocates it from its arena because this function never sees one -- see
+// allocate_ternary_s8_scratch. Passing it is what lets these three projections take the s8 rung on a
+// long prefill, where they would otherwise fall all the way back to bf16.
 void launch_ternary_split(const Tensor& activation, const Weight& qk_weight,
                           const Weight& value_z_weight, Tensor& qkv, Tensor& z,
                           std::int32_t qk_rows, std::int32_t value_rows, std::int32_t z_rows,
-                          cudaStream_t stream) {
+                          detail::TernaryS8Scratch scratch, cudaStream_t stream) {
     const Weight value_head = detail::ternary_row_view(value_z_weight, 0, value_rows);
     const Weight value_tail = detail::ternary_row_view(value_z_weight, value_rows, z_rows);
     // Under ninfer's ne[0]-contiguous layout the token stride of the fused qkv output is its ROW
@@ -775,10 +779,11 @@ void launch_ternary_split(const Tensor& activation, const Weight& qk_weight,
     Tensor qk_out               = qkv.slice(0, 0, qk_rows);
     Tensor value_out            = qkv.slice(0, qk_rows, value_rows);
     detail::ternary_dispatch_basis_strided(activation, qk_weight, qk_out, qkv_rows,
-                                           LinearPolicy::A16Only, stream);
+                                           LinearPolicy::A16Only, stream, scratch);
     detail::ternary_dispatch_basis_strided(activation, value_head, value_out, qkv_rows,
-                                           LinearPolicy::A16Only, stream);
-    detail::ternary_dispatch_basis(activation, value_tail, z, LinearPolicy::A16Only, stream);
+                                           LinearPolicy::A16Only, stream, scratch);
+    detail::ternary_dispatch_basis(activation, value_tail, z, LinearPolicy::A16Only, stream,
+                                   scratch);
 }
 
 } // namespace
@@ -807,7 +812,7 @@ void gdn_input_proj(const Tensor& x, const Weight& qk_weight, const Weight& valu
                 "(or NINFER_TERNARY_HADAMARD=0 to measure without the rotation)");
         }
         launch_ternary_split(x, qk_weight, value_z_weight, qkv, z, kQkRows, kValueRows, kZRows,
-                             stream);
+                             detail::TernaryS8Scratch{}, stream);
         return;
     }
 
@@ -836,12 +841,16 @@ void gdn_input_proj(const Tensor& x, const Weight& qk_weight, const Weight& valu
         return;
     }
     require_ternary_split_parents(qk_weight, value_z_weight, kQkRows, kParentRows, kHidden);
-    // Scoped: the rotation scratch is handed back when this call returns, so it does not
-    // accumulate across the (many) graph constructions of one load.
+    // Scoped: the rotation scratch is handed back when this call returns, so it does not accumulate
+    // across the (many) graph constructions of one load. The int8 scratch rides in the same scope,
+    // and the arena capacity already counts its bytes (gdn_input_proj's ternary capacity calls
+    // ternary_rotation_workspace_bytes).
     auto scope             = workspace.scope();
     const Tensor activation = detail::folded_activation(x, qk_weight, workspace, stream);
+    const detail::TernaryS8Scratch s8_scratch =
+        detail::allocate_ternary_s8_scratch(workspace, kHidden, cols);
     launch_ternary_split(activation, qk_weight, value_z_weight, qkv, z, kQkRows, kValueRows,
-                         kZRows, stream);
+                         kZRows, s8_scratch, stream);
 }
 
 std::size_t gdn_input_proj_workspace_capacity_bytes(QType parent_qtype, std::int32_t parent_rows,
@@ -1076,8 +1085,10 @@ void gdn_input_proj_conv_snapshot(const Tensor& x, const Weight& qk_weight,
         auto scope                 = ws.scope();
         ProjectedWorkspace scratch = allocate_projected_workspace(ws, kChannels, geometry.width);
         const Tensor activation = detail::folded_activation(x, qk_weight, ws, stream);
+        const detail::TernaryS8Scratch s8_scratch =
+            detail::allocate_ternary_s8_scratch(ws, qk_weight.k, x.ne[1]);
         launch_ternary_split(activation, qk_weight, value_z_weight, scratch.projected, z,
-                             kQueryRows + kKeyRows, kValueRows, kZRows, stream);
+                             kQueryRows + kKeyRows, kValueRows, kZRows, s8_scratch, stream);
         detail::gdn_projected_conv_snapshot_launch(scratch.projected, conv_weight, conv_states,
                                                    valid_columns, initial_state_slots,
                                                    snapshot_base_slots, query, key, value, stream);
@@ -1159,9 +1170,12 @@ void gdn_input_proj_conv_record(const Tensor& x, const Weight& qk_weight,
                            auto lambda_scope = workspace.scope();
                            const Tensor activation =
                                detail::folded_activation(x_flat, qk_weight, workspace, stream);
+                           const detail::TernaryS8Scratch s8_scratch =
+                               detail::allocate_ternary_s8_scratch(workspace, qk_weight.k,
+                                                                   x_flat.ne[1]);
                            launch_ternary_split(activation, qk_weight, value_z_weight, record_flat,
                                                 z_flat, kQueryRows + kKeyRows, kValueRows, kZRows,
-                                                stream);
+                                                s8_scratch, stream);
                        });
         return;
     }

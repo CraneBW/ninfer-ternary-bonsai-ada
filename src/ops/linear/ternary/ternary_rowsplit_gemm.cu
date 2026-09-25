@@ -8,9 +8,11 @@
 #include "ops/linear/ternary/ternary_launch.h"
 #include "ops/linear/ternary/ternary_rowsplit_gemv.cuh"
 #include "ops/linear/ternary/ternary_rowsplit_mma.cuh"
+#include "ops/linear/ternary/ternary_rowsplit_mma_s8.cuh"
 #include "ops/linear/ternary/ternary_rowsplit_mma_small_t.cuh"
 
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <limits>
 #include <stdexcept>
@@ -143,9 +145,50 @@ bool gemv_admits(const Tensor& x, const Weight& w, std::int32_t max_tokens) {
            (w.k % 128) == 0 && x.ne[1] >= 1 && x.ne[1] <= max_tokens && x.ne[0] == w.k;
 }
 
+void launch_small_t(const Tensor& x, const Weight& w, Tensor& out, std::int32_t out_row_stride,
+                    cudaStream_t stream);
+
+// A warp takes one whole 128-wide quant group, so K has to hold whole K groups. Declared here
+// rather than next to the verify route that first needed it, so both entry points name it.
+inline constexpr std::int32_t kSmallTGroupK = 8 * 128;
+
+// Decode (T == 1) takes the tensor-core kernel by default; NINFER_TERNARY_DECODE=gemv restores the
+// warp-per-row GEMV as the A/B arm.
+//
+// The GEMV is the one this path has always used -- one warp per row, no barriers -- but it predates
+// the tensor-core verify path and had never been measured against it. It loses. Two like-for-like
+// numbers, both under nsys on the en-code fixture: the 34816x5120 shape costs 96.2 us on the GEMV
+// against 83.4 on the tensor-core kernel, and the matmul half of a whole forward costs 14.45 ms at
+// T=1 against 13.36 ms at T=3 -- the tensor-core kernel does MORE work (three tokens) in LESS time.
+// (Compare those two against each other, not a matmul time against a whole-forward time; the
+// non-matmul kernels -- rotation, GDN, attention -- add roughly 2 ms either way.) End to end the
+// switch is 60.0 -> 65.8 t/s, reproduced across runs; the generated text stays fluent and PPL,
+// unchanged at 9.69192, only exercises prefill so it does not cover this path.
+//
+// Worth noting why it wins at T=1 even though its token tile is eight wide: the kernel's cost is
+// governed by weight traffic rather than by token count, so seven empty columns cost almost
+// nothing, while the SIMT decode pays four integer instructions per weight on a core that is
+// already issue-bound.
+bool decode_uses_small_t() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("NINFER_TERNARY_DECODE");
+        return value == nullptr || std::string(value) != "gemv";
+    }();
+    return enabled;
+}
+
 void launch_ternary_gemm_t1(const Tensor& x, const Weight& w, Tensor& out,
-                            std::int32_t out_row_stride, cudaStream_t stream) {
+                            std::int32_t out_row_stride, cudaStream_t stream,
+                            // Decode is one token wide, three orders of magnitude below the int8
+                            // rung's threshold, so this entry never needs the scratch. The parameter
+                            // exists because TernaryLaunch is one function-pointer type for both
+                            // entry points.
+                            TernaryS8Scratch /*scratch*/) {
     if (gemv_admits(x, w, 1)) {
+        if (decode_uses_small_t() && (w.k % kSmallTGroupK) == 0) {
+            launch_small_t(x, w, out, out_row_stride, stream);
+            return;
+        }
         launch_pq2_gemv_tile(x, w, out, out_row_stride, x.ne[1], stream);
         return;
     }
@@ -221,8 +264,25 @@ bool verify_uses_small_t() {
     return enabled;
 }
 
-// A warp takes one whole 128-wide quant group, so K has to hold whole K groups.
-inline constexpr std::int32_t kSmallTGroupK = 8 * 128;
+// How many tokens the verify-shaped entry admits. It was 4 because the draft window was 3
+// (T = draft + 1) and nothing wider had been tried; the small-T kernel's token tile is 8 wide and
+// it already handles a partial tile -- `live_cols = tokens < TileCols ? tokens : TileCols`, dead
+// columns zeroed, store gated on `col0 < tokens` -- so 4 was a policy choice, not a kernel limit.
+//
+// Measured end to end at draft 4 (T = 5), which the old cap pushed onto the blocked GEMV: 28.6 t/s
+// against 101.6 at draft 3, while acceptance kept rising (2.08 -> 2.11 tok/round). The cap was the
+// only thing standing between draft 4 and the tensor-core kernel.
+//
+// Clamped to the token tile (8): past it the kernel would stage eight columns and leave the rest of
+// the output unwritten, silently.
+int verify_token_cap() {
+    static const int cap = [] {
+        const char* value = std::getenv("NINFER_TERNARY_VERIFY_CAP");
+        const int parsed  = value == nullptr ? 0 : std::atoi(value);
+        return (parsed >= 1 && parsed <= 8) ? parsed : 8;
+    }();
+    return cap;
+}
 
 // Row block per CTA, i.e. how many mma m-tiles share one activation staging. 16 is the shape the
 // kernel was written at and stays the reference; 32 and 48 exist because activations cost more of
@@ -268,14 +328,166 @@ void launch_small_t(const Tensor& x, const Weight& w, Tensor& out, std::int32_t 
     CUDA_CHECK(cudaGetLastError());
 }
 
+// small_t with a token loop, expressed at the LAUNCHER rather than in the kernel.
+//
+// The kernel's token tile is eight wide and it has no outer loop -- live_cols = min(tokens, 8) and
+// the epilogue guards every store -- so a T wider than eight is served by re-entering it once per
+// tile. The reference port puts the loop inside its kernel; this reaches the same place with no
+// kernel change and no new correctness surface, at the cost of one extra launch per tile
+// (~8 us on a tile that costs milliseconds).
+//
+// The weight re-staging is the point, not a side effect: re-entering re-reads the weight window,
+// which is exactly the reference port's measured model for this rung (small_t == 10.2 ms *
+// ceil(T/8) against a wide tile that is flat at ~54 ms). At 8 tokens per pass the two cross at
+// T = 41 on their shapes -- but that crossing is between THEIR two kernels, and it is the MMA
+// threshold here that gets to decide, not this loop.
+//
+// Slicing rather than a kernel parameter: x is ne[0]-contiguous, so slicing the token axis gives a
+// view whose data pointer is already t0 * k elements in, and out's nb[1] already carries the
+// parent's row stride -- which is the stride the launcher is handed. Nothing here has to know the
+// width of either.
+void launch_small_t_tiled(const Tensor& x, const Weight& w, Tensor& out,
+                          std::int32_t out_row_stride, cudaStream_t stream) {
+    constexpr std::int32_t kTile = 8;
+    const std::int32_t tokens    = x.ne[1];
+    for (std::int32_t t0 = 0; t0 < tokens; t0 += kTile) {
+        const std::int32_t remaining = tokens - t0;
+        const std::int32_t tile      = remaining < kTile ? remaining : kTile;
+        // Named, not inline: launch_small_t takes `Tensor& out` and a temporary cannot bind to it.
+        Tensor x_tile   = x.slice(1, t0, tile);
+        Tensor out_tile = out.slice(1, t0, tile);
+        launch_small_t(x_tile, w, out_tile, out_row_stride, stream);
+    }
+}
+
 // The measured winner of the K=64 sweep on the target card: 64 output rows, a 128-token tile, 8
 // warps laid out 2x4, two cp.async stages, two CTAs per SM. It beat 64x64, 128x64, 16-warp and
 // 32-warp variants (37.0 ms against 41.4-54.8 on the 248320x5120 head at T=1024).
+//
+// That sweep was run AT T=1024, where a 128-token tile is full. Below 128 it is not, and the tile
+// width is not a throughput knob there -- it is a tax. This kernel's only token split is
+// grid.y = div_up(T, BN) (col0 = blockIdx.y * BN) and its outer loop is over K, not over tokens:
+// a CTA handed fewer than 128 tokens stages and multiplies the whole 128-wide tile and merely
+// guards the STORE. So the fill fraction is T / (128 * ceil(T/128)), and at T=58 that is 45%
+// against the 64-wide variant's 91%.
+//
+// The port's own measurement already contained this number and read it the other way: the
+// three-way split that fitted kMmaMinTokens reports "MMA is flat in T (0.149 s at T=39 and T=128)"
+// and used the flatness to justify lowering the threshold. Flat in T is the symptom, not the
+// virtue -- T=39 was paying for 128 columns. Cross-engine it shows up as T=42 reading 232.7 t/s
+// here against the reference port's bf16 521.5 on the same fixture (2.24x), and T=58 reading 363
+// against 606 (1.67x).
+//
+// So the tile is chosen by T: at most kMmaShortTileTokens takes the 64-wide schedule (26880 B of
+// shared, three CTAs per SM at 384 threads, which leaves ~170 registers per thread -- no register
+// squeeze), above it takes the 128-wide one. Both keep a whole 128-wide quant group per K tile, so
+// the K accumulation order is untouched and the result is expected bit-identical.
 using TernaryMmaPrefillSchedule = TernaryMmaSchedule<64, 128, 64, 32, 32, 2, 2>;
+using TernaryMmaShortSchedule   = TernaryMmaSchedule<64, 64, 64, 32, 32, 2, 3>;
+
+// Token count up to which the 64-wide tile is used. 64 is where the two fills cross: at T=64 the
+// short tile is 100% full and the wide one 50%; at T=65 the short schedule needs a SECOND weight
+// pass (ceil(65/64) = 2) while the wide one still needs one, so the wide tile wins from 65 up
+// until its own fill drops again. Overridable so the crossing can be swept without a rebuild.
+inline constexpr std::int32_t kMmaShortTileTokens = 64;
+
+int mma_short_tile_tokens() {
+    static const int threshold = [] {
+        const char* value = std::getenv("NINFER_TERNARY_SHORT_TILE_TOKENS");
+        const int parsed  = value == nullptr ? 0 : std::atoi(value);
+        return parsed > 0 ? parsed : static_cast<int>(kMmaShortTileTokens);
+    }();
+    return threshold;
+}
 
 // A token tile narrower than half the block wastes the pipeline, so short verification-shaped T
 // stays on the SIMT path even though the kernel would be correct there.
-inline constexpr std::int32_t kMmaMinTokens = 64;
+//
+// The 64 was inherited from the 128-wide token tile and had never been re-fitted on this card. It
+// is also the cliff between the MMA route and the blocked GEMV: at T=58 this engine measures
+// 167 t/s, while the same engine's MMA at T=84 measures 550 -- and the reference port's bf16
+// rungs measure 606 at T=58. The token tile is not full either way, which is what the policy
+// assumed would favour the SIMT path; the measurement says otherwise.
+//
+// Re-fitted on the 4070 Ti SUPER by the reference port's two-line method (fit each rung, take the
+// crossing). Three-way split on a 167-token prompt at chunk=128 separates the two chunks: all-GEMV
+// 1.067 s, all-MMA 0.2985 s, 128-on-MMA + 39-on-GEMV 0.4210 s, which solves to MMA 0.149 s and
+// GEMV 0.272 s at T=39 -- the MMA still wins by 1.83x there. MMA is flat in T (0.149 s at T=39 and
+// T=128), GEMV is linear at 6.4 ms/token, so the crossing sits near T=23. 32 is that fit rounded
+// up to the token tile's own 8-token granularity, chosen on the conservative side of the estimate.
+// Measured directly: T=39/54/58/65 all favour the MMA by 1.8-2.6x, and T >= 64 was already on it.
+//
+// Overridable so the crossing can be swept without a rebuild. Same lever the reference port
+// exposes as NINFER_TERNARY_WIDE_MIN_TOKENS, and its manual is explicit that the value is a
+// property of the card and has to be re-measured rather than copied.
+inline constexpr std::int32_t kMmaMinTokens = 32;
+
+int mma_min_tokens() {
+    static const int threshold = [] {
+        const char* value = std::getenv("NINFER_TERNARY_MMA_MIN_TOKENS");
+        const int parsed  = value == nullptr ? 0 : std::atoi(value);
+        return parsed > 0 ? parsed : static_cast<int>(kMmaMinTokens);
+    }();
+    return threshold;
+}
+
+// Which rung serves the band between the 8-wide small-T tile and the MMA threshold -- T = 9..31.
+//
+// This band is the dispatch's own hole and it is the one a SHORT PROMPT lands in. The token count
+// the linear ops see is prompt_tokens - 4 (measured across seven fixtures, consistently), so
+// kMmaMinTokens = 32 really means "prompts of 36 or more", and an ordinary question -- "Write a
+// bash script that finds the ten largest files under a directory", 35 prompt tokens -- sees T = 31
+// and used to fall all the way through to the blocked SIMT GEMV. That GEMV is the rung this file's
+// own note measures at 8.3-9.8x slower than the tensor-core path at T=1024.
+//
+// Which arm serves it is a measurement and not an argument, so all of them are reachable:
+//   auto    (default) -- small_t up to kGapSmallTMaxTokens, int8 above it. The two cost models
+//                        cross there, and unlike the reference port's ranking this one is measured
+//                        on this port's own kernels.
+//   small_t           -- the 8-wide tensor-core kernel re-entered once per tile, forced
+//   s8                -- the int8 rung, with its own threshold bypassed, forced
+//   gemv              -- the blocked GEMV, i.e. the behaviour before this branch existed
+// The reference port's T sweep puts ITS small_t 1.8-2.5x ahead of its wide tile over this exact
+// range, and its s8 table puts small_t ahead of s8 everywhere below T=32 -- but both of those are
+// its kernels, and its s8 table's own cell for T=16 matches this port's s8 to within 5%, so the
+// ranking was re-run rather than copied. On this port small_t wins T=9..16 and int8 wins T=17..31.
+// Above this token count the gap band prefers int8 over the 8-wide tensor-core kernel.
+//
+// The two cost models are different in kind, which is what makes the crossing real rather than a
+// tuning artifact. small_t re-reads the weight window once per 8-token tile -- the reference port's
+// fitted form is `10.2 ms * ceil(T/8)` -- while s8 stages its tile once and is therefore nearly
+// flat: measured here, 44.3 ms at T=15 against 50.7 ms at T=27.
+//
+// On this card one small_t pass costs about 20 ms, so at ceil(T/8) = 2 (T <= 16) it wins narrowly,
+// and from ceil(T/8) = 3 (T >= 17) it loses to a flat ~45-50 ms. Measured: T=16 gives small_t
+// 41.1 ms against s8 44.3 ms, T=27 gives small_t 68.5 ms against s8 50.7 ms. Overridable so the
+// crossing can be swept rather than trusted.
+inline constexpr std::int32_t kGapSmallTMaxTokens = 16;
+
+int gap_small_t_max_tokens() {
+    static const int threshold = [] {
+        const char* value = std::getenv("NINFER_TERNARY_GAP_SMALL_T_MAX");
+        if (value == nullptr) { return static_cast<int>(kGapSmallTMaxTokens); }
+        return std::atoi(value);
+    }();
+    return threshold;
+}
+
+enum class GapRoute { Auto, SmallT, S8, Gemv };
+
+GapRoute gap_route() {
+    // Read once: the choice decides which kernel enters a captured CUDA graph.
+    static const GapRoute route = [] {
+        const char* value = std::getenv("NINFER_TERNARY_GAP");
+        if (value == nullptr) { return GapRoute::Auto; }
+        const std::string text(value);
+        if (text == "s8") { return GapRoute::S8; }
+        if (text == "gemv") { return GapRoute::Gemv; }
+        if (text == "small_t") { return GapRoute::SmallT; }
+        return GapRoute::Auto;
+    }();
+    return route;
+}
 
 template <class Schedule>
 void launch_ternary_mma(const Tensor& x, const Weight& w, Tensor& out,
@@ -313,8 +525,71 @@ void launch_ternary_mma(const Tensor& x, const Weight& w, Tensor& out,
     CUDA_CHECK(cudaGetLastError());
 }
 
+// int8 rung: quantize the activation row per token, then run the s8 tensor-core kernel. Requires a
+// caller-provided scratch (see TernaryS8Scratch) -- the quantization pass needs one int8 code row
+// per token plus one fp32 scale per token, and it has to come from the arena, because this op runs
+// inside captured CUDA graphs where a lazy cudaMalloc is illegal.
+//
+// Only PQ2_0 is admitted. The reference port also runs its PTQ1_0 format through this same kernel
+// with a shared-memory repack of the raw base-3 rows; this artifact is PQ2_0 throughout, so that
+// instantiation would be carried unexercised and is left out deliberately.
+void launch_pq2_mma_s8(const Tensor& x, const Weight& w, Tensor& out,
+                       std::int32_t out_row_stride, std::int32_t tokens, TernaryS8Scratch scratch,
+                       cudaStream_t stream) {
+    // One block per token. The absmax over the whole K row is reduced first, so the scale is already
+    // known when the codes are written (that is why this is two passes and not one atomic pass).
+    ternary_s8_quantize_kernel<<<tokens, 256, 0, stream>>>(
+        static_cast<const __nv_bfloat16*>(x.data), scratch.codes, scratch.scales, w.k);
+    CUDA_CHECK(cudaGetLastError());
+
+    // 64 tokens x 4 warps: the instantiation the reference port measured as the winner of this
+    // shape. Its shared footprint is 25856 B, well under this card's 48 KiB static limit, so it
+    // needs no cudaFuncSetAttribute opt-in and still fits three CTAs per SM (3 x 25856 = 77568 B
+    // against 100 KiB of shared per SM).
+    constexpr int kTokens = 64;
+    constexpr int kWarps  = 4;
+    const unsigned grid =
+        static_cast<unsigned>(div_up(w.n, TernaryS8Storage<kTokens, kWarps>::kRowsPerCta));
+    ternary_pq2_mma_s8_kernel<kTokens, kWarps, 3><<<grid, kWarps * 32, 0, stream>>>(
+        scratch.codes, scratch.scales, static_cast<const std::uint8_t*>(w.qdata),
+        static_cast<const std::uint8_t*>(w.scales), static_cast<__nv_bfloat16*>(out.data), w.n,
+        w.k, tokens, out_row_stride);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+// Diagnostic for the rung dispatch: names the path each call ACTUALLY takes, so a dispatch change can
+// be verified instead of assumed. Env-gated and capped, so it costs nothing in a normal run. It fires
+// at graph CAPTURE time, which is exactly where the choice is made; the captured graph then replays
+// that same branch without re-deciding.
+//
+// Why it is written this way: the reference port's first version of this probe printed the
+// CONDITIONS rather than the branch taken, which is how its PPL gate came back bit-identical with
+// the int8 rung switched on and still left "was the rung even reached" unanswerable. Same hazard
+// applies here -- the s8 rung is the one change in this dispatch that moves the numerics, so being
+// able to see it fire is what makes its A/B mean anything.
+//   NINFER_TERNARY_S8_DEBUG=1      -> stderr lines
+//   NINFER_TERNARY_S8_DEBUG_BUDGET (default 24 lines)
+//   NINFER_TERNARY_S8_DEBUG_MIN_T  (default 0: print every call)
+void note_rung(const char* rung, const Tensor& x, const Weight& w, std::int32_t out_row_stride) {
+    static const int min_t = [] {
+        const char* value = std::getenv("NINFER_TERNARY_S8_DEBUG_MIN_T");
+        return value == nullptr ? 0 : std::atoi(value);
+    }();
+    static int budget = [] {
+        const char* value = std::getenv("NINFER_TERNARY_S8_DEBUG_BUDGET");
+        return value == nullptr ? 24 : std::atoi(value);
+    }();
+    if (budget <= 0 || std::getenv("NINFER_TERNARY_S8_DEBUG") == nullptr) { return; }
+    if (static_cast<int>(x.ne[1]) < min_t) { return; }
+    --budget;
+    std::fprintf(stderr, "[ternary] rung=%-9s qtype=%d T=%d k=%d n=%d stride=%d\n", rung,
+                 static_cast<int>(w.qtype), static_cast<int>(x.ne[1]), static_cast<int>(w.k),
+                 static_cast<int>(w.n), static_cast<int>(out_row_stride));
+}
+
 void launch_ternary_gemm_t8(const Tensor& x, const Weight& w, Tensor& out,
-                            std::int32_t out_row_stride, cudaStream_t stream) {
+                            std::int32_t out_row_stride, cudaStream_t stream,
+                            TernaryS8Scratch scratch) {
     // The speculative verify pass runs T = draft + 1 (2..4 here). The reference tiled kernel wastes
     // five of its eight token slots at that size and needs a 128-thread CTA plus seven barriers per
     // output row, which cost more than the whole decode step it was verifying. The small-tile GEMV
@@ -333,13 +608,23 @@ void launch_ternary_gemm_t8(const Tensor& x, const Weight& w, Tensor& out,
     // launches, against 407 for a T=1 decode step -- so the cost is per-token issue work, not
     // weight traffic. That is why raising the draft count, which amortises the per-group 2-bit
     // decode over more tokens, is the productive lever here; see the plan document.
-    if (gemv_admits(x, w, 4)) {
+    if (gemv_admits(x, w, verify_token_cap())) {
         if (verify_uses_small_t() && (w.k % kSmallTGroupK) == 0) {
+            note_rung("small_t", x, w, out_row_stride);
             launch_small_t(x, w, out, out_row_stride, stream);
             return;
         }
-        launch_pq2_gemv_tile(x, w, out, out_row_stride, x.ne[1], stream);
-        return;
+        // The A/B arm below is NOT interchangeable with the small-T kernel over the whole cap.
+        // ternary_pq2_gemv_tile_kernel<4> writes exactly four columns -- its `t < tokens` guard
+        // skips work but there is no token-tile loop and grid.y is 1 -- so past four tokens it
+        // would leave the tail of the output unwritten and say nothing. It was safe while the cap
+        // was 4 for the whole entry; now that the cap is 8 the guard has to be here instead, and
+        // T = 5..8 under NINFER_TERNARY_VERIFY=tile falls through to the general path below.
+        if (x.ne[1] <= 4) {
+            note_rung("gemv_tile", x, w, out_row_stride);
+            launch_pq2_gemv_tile(x, w, out, out_row_stride, x.ne[1], stream);
+            return;
+        }
     }
     // The verify-shaped entry above requires T <= 4, so everything from a short prompt (T as low
     // as 5) to a full prefill chunk lands here. The CLI constrains the CHUNK to a multiple of 128
@@ -350,8 +635,67 @@ void launch_ternary_gemm_t8(const Tensor& x, const Weight& w, Tensor& out,
     // left: NCU on the 248320-row head put the token-blocked GEMV at 95.47% occupancy, ALU the top
     // pipe, and 909e6 instructions against a 1.32 ms pure-issue floor. Measured across every
     // prefill shape in this model at T=1024, MMA is 8.3-9.8x faster than that GEMV.
-    if (prefill_route() == PrefillRoute::Mma && x.ne[1] >= kMmaMinTokens &&
+    //
+    // int8 rung, placed ABOVE the tensor-core rung deliberately. Its threshold (33) sits one token
+    // past kMmaMinTokens (32), so checking it after the MMA arm would make it unreachable: the MMA
+    // branch would swallow the whole T >= 33 range. The 8-wide verify block above cannot take these
+    // calls either, so this is the only position where both gates stay live.
+    //
+    // Keeping the two thresholds independent is the point, not an accident of ordering: the s8
+    // crossing is a card property that gets swept (ternary_s8_min_tokens in ternary_s8_scratch.h),
+    // and sweeping it below 32 has to let s8 cover the T = 9..32 band the blocked GEMV holds today.
+    const bool s8_ready = scratch.codes != nullptr && scratch.scales != nullptr;
+    if (s8_ready && ternary_s8_enabled() && out_row_stride >= w.n &&
+        gemv_admits(x, w, std::numeric_limits<std::int32_t>::max()) &&
+        x.ne[1] >= ternary_s8_min_tokens()) {
+        note_rung("s8", x, w, out_row_stride);
+        launch_pq2_mma_s8(x, w, out, out_row_stride, x.ne[1], scratch, stream);
+        return;
+    }
+    // The band between the 8-wide small-T tile and the MMA threshold -- see gap_route(). It sits
+    // AFTER the s8 arm on purpose: pushing NINFER_TERNARY_S8_MIN_TOKENS down is still the way to
+    // hand this band to int8, and when that is done this branch never fires.
+    if (x.ne[1] > verify_token_cap() && x.ne[1] < mma_min_tokens() &&
         gemv_admits(x, w, std::numeric_limits<std::int32_t>::max())) {
+        const GapRoute route = gap_route();
+        const bool small_t_ok = (w.k % kSmallTGroupK) == 0;
+        const bool s8_ok      = s8_ready && ternary_s8_enabled() && out_row_stride >= w.n;
+        // Gemv is an explicit veto of both; the forced arms veto the other one. Auto prefers by T.
+        const bool ban_small_t = route == GapRoute::S8 || route == GapRoute::Gemv;
+        const bool ban_s8      = route == GapRoute::SmallT || route == GapRoute::Gemv;
+        const bool prefer_small_t =
+            route == GapRoute::SmallT ||
+            (route == GapRoute::Auto && x.ne[1] <= gap_small_t_max_tokens());
+
+        // The preferred arm first, then the other one if a shape gate vetoed it, and only then the
+        // blocked GEMV below -- which is always correct, just slow, so falling through is right.
+        if (!ban_small_t && prefer_small_t && small_t_ok) {
+            note_rung("small_t_tiled", x, w, out_row_stride);
+            launch_small_t_tiled(x, w, out, out_row_stride, stream);
+            return;
+        }
+        if (!ban_s8 && s8_ok) {
+            note_rung("s8", x, w, out_row_stride);
+            launch_pq2_mma_s8(x, w, out, out_row_stride, x.ne[1], scratch, stream);
+            return;
+        }
+        if (!ban_small_t && small_t_ok) {
+            note_rung("small_t_tiled", x, w, out_row_stride);
+            launch_small_t_tiled(x, w, out, out_row_stride, stream);
+            return;
+        }
+    }
+    if (prefill_route() == PrefillRoute::Mma && x.ne[1] >= mma_min_tokens() &&
+        gemv_admits(x, w, std::numeric_limits<std::int32_t>::max())) {
+        // Two tiles, chosen by T: see TernaryMmaShortSchedule. Prefill runs eagerly (only the three
+        // decode-batch entry points capture graphs), so this choice is free to follow the actual
+        // token count of the chunk rather than being frozen at capture time.
+        if (x.ne[1] <= mma_short_tile_tokens()) {
+            note_rung("short_mma", x, w, out_row_stride);
+            launch_ternary_mma<TernaryMmaShortSchedule>(x, w, out, out_row_stride, stream);
+            return;
+        }
+        note_rung("wide_mma", x, w, out_row_stride);
         launch_ternary_mma<TernaryMmaPrefillSchedule>(x, w, out, out_row_stride, stream);
         return;
     }
@@ -361,9 +705,14 @@ void launch_ternary_gemm_t8(const Tensor& x, const Weight& w, Tensor& out,
     // either fast path engine-side (T = 1 alone cannot catch a token-tile or layout error).
     if (prefill_route() != PrefillRoute::Reference &&
         gemv_admits(x, w, std::numeric_limits<std::int32_t>::max())) {
+        // This arm used to be the ONLY one without a probe, and that gap cost real debugging time:
+        // a 35-prompt-token fixture printed no prefill rung at all, which read as "the dispatch is
+        // broken" rather than "this call landed here". Every arm that can be taken now names itself.
+        note_rung("block_gemv", x, w, out_row_stride);
         launch_pq2_gemv_tile_block(x, w, out, out_row_stride, stream);
         return;
     }
+    note_rung("reference", x, w, out_row_stride);
     launch_by_qtype<8>(x, w, out, out_row_stride, stream);
 }
 

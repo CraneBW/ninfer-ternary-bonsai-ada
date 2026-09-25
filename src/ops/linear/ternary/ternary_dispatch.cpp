@@ -5,6 +5,7 @@
 
 #include "ops/linear/ternary/ternary_rotation.h"
 #include "ops/linear/ternary/ternary_rowsplit_storage.cuh"
+#include "ops/linear/ternary/ternary_s8_scratch.h"
 
 #include <stdexcept>
 #include <string>
@@ -33,16 +34,35 @@ TernaryLaunch select_ternary_launch(std::int32_t n, std::int32_t k, std::int32_t
     return t == 1 ? launch_ternary_gemm_t1 : launch_ternary_gemm_t8;
 }
 
+TernaryS8Scratch allocate_ternary_s8_scratch(WorkspaceArena& workspace, std::int32_t k,
+                                             std::int32_t tokens) {
+    TernaryS8Scratch scratch{};
+    if (tokens < kTernaryS8ScratchMinTokens) {
+        // Below the lowest count the rung can be ASKED for, not below the count it is chosen at --
+        // see kTernaryS8ScratchMinTokens for why those two differ and what gating on the wrong one
+        // cost. Nothing above this line can ask for int8, so nothing is allocated.
+        return scratch;
+    }
+    const DeviceSpan codes  = workspace.alloc_bytes(ternary_s8_codes_bytes(k, tokens));
+    const DeviceSpan scales = workspace.alloc_bytes(ternary_s8_scales_bytes(tokens));
+    scratch.codes           = static_cast<std::int8_t*>(codes.data);
+    scratch.scales          = static_cast<float*>(scales.data);
+    return scratch;
+}
+
 void ternary_dispatch_basis_strided(const Tensor& x_folded, const Weight& w, Tensor& out,
                                     std::int32_t out_row_stride, LinearPolicy policy,
-                                    cudaStream_t stream) {
+                                    cudaStream_t stream, TernaryS8Scratch scratch) {
     const TernaryLaunch launch = select_ternary_launch(w.n, w.k, x_folded.ne[1], policy);
-    launch(x_folded, w, out, out_row_stride, stream);
+    // No workspace on this entry point: the CALLER already folded the activation, and may hand in
+    // the int8 scratch it allocated from its own arena (see allocate_ternary_s8_scratch). With an
+    // empty scratch these calls stay on the bf16 rungs.
+    launch(x_folded, w, out, out_row_stride, stream, scratch);
 }
 
 void ternary_dispatch_basis(const Tensor& x_folded, const Weight& w, Tensor& out,
-                            LinearPolicy policy, cudaStream_t stream) {
-    ternary_dispatch_basis_strided(x_folded, w, out, w.n, policy, stream);
+                            LinearPolicy policy, cudaStream_t stream, TernaryS8Scratch scratch) {
+    ternary_dispatch_basis_strided(x_folded, w, out, w.n, policy, stream, scratch);
 }
 
 void ternary_dispatch(const Tensor& x, const Weight& w, Tensor& out, LinearPolicy policy,
@@ -54,7 +74,7 @@ void ternary_dispatch(const Tensor& x, const Weight& w, Tensor& out, LinearPolic
         // pass (and therefore the M4 decode speed) is measurable. The result is numerically
         // meaningless -- the activation is in the wrong basis -- which is the point: it separates
         // "the ternary decode is broken" from "the rotation is broken" without a rebuild.
-        launch(x, w, out, w.n, stream);
+        launch(x, w, out, w.n, stream, TernaryS8Scratch{});
         return;
     }
     if (workspace == nullptr) {
@@ -72,7 +92,13 @@ void ternary_dispatch(const Tensor& x, const Weight& w, Tensor& out, LinearPolic
     // fails loudly here instead of silently multiplying by unfolded weights.
     auto scope              = workspace->scope();
     const Tensor activation = folded_activation(x, w, *workspace, stream);
-    launch(activation, w, out, w.n, stream);
+
+    // int8 rung scratch: one int8 code row per token plus one fp32 scale per token. Taken from the
+    // same arena the rotation just used, and counted by ternary_rotation_workspace_bytes() so the
+    // planner sizes the arena for it -- allocating it lazily inside the launch would be illegal,
+    // because this op runs inside captured CUDA graphs.
+    const TernaryS8Scratch scratch = allocate_ternary_s8_scratch(*workspace, w.k, x.ne[1]);
+    launch(activation, w, out, w.n, stream, scratch);
 }
 
 } // namespace ninfer::ops::detail
