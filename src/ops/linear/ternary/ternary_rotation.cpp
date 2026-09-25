@@ -3,6 +3,8 @@
 // for the change list, rebuild steps and required verification.
 #include "ops/linear/ternary/ternary_rotation.h"
 
+#include "ops/linear/ternary/ternary_s8_scratch.h"
+
 #include <cstdlib>
 #include <stdexcept>
 #include <string>
@@ -45,8 +47,17 @@ bool ternary_gdn_perm_enabled() {
 
 std::size_t ternary_rotation_workspace_bytes(std::int32_t k, std::int32_t tokens) {
     if (k <= 0 || tokens <= 0) { return 0; }
-    return static_cast<std::size_t>(k) * static_cast<std::size_t>(tokens) *
-           kActivationBytesPerElement;
+    // The rotation buffer plus the int8 rung's activation-quantization scratch (one int8 code row
+    // per token, one fp32 scale per token, and a little slack for the arena's alignment).
+    // They are declared together because this function IS the capacity statement for the ternary
+    // linear op (see linear.cpp), so anything the op allocates from the arena must be counted here.
+    // The quantization pass itself only runs from ternary_s8_min_tokens() up, but the capacity is
+    // the max over token counts the plan allows, which is what the planner asks for.
+    const std::size_t rotated = static_cast<std::size_t>(k) * static_cast<std::size_t>(tokens) *
+                                kActivationBytesPerElement;
+    const std::size_t s8_scratch =
+        ternary_s8_codes_bytes(k, tokens) + ternary_s8_scales_bytes(tokens) + 512u;
+    return rotated + s8_scratch;
 }
 
 std::size_t ternary_projection_workspace_bytes(std::int32_t output_rows, std::int32_t input_rows,
