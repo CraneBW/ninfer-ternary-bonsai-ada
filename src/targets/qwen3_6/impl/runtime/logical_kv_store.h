@@ -852,6 +852,15 @@ public:
         // frontier commit. Purely observational -- no engine state is redirected.
         if (const char* env = std::getenv("NINFER_KVMEM"); env != nullptr && env[0] == '1') {
             kvmem_enabled_ = true;
+            if (const char* budget = std::getenv("NINFER_KVMEM_BUDGET");
+                budget != nullptr && *budget != '\0') {
+                const long long parsed = std::atoll(budget);
+                if (parsed > 0) {
+                    kvmem_budget_ = static_cast<std::uint32_t>(
+                        std::min<long long>(parsed, static_cast<long long>(page_capacity) *
+                                                            kPagedKVPageSize));
+                }
+            }
             kvmem_repos_.resize(address_capacity);
             kvmem_block_pages_.resize(address_capacity);
             kvmem_block_hosts_.resize(address_capacity);
@@ -2000,9 +2009,10 @@ public:
         if (!kvmem_enabled_) { return 0; }
         Address& address = require(handle);
         const std::size_t index = static_cast<std::size_t>(&address - addresses_.data());
-        if (address.active || address.row || address.reservation.valid()) {
-            throw std::logic_error("KVMem compaction requires an inactive address");
-        }
+        // Active addresses are allowed: the serve path compacts at request
+        // completion while the execution row is still bound (before the
+        // continuation checkpoint pins the pages). The table is republished at
+        // the end for exactly that case.
         auto& repo        = kvmem_repos_[index];
         auto& block_pages = kvmem_block_pages_[index];
         auto& block_hosts = kvmem_block_hosts_[index];
@@ -2011,7 +2021,9 @@ public:
             static_cast<std::uint64_t>(repo.block_count()) * kPagedKVPageSize;
         if (budget_tokens == 0 || ledger_tokens <= budget_tokens) { return 0; }
         for (std::uint32_t page = 0; page < address.page_count; ++page) {
-            if (pages_->address_references(membership(address, page)) != 1) { return 0; }
+            if (pages_->address_references(membership(address, page)) != 1) {
+                        return 0;
+            }
         }
         DeviceKVPagePool& pool = pages_->physical_pool();
 
@@ -2055,9 +2067,11 @@ public:
         // ---- host arena (lazy) ----
         if (!kvmem_host_arena_) {
             kvmem_host_layout_ = plan_host_kv_page_layout(pool.geometry());
+            // Size for the WORST case -- every page of this address evicted.
+            // A budget-sized arena exhausts exactly when the ledger has grown
+            // past the budget the arena was sized for.
             const std::size_t capacity =
-                kvmem_host_layout_.page_stride *
-                    (static_cast<std::size_t>(budget_tokens / kPagedKVPageSize) + 16) +
+                kvmem_host_layout_.page_stride * static_cast<std::size_t>(page_capacity_) +
                 (std::size_t{1} << 20);
             kvmem_host_arena_ = std::make_unique<HostKVArena>(
                 capacity, std::vector<HostKVPageLayout>{kvmem_host_layout_});
@@ -2145,16 +2159,22 @@ public:
         }
 
         // ---- 5) rewire the window and shrink the address ----
+        const std::uint32_t old_page_count = address.page_count;
         std::uint32_t slot = 0;
         for (const ninfer::kvmem::KvRemap& rm : plan.remaps) {
             if (block_pages.size() <= rm.block_id) { block_pages.resize(rm.block_id + 1); }
             membership(address, slot) = block_pages[rm.block_id];
             ++slot;
         }
+        // Clear the tail membership slots: the next round's growth materializes
+        // INTO these slots (they double as the batch destinations) and a stale
+        // handle would fail the batch's already-populated guard.
+        for (std::uint32_t page = window_pages; page < old_page_count; ++page) {
+            membership(address, page) = {};
+        }
         address.page_count         = window_pages;
         address.committed_frontier = window_tokens;
-        // No publish_membership here: compaction runs on an INACTIVE address
-        // and the next commit_activation republishes the table.
+        if (address.active) { publish_membership(address, stream); }
 
         // ---- 6) ledger tiers ----
         for (const std::uint32_t id : plan.stage_out) { repo.set_tier(id, ninfer::kvmem::KvTier::Host); }
@@ -2174,9 +2194,8 @@ public:
     // matches exactly the retained head.
     std::uint32_t kvmem_compact_round_boundary(KVAddressSpaceHandle handle,
                                                cudaStream_t stream = nullptr) {
-        if (!kvmem_enabled_ || kvmem_budget_ == 0) { return 0; }
+
         Address& address = require(handle);
-        if (address.active || address.row || address.reservation.valid()) { return 0; }
         auto& repo = kvmem_repos_[static_cast<std::size_t>(&address - addresses_.data())];
         const std::uint64_t ledger_tokens =
             static_cast<std::uint64_t>(repo.block_count()) * kPagedKVPageSize;

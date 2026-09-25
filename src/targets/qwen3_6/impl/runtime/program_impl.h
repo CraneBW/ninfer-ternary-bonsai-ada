@@ -9241,6 +9241,34 @@ FinishResult ProgramImplCore::finish(SequenceHandle sequence) noexcept {
         }
         state.endpoint_valid = true;
         refresh_state_views(state);
+        // KVMem K1b: cap the window BEFORE the continuation checkpoint pins the
+        // pages -- after the pin the sole-ownership guard would skip
+        // compaction. Sink-only retention; the token bookkeeping truncates to
+        // the window so the next request's prefix reuse matches exactly the
+        // retained head.
+        if (speculative_backend == SpeculativeBackend::None) {
+            try {
+                const std::uint32_t window = text_kv_addresses->kvmem_compact_round_boundary(
+                    state.kv->text, device.stream);
+                if (window != 0) {
+                    // The turn-closure checkpoint references a frontier beyond
+                    // the window -- drop it (with its StateImage checkpoint
+                    // reference) instead of leaving a dangling digest index.
+                    if (state.rewrite_state) {
+                        if (state_store->checkpoint_references(*state.rewrite_state) > 0) {
+                            state_store->release_checkpoint_reference(*state.rewrite_state);
+                        }
+                        state.rewrite_state.reset();
+                    }
+                    state.rewrite_checkpoint = {};
+                    state.text_kv_valid      = std::min(state.text_kv_valid, window);
+                    state.execution_frontier = std::min(state.execution_frontier, window);
+                    state.ledger.resize(window);
+                    state.prefix_identity.truncate(window);
+                    state.prefix_digests.truncate(window);
+                }
+            } catch (...) {}
+        }
         text_kv_addresses->set_checkpoint_requirement(state.kv->text, state.execution_frontier);
         if (state.kv->backend) {
             backend_kv_addresses->set_checkpoint_requirement(*state.kv->backend,
