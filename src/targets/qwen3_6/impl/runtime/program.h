@@ -213,6 +213,13 @@ struct ResourceCandidateState {
     detail::PhysicalResources source_resources;
     NINFER_QWEN36_RUNTIME_NS::ReusePath reuse = NINFER_QWEN36_RUNTIME_NS::ReusePath::Root;
     std::uint32_t reuse_base                  = 0;
+    // Cache-slot frontier that the reused KV actually reaches. It equals `reuse_base` except on
+    // a KVMem-compacted lineage, where the ledger keeps the consumed prompt length while the KV
+    // stops at its compacted window (`reuse_base + source.kv_offset`).
+    std::uint32_t kv_frontier = 0;
+    // Lowest prompt index the reused lineage may still be resumed from; it travels with the
+    // window so a later request cannot resume below it either.
+    std::uint32_t reuse_floor = 0;
     NINFER_QWEN36_RUNTIME_NS::RewriteCheckpointDisposition rewrite_disposition =
         NINFER_QWEN36_RUNTIME_NS::RewriteCheckpointDisposition::DropOptional;
     bool has_source        = false;
@@ -416,6 +423,17 @@ struct SequenceState {
     Tensor tail_hidden;
     Tensor rewrite_checkpoint_hidden;
     std::uint32_t lane = 0;
+
+    // Cache slots and RoPE positions of the executing KV run at `ledger index + kv_offset`.
+    // A KVMem window compaction that drops a middle span moves the retained tail to compact
+    // slots, so the KV space stops coinciding with the token ledger; the ledger, its identity
+    // and the digests stay in prompt space so prefix matching keeps working. Zero unless such
+    // a compaction ran on this lineage.
+    std::int32_t kv_offset = 0;
+    // Lowest prompt index this lineage may be resumed from once its KV was compacted into a
+    // window: below it the retained tail would expose the new request to tokens the checkpoint
+    // state has not seen yet. Zero while the KV still mirrors the whole token prefix.
+    std::uint32_t kv_reuse_floor = 0;
 
     std::uint32_t execution_frontier = 0;
     std::uint32_t ledger_frontier    = 0;
@@ -1068,14 +1086,13 @@ private:
     continuation_summary(const SequenceState& sequence) const;
     void populate_continuation_summary(const SequenceState& sequence,
                                        qwen3_6::ContinuationSummary& summary) const;
-    // KVMem K1b: the completed-window edge this sequence may compact to. Nonzero
-    // only when a private long anchor already sits exactly on that edge, because
-    // the truncation drops the full-context endpoint and the anchor is then the
-    // continuation's only truthful resume point.
+    // KVMem K1b: the window this sequence should compact to once its resident KV outgrows the
+    // budget, or zero when no compaction is due.
     [[nodiscard]] std::uint32_t kvmem_compaction_edge(const SequenceState& sequence) const;
-    // Commits a completed compaction window to the continuation bookkeeping:
-    // truncates the token ledger to the window, drops the now-unmaterializable
-    // endpoint, and rebases the rebuild accounting onto the window anchor.
+    // Commits a completed compaction window: the KV now holds the sink head plus the tail
+    // refolded onto compact slots, so cache slots and RoPE positions of later tokens move to
+    // `ledger index + kv_offset`. The ledger, identity, digests and the endpoint stay in prompt
+    // space, so the endpoint remains the continuation's resume point.
     void kvmem_apply_window(SequenceState& sequence, std::uint32_t window);
     [[nodiscard]] qwen3_6::SharedPrefixSummary
     shared_prefix_summary(const SharedPrefixState& shared) const;

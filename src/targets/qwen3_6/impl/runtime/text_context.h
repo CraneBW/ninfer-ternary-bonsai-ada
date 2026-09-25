@@ -155,7 +155,7 @@ public:
     TextContext(DeviceContext& ctx, const LoadedModelData& weights, WorkspaceArena& work,
                 qwen3_6::PagedKVCacheView kv, LinearAttentionStatePool& state,
                 qwen3_6::RoundState& io, Tensor& prefill_hidden, std::uint32_t prefill_chunk,
-                std::uint32_t text_kv_base,
+                std::uint32_t text_kv_base, std::int32_t text_kv_offset = 0,
                 qwen3_6::PagedKVCacheView mtp_kv           = qwen3_6::PagedKVCacheView(),
                 const qwen3_6::PagedKVCache* batch_text_kv = nullptr,
                 const qwen3_6::PagedKVCache* batch_mtp_kv  = nullptr);
@@ -307,6 +307,8 @@ private:
     Tensor& prefill_hidden_;
     std::uint32_t prefill_chunk_;
     std::uint32_t text_kv_base_;
+    // Cache-slot/RoPE shift applied to `text_kv_base_` (see PrefillContext::text_kv_offset).
+    std::int32_t text_kv_offset_ = 0;
     const Tensor* active_cache_positions_                                          = nullptr;
     const Tensor* active_rope_positions_                                           = nullptr;
     const Tensor* active_kv_table_rows_                                            = nullptr;
