@@ -262,6 +262,18 @@ public:
         return static_cast<std::uint32_t>(blocks_.size());
     }
 
+    // Read accessors for executors that drive tier changes and phase checks
+    // outside set_selection (K1b compaction, the passthrough planner).
+    [[nodiscard]] KvTier tier_of(std::uint32_t id) const { return blocks_[id].tier; }
+
+    // Clears the fp16-drift counters (the executor calls this when a re-phase
+    // walked the full rotate pipeline in place of a raw-K rebuild).
+    void reset_drift(std::uint32_t id) {
+        blocks_[id].remap_count     = 0;
+        blocks_[id].remap_abs_delta = 0;
+    }
+    [[nodiscard]] std::int64_t baked_pos_of(std::uint32_t id) const { return blocks_[id].baked_pos; }
+
     [[nodiscard]] std::uint64_t total_tokens() const noexcept {
         return blocks_.empty() ? 0 : blocks_.back().token_begin + blocks_.back().n_tokens;
     }

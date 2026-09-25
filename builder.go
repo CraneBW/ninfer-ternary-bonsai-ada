@@ -383,6 +383,9 @@ func runTestMode(repoRoot, vsRoot, msvcVer, sdkVer, files, testArgs string, cuda
 			coreSources, _ := filepath.Glob(filepath.Join(repoRoot, "src", "core", "*.cpp"))
 			coreCuda, _ := filepath.Glob(filepath.Join(repoRoot, "src", "core", "*.cu"))
 			coreSources = append(coreSources, coreCuda...)
+			// kvmem 的桥接实现（rerope 内核入口）也是被测面的一部分。
+			kvmemCuda, _ := filepath.Glob(filepath.Join(repoRoot, "src", "kvmem", "*.cu"))
+			coreSources = append(coreSources, kvmemCuda...)
 			// core 层的 device.h 依赖架构宏（与 CMake 的定义保持一致）。
 			archMacro := "NINFER_SM" + strings.ToUpper(archID)
 			nvccArgs := []string{"-arch=sm_" + archID, "-std=c++20", "-D" + archMacro,

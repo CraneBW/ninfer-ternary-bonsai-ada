@@ -373,6 +373,11 @@ if(CMAKE_CUDA_ARCHITECTURES MATCHES "^(75|86)$")
   target_sources(ninfer_ops PRIVATE ops/fp8_legacy_stubs.cpp)
 endif()
 
+# KVMem（K0/K1/K2）：宿主决策层 + 相位重铸内核。
+target_sources(ninfer_ops PRIVATE
+  kvmem/kvmem_rerope.cu
+)
+
 ninfer_internal_includes(ninfer_ops)
 ninfer_cuda_archive(ninfer_ops)
 target_link_libraries(ninfer_ops PUBLIC ninfer_core PRIVATE ${_ninfer_nvfp4_non_rdc})
