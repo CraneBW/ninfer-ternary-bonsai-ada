@@ -241,7 +241,12 @@ public:
     [[nodiscard]] std::uint32_t append(KvBlockMeta meta) {
         if (!blocks_.empty()) {
             if (meta.token_begin < blocks_.back().token_begin + blocks_.back().n_tokens) {
-                throw std::invalid_argument("kvmem: blocks must arrive in ascending token order");
+                throw std::invalid_argument(
+                    "kvmem: blocks must arrive in ascending token order id=" +
+                    std::to_string(meta.id) + " begin=" + std::to_string(meta.token_begin) +
+                    " back_begin=" + std::to_string(blocks_.back().token_begin) +
+                    " back_n=" + std::to_string(blocks_.back().n_tokens) +
+                    " count=" + std::to_string(blocks_.size()));
             }
             if (meta.id != blocks_.back().id + 1) {
                 throw std::invalid_argument("kvmem: block ids must be dense and ascending");

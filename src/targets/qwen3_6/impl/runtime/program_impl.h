@@ -4401,8 +4401,14 @@ ProgramImplCore::reserve_materialization(AdmissionCandidate&& plan, PreparedProm
         for (const CaptureGroup& group : request_plan.capture_groups) {
             const bool base_shared_promotion = group.frontier == request_plan.reuse_base &&
                                                group.shared && !group.rewrite && !group.long_anchor;
+            // A KVMem window-edge anchor is re-armed at the reuse base: the resident
+            // prefix was restored from exactly that frontier, so the state already is
+            // the checkpoint's state.
+            const bool base_window_anchor =
+                group.frontier == request_plan.reuse_base && group.long_anchor && !group.rewrite;
             if (!group.identity ||
-                (group.frontier <= request_plan.reuse_base && !base_shared_promotion) ||
+                (group.frontier <= request_plan.reuse_base &&
+                 !(base_shared_promotion || base_window_anchor)) ||
                 group.frontier > prompt_tokens ||
                 group.identity->shortlist_key.frontier != group.frontier ||
                 group.identity->prefix_identity() == nullptr ||
@@ -6900,7 +6906,13 @@ std::uint32_t ProgramImplCore::selected_state_consumed_references(
         consumed_references = 1;
     }
     for (const LongAnchorCheckpoint& anchor : sequence.long_anchors) {
-        if (anchor.frontier > reuse_base && anchor.state == selected) {
+        // A re-armed KVMem window anchor sits exactly on the reuse base and is
+        // consumed by the reuse that resumes there, so it must not force a fork.
+        const bool consumed = anchor.state == selected &&
+                              (anchor.frontier > reuse_base ||
+                               (reuse == ReusePath::PrivateLongAnchor &&
+                                anchor.frontier == reuse_base));
+        if (consumed) {
             if (consumed_references == std::numeric_limits<std::uint32_t>::max()) {
                 throw std::overflow_error("consumed StateImage reference inventory overflow");
             }
@@ -7298,6 +7310,60 @@ void ProgramImplCore::populate_continuation_summary(const SequenceState& sequenc
         const std::size_t index = static_cast<std::size_t>(&sequence - begin);
         summary.active_references =
             continuation_slots[index].role == ContinuationSlotRole::Active ? 1U : 0U;
+    }
+}
+
+std::uint32_t ProgramImplCore::kvmem_compaction_edge(const SequenceState& sequence) const {
+    if (!sequence.kv) { return 0; }
+    const std::uint32_t edge = text_kv_addresses->kvmem_window_edge(sequence.ledger.size());
+    if (edge == 0) { return 0; }
+    const bool anchored =
+        std::any_of(sequence.long_anchors.begin(), sequence.long_anchors.end(),
+                    [edge](const LongAnchorCheckpoint& anchor) {
+                        return anchor.frontier == edge;
+                    });
+    return anchored ? edge : 0U;
+}
+
+void ProgramImplCore::kvmem_apply_window(SequenceState& sequence, std::uint32_t window) {
+    // The window is a strict prefix of the sequence's token ledger, so the
+    // rewrite checkpoint (which sits past the cut) and the endpoint (whose state
+    // is the full-context state) stop describing anything the retained KV covers.
+    if (sequence.rewrite_state) {
+        if (state_store->checkpoint_references(*sequence.rewrite_state) > 0) {
+            state_store->release_checkpoint_reference(*sequence.rewrite_state);
+        }
+        sequence.rewrite_state.reset();
+    }
+    sequence.rewrite_checkpoint = {};
+    sequence.text_kv_valid      = std::min(sequence.text_kv_valid, window);
+    sequence.execution_frontier = std::min(sequence.execution_frontier, window);
+    sequence.ledger.resize(window);
+    sequence.prefix_identity.truncate(window);
+    sequence.prefix_digests.truncate(window);
+    if (sequence.endpoint_valid) {
+        const StateImageHandle endpoint = sequence.state.write;
+        const bool aliased =
+            std::any_of(sequence.long_anchors.begin(), sequence.long_anchors.end(),
+                        [endpoint](const LongAnchorCheckpoint& anchor) {
+                            return anchor.state == endpoint;
+                        });
+        sequence.endpoint_valid    = false;
+        sequence.state             = {};
+        sequence.tail_hidden       = {};
+        sequence.tail_hidden_valid = false;
+        if (!aliased && state_store->checkpoint_references(endpoint) == 0 &&
+            !state_store->release(endpoint)) {
+            throw std::logic_error("KVMem window endpoint StateImage remained pinned");
+        }
+    }
+    const auto anchor = std::find_if(sequence.long_anchors.begin(), sequence.long_anchors.end(),
+                                     [window](const LongAnchorCheckpoint& candidate) {
+                                         return candidate.frontier == window;
+                                     });
+    if (anchor != sequence.long_anchors.end()) {
+        sequence.rebuild_work       = anchor->rebuild_work;
+        sequence.rebuild_tail_begin = 0;
     }
 }
 
@@ -9242,32 +9308,22 @@ FinishResult ProgramImplCore::finish(SequenceHandle sequence) noexcept {
         state.endpoint_valid = true;
         refresh_state_views(state);
         // KVMem K1b: cap the window BEFORE the continuation checkpoint pins the
-        // pages -- after the pin the sole-ownership guard would skip
-        // compaction. Sink-only retention; the token bookkeeping truncates to
-        // the window so the next request's prefix reuse matches exactly the
-        // retained head.
+        // pages -- after the pin the sole-ownership guard would skip compaction.
+        // Sink-only retention keeps the oldest head; the window edge carries the
+        // anchor captured during prefill, so the retained head stays reusable and
+        // the next request resumes at the window instead of re-prefilling.
+        // Requiring that anchor is what keeps the continuation honest: without it
+        // the truncation would publish an endpoint whose state no longer matches
+        // the retained KV.
         if (speculative_backend == SpeculativeBackend::None) {
-            try {
-                const std::uint32_t window = text_kv_addresses->kvmem_compact_round_boundary(
-                    state.kv->text, device.stream);
-                if (window != 0) {
-                    // The turn-closure checkpoint references a frontier beyond
-                    // the window -- drop it (with its StateImage checkpoint
-                    // reference) instead of leaving a dangling digest index.
-                    if (state.rewrite_state) {
-                        if (state_store->checkpoint_references(*state.rewrite_state) > 0) {
-                            state_store->release_checkpoint_reference(*state.rewrite_state);
-                        }
-                        state.rewrite_state.reset();
-                    }
-                    state.rewrite_checkpoint = {};
-                    state.text_kv_valid      = std::min(state.text_kv_valid, window);
-                    state.execution_frontier = std::min(state.execution_frontier, window);
-                    state.ledger.resize(window);
-                    state.prefix_identity.truncate(window);
-                    state.prefix_digests.truncate(window);
-                }
-            } catch (...) {}
+            const std::uint32_t edge = kvmem_compaction_edge(state);
+            if (edge != 0) {
+                try {
+                    const std::uint32_t window = text_kv_addresses->kvmem_compact_round_boundary(
+                        state.kv->text, device.stream);
+                    if (window == edge) { kvmem_apply_window(state, window); }
+                } catch (...) {}
+            }
         }
         text_kv_addresses->set_checkpoint_requirement(state.kv->text, state.execution_frontier);
         if (state.kv->backend) {
@@ -9951,6 +10007,51 @@ void ProgramImplCore::start_sequence(std::uint32_t lane, SequenceState& sequence
                     throw std::logic_error("planned DFlash rewrite checkpoint is unavailable");
                 }
                 sequence.dflash_context_frontier = base;
+            }
+            bind_sequence_kv(sequence);
+            trim_sequence_kv(sequence, base, backend_kv_valid(sequence));
+            resize_sequence_kv_entitlement(sequence, request_plan.text_kv_page_entitlement,
+                                           request_plan.backend_kv_page_entitlement);
+            sequence.tail_hidden_valid = base == prompt_tokens;
+            sequence.ledger.resize(base);
+            sequence.prefix_digests.truncate(base);
+            reserve_state_entitlement(sequence, state_slots);
+            refresh_state_views(sequence);
+        } else if (request_plan.reuse == ReusePath::PrivateLongAnchor) {
+            if (!sequence.kv || sequence.text_kv_valid < base || !transaction.has_source ||
+                transaction.source_index >= continuation_capacity) {
+                throw std::logic_error("resident window anchor has no complete KV allocation");
+            }
+            if (!request_plan.selected_checkpoint ||
+                request_plan.selected_checkpoint->kind != runtime::CheckpointKind::LongAnchor ||
+                request_plan.selected_checkpoint->frontier != base) {
+                throw std::logic_error("planned long-anchor checkpoint is not the reuse base");
+            }
+            // A KVMem window anchor resumes the retained head and is re-captured
+            // from the resumed state at the start of this request. Consuming it
+            // (instead of retaining a second fork) makes the anchor image the
+            // active state, so the re-capture is legal.
+            SequenceState& origin = continuation_states[transaction.source_index];
+            const auto anchor =
+                std::find_if(origin.long_anchors.begin(), origin.long_anchors.end(),
+                             [&](const LongAnchorCheckpoint& candidate) {
+                                 return candidate.frontier ==
+                                            request_plan.selected_checkpoint->frontier &&
+                                        candidate.ordinal ==
+                                            request_plan.selected_checkpoint->ordinal;
+                             });
+            if (anchor == origin.long_anchors.end() ||
+                !state_store->valid(anchor->state) ||
+                state_store->role(anchor->state) != StateImageRole::CheckpointImmutable) {
+                throw std::logic_error("resident window anchor is not movable");
+            }
+            const StateImageHandle consumed = anchor->state;
+            state_store->release_checkpoint_reference(consumed);
+            origin.long_anchors.erase(anchor);
+            activate_consumed_state(consumed);
+            sequence.text_kv_valid = base;
+            if (speculative_backend != SpeculativeBackend::None) {
+                sequence.mtp_kv_valid = base == 0 ? 0 : base - 1;
             }
             bind_sequence_kv(sequence);
             trim_sequence_kv(sequence, base, backend_kv_valid(sequence));
@@ -10824,25 +10925,24 @@ void ProgramImplCore::unbind_sequence_kv(SequenceState& sequence) noexcept {
             text_kv_addresses->deactivate(sequence.kv->text);
         }
     } catch (...) {}
-    // KVMem K1b round-boundary compaction: cap the resident window to the
-    // sink head (query-driven retention is K3). The token bookkeeping
-    // truncates to the window, so the next round's prefix reuse matches
-    // exactly the retained head -- the same contract as a shorter
-    // conversation. Speculative backends and rewrite checkpoints keep their
-    // own frontier assumptions and are excluded for now.
+    // KVMem K1b round-boundary compaction: cap the resident window to the head
+    // (query-driven retention is K3). The window edge must already hold the
+    // anchor captured during prefill, so the retained head keeps a truthful
+    // resume point; the token bookkeeping truncates to the window, which the next
+    // round's prefix reuse matches exactly. Speculative backends and rewrite
+    // checkpoints keep their own frontier assumptions and are excluded for now.
     if (speculative_backend != SpeculativeBackend::None || sequence.rewrite_checkpoint.valid ||
         !sequence.shared_prefix_references.empty()) {
         return;
     }
     try {
+        const std::uint32_t edge = kvmem_compaction_edge(sequence);
+        if (edge == 0) { return; }
         const std::uint32_t window =
             text_kv_addresses->kvmem_compact_round_boundary(sequence.kv->text, device.stream);
-        if (window != 0 && window < sequence.text_kv_valid) {
-            sequence.text_kv_valid = window;
-            sequence.mtp_kv_valid  = std::min(sequence.mtp_kv_valid, window);
-            sequence.ledger.resize(window);
-            sequence.prefix_identity.truncate(window);
-            sequence.prefix_digests.truncate(window);
+        if (window == edge && window < sequence.text_kv_valid) {
+            kvmem_apply_window(sequence, window);
+            sequence.mtp_kv_valid = std::min(sequence.mtp_kv_valid, window);
         }
     } catch (...) {}
 }
@@ -11494,10 +11594,17 @@ ProgramImplCore::advance_prefill(SequenceState& sequence, RequestControl& reques
     try {
         if (staged.next_capture < staged.capture_groups.size() &&
             staged.capture_groups[staged.next_capture].frontier == staged.cursor) {
-            if (staged.cursor != staged.base ||
-                !staged.capture_groups[staged.next_capture].shared ||
-                staged.capture_groups[staged.next_capture].rewrite ||
-                staged.capture_groups[staged.next_capture].long_anchor) {
+            // A capture at the reuse base normally only publishes a shared promotion,
+            // because nothing has been executed at that frontier yet. A long anchor is
+            // the exception: the resident prefix was just restored from exactly that
+            // frontier, so the current state already is the checkpoint's state and the
+            // snapshot is free.
+            const CaptureGroup& zero_group = staged.capture_groups[staged.next_capture];
+            const bool rearmed_window_anchor =
+                staged.cursor == staged.base && zero_group.long_anchor && !zero_group.rewrite;
+            if ((staged.cursor != staged.base ||
+                 !(zero_group.shared || rearmed_window_anchor)) ||
+                zero_group.rewrite) {
                 throw std::logic_error("zero-prefill capture is not a shared base promotion");
             }
             if (++next_capture_offer_id_ == 0) { ++next_capture_offer_id_; }
