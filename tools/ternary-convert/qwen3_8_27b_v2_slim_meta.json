@@ -1,0 +1,42 @@
+{
+  "_doc": "模板瘦身备份的区段表快照。完整模板 19.03 GiB 中只有这些区段是 pack_zatfung.py 真正会读取的（419 个借用对象的载荷 + 头部）；其余 771 个 text/* 对象由转换器自己生成。实际使用时以 tools/template-fetch/main.go 内嵌的区段表为准，本文件用于对照与独立复核。",
+  "source": {
+    "repo": "neroued/Qwen3.8-27B-NInfer",
+    "revision": "dc370fb6295a",
+    "revision_note": "2026-09-06 'Update artifact with DFlash2 companion weights'。注意 main 已是 v3，与 zatfung 的 v2 读取器不兼容",
+    "file": "qwen3_8_27b.ninfer",
+    "url": "https://huggingface.co/neroued/Qwen3.8-27B-NInfer/resolve/dc370fb6295a/qwen3_8_27b.ninfer"
+  },
+  "source_bytes": 20437336576,
+  "extract_file": "qwen3_8_27b_v2_slim_extract.bin",
+  "extract_bytes": 3343845888,
+  "extract_sha256": "97437007c19310a5f3204e594a6fb1acc190e2ffade9acc568b8c9310ea2a72c",
+  "payload_offset": 188416,
+  "json_bytes": 185105,
+  "objects_total": 1190,
+  "objects_borrowed": 419,
+  "objects_skipped": 771,
+  "borrow_breakdown": {
+    "vision": 333,
+    "dflash2": 66,
+    "mtp": 12,
+    "frontend": 6,
+    "text/draft_head": 2
+  },
+  "skipped_range": [
+    13025792,
+    17106516480
+  ],
+  "copied_segments": [
+    {
+      "blob_offset": 0,
+      "file_offset": 0,
+      "bytes": 13025792
+    },
+    {
+      "blob_offset": 13025792,
+      "file_offset": 17106516480,
+      "bytes": 3330820096
+    }
+  ]
+}

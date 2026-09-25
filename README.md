@@ -1,12 +1,58 @@
 [![English](https://img.shields.io/badge/Language-English-2ea44f?style=flat-square)](README.md)
 [![简体中文](https://img.shields.io/badge/Language-%E7%AE%80%E4%BD%93%E4%B8%AD%E6%96%87-d73a49?style=flat-square)](README.zh-CN.md)
 
-# Ternary Bonsai 2 27B on **NINFER** (Ada / `sm_89`, Linux)
+# zatfung — 疾风 (zat6 fung1)
 
-> A **ternary — 2.125 bits per weight — quantization port** of Bonsai 2 27B onto the **NINFER**
-> C++20/CUDA inference engine, targeting native Linux on Ada Lovelace (`sm_89`).
->
-> **This repository is a derivative work. It is not upstream NINFER.** Everything below the
+> **zatfung**（粤语 *zat6 fung1*，疾风）是一个 Windows 优先的 C++20/CUDA 推理引擎，
+> 面向**三元（PQ2_0）Bonsai 2 27B**，派生自 NINFER 家族。
+> 一个源码树同时覆盖四档 NVIDIA 架构：
+
+| `CMAKE_CUDA_ARCHITECTURES` | 架构 | 代表显卡 | 说明 |
+|---|---|---|---|
+| `75` | Turing | RTX 2080 Ti | 最保守档：无 `cp.async`、无 bf16 MMA |
+| `86` | Ampere | RTX 3090 / 3060 Ti | **主要开发目标**（本机 3060 Ti） |
+| `89` | Ada | RTX 4090 / 4070 | 本 fork 的原始目标线 |
+| `120a` | Blackwell | RTX 5090 | 参考实现（NVFP4 W4A4 TMA） |
+
+> **构建入口是 `builder.go`** —— 一个 Go 写的生产标准构建器。它会自己探测并拼装
+> MSVC 环境（不依赖 `vcvars64.bat`），因此在 `cmd.exe` 被禁用、Visual Studio
+> 生成器找不到 `cl.exe` 的环境里依然能从零构建。详见 [构建](#构建)。
+
+---
+
+## 构建
+
+```bash
+go build -o builder.exe builder.go     # 得到自包含的构建器
+./builder.exe -list                    # 环境自检：GPU / CUDA / MSVC / SDK / Ninja / ccache
+./builder.exe                          # 探测本机 GPU 架构并完整构建
+./builder.exe -arch 75 -j 16           # 显式指定架构
+./builder.exe -fresh                   # 全量重建；-keep 只重置 CMake 状态
+```
+
+构建器的设计取舍与踩过的坑都写在 `builder.go` 的文件头注释里，最关键的几条：
+
+- **不依赖 `vcvars64.bat`**：本机 `cmd.exe` 被安全策略禁用，`call vcvars64.bat`
+  根本调不起来。构建器用 Go 直接探测 VS 安装 / MSVC 工具集 / Windows SDK 版本，
+  手工拼出等价的 `INCLUDE` / `LIB` / `PATH`，让 Ninja 生成器拿到可用的 `cl.exe`。
+- **默认 Ninja，不用 VS 生成器**：本机 CMake 用 Visual Studio 生成器会直接报
+  `No CMAKE_C_COMPILER could be found`（原因同上）。Ninja 还额外带来一个好处 ——
+  它是 Windows 上少数会真正执行 `CMAKE_CUDA_COMPILER_LAUNCHER` 的生成器。
+- **ccache 只挂 CUDA**：实测 ccache 包装本机本地化 MSVC 必崩（`cl.exe` 输出 GBK，
+  ccache 按 UTF-8 解析 → `Illegal byte sequence`），而包装 nvcc 完全正常且能命中。
+  CUDA 实例正是耗时大头。
+- **CUDA 版本逃生舱**：上游参考线硬要求 CUDA ≥ 13.1（服务 Blackwell）。75/86/89
+  三档用 CUDA 12.8 即可完整编译，构建器会在目标非 120a 时自动带上
+  `-DNINFER_ALLOW_LEGACY_CUDA=ON`，不必为一个策略性版本号去装新工具链。
+- **代理变量剥离**：`HTTP_PROXY` 等会让 MSBuild 报 `MSB6001`，子进程环境强制剥离。
+
+产物与运行时布局：编译出的 `ninfer.exe` / `ninfer-serve.exe` / `ninfer-perplexity.exe`
+会连同 `cudart64_*.dll`（以及存在时的 ffmpeg DLL）一起落位到构建目录根部，形成可直接运行的布局。
+
+---
+
+> **本仓库是衍生作品，不是 NINFER 上游。** 横线以下是上游 README 原文，未作改动。
+> This repository is a derivative work. It is not upstream NINFER. Everything below the
 > horizontal rule is the upstream README, unchanged.
 
 ---
