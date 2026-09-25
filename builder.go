@@ -379,9 +379,19 @@ func runTestMode(repoRoot, vsRoot, msvcVer, sdkVer, files, testArgs string, cuda
 				printError(".cu 测试需要 nvcc，但未找到 CUDA 工具链")
 				os.Exit(90)
 			}
-			if err := run(repoRoot, cuda.nvcc, "-arch=sm_"+archID, "-std=c++20",
-				"-I"+filepath.Join(repoRoot, "src"), "-I"+filepath.Join(repoRoot, "include"),
-				src, "-o", exe); err != nil {
+			// 核心层（池/arena/布局/tensor）以 .cpp/.cu 实现，一并列入链接。
+			coreSources, _ := filepath.Glob(filepath.Join(repoRoot, "src", "core", "*.cpp"))
+			coreCuda, _ := filepath.Glob(filepath.Join(repoRoot, "src", "core", "*.cu"))
+			coreSources = append(coreSources, coreCuda...)
+			// core 层的 device.h 依赖架构宏（与 CMake 的定义保持一致）。
+			archMacro := "NINFER_SM" + strings.ToUpper(archID)
+			nvccArgs := []string{"-arch=sm_" + archID, "-std=c++20", "-D" + archMacro,
+				"-I" + filepath.Join(repoRoot, "src"), "-I" + filepath.Join(repoRoot, "include")}
+			nvccArgs = append(nvccArgs, coreSources...)
+			// arena.cu 的 D3D12 residency 特性需要这两个导入库（SDK 的 LIB 已在环境里）。
+			nvccArgs = append(nvccArgs, "-ld3d12", "-ldxgi")
+			nvccArgs = append(nvccArgs, src, "-o", exe)
+			if err := run(repoRoot, cuda.nvcc, nvccArgs...); err != nil {
 				os.Exit(1)
 			}
 		} else if err := run(repoRoot, clPath, "-nologo", "-std:c++20", "-EHsc", "-MT", "-utf-8",

@@ -127,4 +127,25 @@ void kvmem_rerope_int8_g64_pages(std::int8_t* codes, __half* scales, int pages,
     KVMEM_CUDA_CHECK(cudaGetLastError());
 }
 
+// Per-plane variant: the executor addresses one layer's K-codes / K-scales plane
+// tensors directly. `page_index` is the physical page within the plane (planes
+// are page-major: page stride = 256 * 64 * KVHeads for codes, 4 * 64 * KVHeads
+// for scales). src/dst positions are page-local [axis * 64 + token].
+template <int KVHeads>
+void kvmem_rerope_int8_g64_plane(std::int8_t* codes_plane, __half* scales_plane,
+                                 std::int32_t page_index, const std::int32_t* src_pos,
+                                 const std::int32_t* dst_pos, cudaStream_t stream) {
+    constexpr std::int64_t kCodeStride =
+        static_cast<std::int64_t>(kKVCacheInt8HeadDim) * kPagedKVPageSize * KVHeads;
+    constexpr std::int64_t kScaleStride =
+        static_cast<std::int64_t>(kKVCacheInt8Groups) * kPagedKVPageSize * KVHeads;
+    const dim3 grid(kPagedKVPageSize, KVHeads, 1);
+    const dim3 block(32, 1u, 1u);
+    kvmem_rerope_int8_g64_kernel<KVHeads><<<grid, block, 0, stream>>>(
+        codes_plane + static_cast<std::int64_t>(page_index) * kCodeStride,
+        scales_plane + static_cast<std::int64_t>(page_index) * kScaleStride, src_pos, dst_pos, 1,
+        kPagedKVPageSize);
+    KVMEM_CUDA_CHECK(cudaGetLastError());
+}
+
 } // namespace ninfer::kvmem

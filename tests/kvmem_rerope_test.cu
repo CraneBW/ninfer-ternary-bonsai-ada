@@ -106,8 +106,8 @@ int main() {
             const std::int32_t src = pg * kTokens + t + 100000;  // absolute position
             const std::int32_t dst = pg * kTokens + t;           // compacted window slot
             for (int a = 0; a < 3; ++a) {
-                src_pos3[(pg * kTokens + t) * 3 + a] = src;
-                dst_pos3[(pg * kTokens + t) * 3 + a] = dst;
+                src_pos3[a * (kTokens * kPages) + pg * kTokens + t] = src;
+                dst_pos3[a * (kTokens * kPages) + pg * kTokens + t] = dst;
             }
         }
     }
