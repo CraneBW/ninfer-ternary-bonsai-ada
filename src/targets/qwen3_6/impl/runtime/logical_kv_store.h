@@ -1995,7 +1995,8 @@ public:
     // raw-K mirror -- removing that extra step is K2-full work).
     std::uint32_t kvmem_compact(KVAddressSpaceHandle handle, std::uint32_t budget_tokens,
                                 cudaStream_t stream = nullptr,
-                                std::vector<std::uint32_t> mandatory_ids = {}) {
+                                std::vector<std::uint32_t> mandatory_ids = {},
+                                bool sink_only = false) {
         if (!kvmem_enabled_) { return 0; }
         Address& address = require(handle);
         const std::size_t index = static_cast<std::size_t>(&address - addresses_.data());
@@ -2019,22 +2020,31 @@ public:
         cfg.block_tokens  = kPagedKVPageSize;
         cfg.budget_tokens = budget_tokens;
         const std::uint32_t budget_blocks = budget_tokens / kPagedKVPageSize;
-        if (budget_blocks < 4) {
-            throw std::invalid_argument(
-                "KVMem compaction budget must span at least four pages (sink/recent/middle)");
+        ninfer::kvmem::KvSelection sel;
+        if (sink_only) {
+            // Round-boundary mode: keep the oldest head, evict the tail. The
+            // selection is direct (bands cannot express "no recent"); the next
+            // round re-prefills everything after the head, and K3 will replace
+            // the lost ranges with query-driven retention.
+            sel.block_ids.resize(budget_blocks);
+            for (std::uint32_t i = 0; i < budget_blocks; ++i) { sel.block_ids[i] = i; }
+        } else {
+            if (budget_blocks < 4) {
+                throw std::invalid_argument(
+                    "KVMem compaction budget must span at least four pages "
+                    "(sink/recent/middle)");
+            }
+            if (budget_tokens < 4096) {
+                // Explicit bands: the auto clamps (sink 1024..2048, recent
+                // 4096..16384) exceed a small budget. Keep one sink page, one
+                // recent page and let the quota fill the middle.
+                cfg.sink_tokens  = std::clamp(budget_blocks / 8, 1u, budget_blocks / 4) *
+                                  kPagedKVPageSize;
+                cfg.recent_tokens =
+                    std::max<std::uint32_t>(1, budget_blocks / 4) * kPagedKVPageSize;
+            }
+            sel = repo.preview_select(cfg, std::move(mandatory_ids));  // K3 feeds the ids
         }
-        if (budget_tokens < 4096) {
-            // Explicit bands: the auto clamps (sink 1024..2048, recent
-            // 4096..16384) exceed a small budget. Keep one sink page, one
-            // recent page and let the quota fill the middle.
-            cfg.sink_tokens  = std::clamp(budget_blocks / 8, 1u, budget_blocks / 4) *
-                              kPagedKVPageSize;
-            cfg.recent_tokens =
-                std::max<std::uint32_t>(1, budget_blocks / 4) * kPagedKVPageSize;
-        }
-        ninfer::kvmem::KvSelection sel =
-            repo.preview_select(cfg, std::move(mandatory_ids));
-        std::printf("[c] selected %zu\n", sel.block_ids.size());  // K3 feeds query-driven ids
         ninfer::kvmem::KvWindowPlan plan = repo.set_selection(sel, cfg);
         const std::uint32_t window_tokens = static_cast<std::uint32_t>(plan.total_window_tokens);
         const std::uint32_t window_pages  = window_tokens / kPagedKVPageSize;
@@ -2156,8 +2166,29 @@ public:
     }
 
 
+    // Round-boundary convenience: sink-only compaction under the configured
+    // budget (NINFER_KVMEM_BUDGET tokens). Returns the new window token count,
+    // or 0 when compaction did not run (disabled, fits, active or shared).
+    // The caller must truncate its token bookkeeping (ledger, digests,
+    // text_kv_valid) to the returned window so the next round's prefix reuse
+    // matches exactly the retained head.
+    std::uint32_t kvmem_compact_round_boundary(KVAddressSpaceHandle handle,
+                                               cudaStream_t stream = nullptr) {
+        if (!kvmem_enabled_ || kvmem_budget_ == 0) { return 0; }
+        Address& address = require(handle);
+        if (address.active || address.row || address.reservation.valid()) { return 0; }
+        auto& repo = kvmem_repos_[static_cast<std::size_t>(&address - addresses_.data())];
+        const std::uint64_t ledger_tokens =
+            static_cast<std::uint64_t>(repo.block_count()) * kPagedKVPageSize;
+        if (ledger_tokens <= kvmem_budget_) { return 0; }
+        return kvmem_compact(handle, kvmem_budget_, stream, {}, true);
+    }
+
+    [[nodiscard]] std::uint32_t kvmem_budget_tokens() const noexcept { return kvmem_budget_; }
+
 private:
     bool kvmem_enabled_ = false;
+    std::uint32_t kvmem_budget_ = 0;  // NINFER_KVMEM_BUDGET tokens; 0 = unbounded
     std::vector<ninfer::kvmem::KvBlockRepository> kvmem_repos_;
     // Per address: block id -> logical page currently holding it (invalid while
     // the block is evicted), and the parked host slot while evicted.

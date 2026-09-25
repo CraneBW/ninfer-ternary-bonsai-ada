@@ -10796,6 +10796,27 @@ void ProgramImplCore::unbind_sequence_kv(SequenceState& sequence) noexcept {
             text_kv_addresses->deactivate(sequence.kv->text);
         }
     } catch (...) {}
+    // KVMem K1b round-boundary compaction: cap the resident window to the
+    // sink head (query-driven retention is K3). The token bookkeeping
+    // truncates to the window, so the next round's prefix reuse matches
+    // exactly the retained head -- the same contract as a shorter
+    // conversation. Speculative backends and rewrite checkpoints keep their
+    // own frontier assumptions and are excluded for now.
+    if (speculative_backend != SpeculativeBackend::None || sequence.rewrite_checkpoint.valid ||
+        !sequence.shared_prefix_references.empty()) {
+        return;
+    }
+    try {
+        const std::uint32_t window =
+            text_kv_addresses->kvmem_compact_round_boundary(sequence.kv->text, device.stream);
+        if (window != 0 && window < sequence.text_kv_valid) {
+            sequence.text_kv_valid = window;
+            sequence.mtp_kv_valid  = std::min(sequence.mtp_kv_valid, window);
+            sequence.ledger.resize(window);
+            sequence.prefix_identity.truncate(window);
+            sequence.prefix_digests.truncate(window);
+        }
+    } catch (...) {}
 }
 
 void ProgramImplCore::ensure_sequence_kv_mapped(SequenceState& sequence, std::uint32_t main_tokens,
