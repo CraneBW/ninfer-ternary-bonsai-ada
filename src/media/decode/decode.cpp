@@ -648,11 +648,36 @@ Video decode_video(std::span<const std::uint8_t> bytes, const Policy& policy, do
 #else
 #include "media/decode/decode.h"
 #include <stdexcept>
+#include <string>
 namespace ninfer::media::decode {
+    namespace {
+        // 这四条 stub 的职责是让 ninfer_media_decode 在关闭媒体解码时仍然链接完整。
+        // 上游只补了 decode_image/decode_video，漏了 inspect_image/inspect_video —— 后者被
+        // qwen3_6 前端的 token 计数（Processor::count_tokens）与视觉项探测引用，因此
+        // ffmpeg 缺失的构建会在链接 apps\ninfer.exe 时报 LNK2019 + LNK1120。
+        // 补齐后，误用媒体输入会得到一条明确的运行时错误，而不是链接失败。
+        [[noreturn]] void reject_without_ffmpeg(const char* what) {
+            throw std::runtime_error(
+                std::string(what) +
+                " requires FFMPEG support, but this zatfung build was configured without it "
+                "(the ffmpeg/ directory was missing at configure time). "
+                "Place ffmpeg/{include,lib} in the source tree and re-run the builder to enable "
+                "image/video input.");
+        }
+    }
+
+    ImageInfo inspect_image(std::span<const std::uint8_t>, const Policy&) {
+        reject_without_ffmpeg("inspect_image");
+    }
+    VideoInfo inspect_video(std::span<const std::uint8_t>, const Policy&, double, int, int) {
+        reject_without_ffmpeg("inspect_video");
+    }
     Image decode_image(std::span<const std::uint8_t> bytes, const Policy& policy) {
+        (void)bytes; (void)policy;
         throw std::runtime_error("Compiled without FFMPEG support.");
     }
     Video decode_video(std::span<const std::uint8_t> bytes, const Policy& policy, double fps, int min_f, int max_f) {
+        (void)bytes; (void)policy; (void)fps; (void)min_f; (void)max_f;
         throw std::runtime_error("Compiled without FFMPEG support.");
     }
 }

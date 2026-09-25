@@ -349,6 +349,30 @@ add_library(ninfer_ops STATIC
   ${_ninfer_nvfp4_w4a4_sources}
   ${_ninfer_sm120_kv_sources}
   ${_ninfer_w8_sm120_sources})
+
+# --- Turing (75) / Ampere (86)：剔除 FP8 A8 与 FP8 KV 注意力 -------------------------------
+# FP8 A8 路由最终发射的是 mma.sync...e4m3.e4m3.f32 —— FP8 tensor core 自 Ada (sm_89)
+# 起才有。sm_75/sm_86 完全没有这条通路，承载这些指令的翻译单元无法为该架构编译：
+#     ptxas error : Feature 'mma with FP8 floating point type' requires .target sm_89 or higher
+#     ptxas fatal : Ptx assembly aborted due to errors
+# 被剔除的入口由 ops/fp8_legacy_stubs.cpp 补齐：Op 边界保持链接完整，误选路线变成一条
+# 精确的运行时错误，而不是几百行 LNK2019。
+#
+# FP8 **权重**不受影响：A16 反量化路由（把 e4m3 解成 bf16 再走 bf16 MMA）的翻译单元照常
+# 编译 —— 例如 ops/linear_topk/fp8.cu / fp8_m64.cu 走 fp8_e4m3x2_to_bf16x2_bits，属 A16
+# 路径，故不在剔除之列。只有 A8（FP8 激活）计算与 FP8 E4M3 KV-cache 注意力不可用。
+#
+# 注意与 ninfer-3090 的差异：那条线从 Blackwell 上游派生，FP8 用的是 kind::f8f6f4
+# （Blackwell-only），所以它连 sm_89 一起剔除；zatfung 源自 Ada 线，用的是 sm_89 档的
+# FP8 MMA，故 sm_89 必须保留 —— 这里的门控是 ^(75|86)$，不是 ^(86|89)$。
+if(CMAKE_CUDA_ARCHITECTURES MATCHES "^(75|86)$")
+  get_target_property(ninfer_ops_sources ninfer_ops SOURCES)
+  list(FILTER ninfer_ops_sources EXCLUDE REGEX "fp8/.+_a8\\.cu$")
+  list(FILTER ninfer_ops_sources EXCLUDE REGEX "causal_cache/(prompt|small_t)_fp8\\.cu$")
+  set_property(TARGET ninfer_ops PROPERTY SOURCES ${ninfer_ops_sources})
+  target_sources(ninfer_ops PRIVATE ops/fp8_legacy_stubs.cpp)
+endif()
+
 ninfer_internal_includes(ninfer_ops)
 ninfer_cuda_archive(ninfer_ops)
 target_link_libraries(ninfer_ops PUBLIC ninfer_core PRIVATE ${_ninfer_nvfp4_non_rdc})

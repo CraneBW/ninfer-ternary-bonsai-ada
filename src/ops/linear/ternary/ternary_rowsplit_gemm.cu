@@ -101,7 +101,9 @@ void launch_gemm(const Tensor& x, const Weight& w, Tensor& out, std::int32_t out
     const std::int32_t groups_per_row = k / Storage::kGroupK;
 
     const dim3 grid(static_cast<unsigned>(rows), static_cast<unsigned>(div_up(t, kTileT)), 1u);
-    constexpr dim3 block(Storage::kGroupK, 1u, 1u);
+    // CUDA 13 起 dim3 的构造函数才标记为 constexpr；这里必须是 const 才能在 CUDA 12.8 上编译。
+    // block 只作为 launch 配置使用，不参与常量表达式求值，故语义不变。
+    const dim3 block(Storage::kGroupK, 1u, 1u);
 
     ternary_rowsplit_gemm_kernel<Storage, Atom, kTileT><<<grid, block, 0, stream>>>(
         static_cast<const __nv_bfloat16*>(x.data), static_cast<const std::uint8_t*>(w.qdata),
