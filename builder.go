@@ -96,7 +96,15 @@ var childExtraEnv []string
 // cleanEnv 返回剥离代理变量后的环境副本，再叠加 childExtraEnv（MSVC / ccache）。
 // 注意：**只剥代理**，不做任何其它清洗 —— env -i 式的过度清洗会让
 // FindCUDAToolkit 探到版本却找不到 CUDA_CUDART。
+// childExtraEnv 是**覆盖**语义而非追加：Windows 环境块里同名变量取第一个，
+// 追加的 PATH 永远不生效（这是 -test 模式找不到 cl 的根因）。
 func cleanEnv() []string {
+	override := make(map[string]string, len(childExtraEnv))
+	for _, kv := range childExtraEnv {
+		if i := strings.Index(kv, "="); i > 0 {
+			override[strings.ToUpper(kv[:i])] = kv
+		}
+	}
 	var env []string
 	for _, kv := range os.Environ() {
 		blocked := false
@@ -107,10 +115,24 @@ func cleanEnv() []string {
 			}
 		}
 		if !blocked {
+			if i := strings.Index(kv, "="); i > 0 {
+				if repl, dup := override[strings.ToUpper(kv[:i])]; dup {
+					env = append(env, repl)
+					delete(override, strings.ToUpper(kv[:i]))
+					continue
+				}
+			}
 			env = append(env, kv)
 		}
 	}
-	return append(env, childExtraEnv...)
+	for _, kv := range childExtraEnv {
+		if i := strings.Index(kv, "="); i > 0 {
+			if _, dup := override[strings.ToUpper(kv[:i])]; dup {
+				env = append(env, kv) // 原环境没有的变量，直接补充
+			}
+		}
+	}
+	return env
 }
 
 // ---------------------------------------------------------------------------
@@ -313,6 +335,52 @@ func msvcEnvVars(vsRoot, msvcVer, sdkVer string) []string {
 		// cl.exe 默认输出中文（GBK）；nvcc/ccache 按 UTF-8 解析会崩，统一英文输出。
 		"VSLANG=1033",
 	}
+}
+
+// ---- 独立测试模式：编译并运行与引擎无关的 C++ 测试 ----
+//
+// 复用 MSVC 环境自建（INCLUDE/LIB/PATH，cmd.exe 被禁时 vcvars 不可用），静态 CRT +
+// /utf-8（宿主代码页 936 会错误解码 UTF-8 注释）。产物放 <buildDir>/tests/。
+// 用法：builder.exe -test tests/kvmem_blocks_test.cpp [-test-args "--flag"]
+func runTestMode(repoRoot, vsRoot, msvcVer, sdkVer, files, testArgs string) {
+	childExtraEnv = msvcEnvVars(vsRoot, msvcVer, sdkVer)
+	// Go 的 exec.LookPath 用父进程 PATH（cmd.Env 不参与），与引擎流程调
+	// cmake/ninja 一样必须给绝对路径。
+	clPath := filepath.Join(vsRoot, "VC", "Tools", "MSVC", msvcVer, "bin", "Hostx64", "x64", "cl.exe")
+	outDir := filepath.Join(repoRoot, "_build_test")
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		printError("无法创建测试输出目录: " + err.Error())
+		os.Exit(90)
+	}
+	var args []string
+	if testArgs != "" {
+		args = strings.Fields(testArgs)
+	}
+	for _, f := range strings.Split(files, ",") {
+		f = strings.TrimSpace(f)
+		if f == "" {
+			continue
+		}
+		src := f
+		if !filepath.IsAbs(src) {
+			src = filepath.Join(repoRoot, f)
+		}
+		if _, err := os.Stat(src); err != nil {
+			printError("测试源文件不存在: " + src)
+			os.Exit(90)
+		}
+		base := strings.TrimSuffix(filepath.Base(src), filepath.Ext(src))
+		exe := filepath.Join(outDir, base+".exe")
+		printInfo("== 测试 " + f + " ==")
+		if err := run(repoRoot, clPath, "-nologo", "-std:c++20", "-EHsc", "-MT", "-utf-8",
+			"-W3", "-I"+filepath.Join(repoRoot, "src"), src, "-Fe:"+exe); err != nil {
+			os.Exit(1)
+		}
+		if err := run(repoRoot, exe, args...); err != nil {
+			os.Exit(1)
+		}
+	}
+	printSuccess("全部测试通过")
 }
 
 // findNinja 定位 ninja.exe：先 PATH，再 VS 自带路径。
@@ -849,6 +917,8 @@ func main() {
 	cudaAllowUnsupported := flag.Bool("cuda-allow-unsupported", false,
 		"给 nvcc 传 -allow-unsupported-compiler（当前 MSVC 比 nvcc 白名单新时用）")
 	listOnly := flag.Bool("list", false, "只打印探测到的工具链后退出（不编译）")
+	testFlag := flag.String("test", "", "编译并运行独立 C++ 测试（逗号分隔的 .cpp，相对仓库根），不构建引擎")
+	testArgs := flag.String("test-args", "", "透传给测试程序的参数（空格分隔）")
 	configureOnly := flag.Bool("configure-only", false, "只跑 CMake configure 后退出（CI 分阶段 / 验证工具链）")
 	extraFlag := flag.String("D", "", "额外 CMake 参数，分号分隔，如 -D=\"NINFER_BUILD_BENCHMARKS=ON\"")
 	flag.Parse()
@@ -960,6 +1030,16 @@ func main() {
 	}
 	if ccachePath != "" {
 		childExtraEnv = append(childExtraEnv, ccacheEnvVars(repoRoot, opts.ccacheDir)...)
+	}
+
+	// ---- 独立测试模式：只需要 MSVC 工具链，不需要 cmake/ninja/CUDA ----
+	if *testFlag != "" {
+		if vsRoot == "" {
+			printError("-test 需要 MSVC 工具链，但未找到 Visual Studio")
+			os.Exit(90)
+		}
+		runTestMode(repoRoot, vsRoot, msvcVer, sdkVer, *testFlag, *testArgs)
+		return
 	}
 
 	opts.cmake = cmake
