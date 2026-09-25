@@ -342,7 +342,8 @@ func msvcEnvVars(vsRoot, msvcVer, sdkVer string) []string {
 // 复用 MSVC 环境自建（INCLUDE/LIB/PATH，cmd.exe 被禁时 vcvars 不可用），静态 CRT +
 // /utf-8（宿主代码页 936 会错误解码 UTF-8 注释）。产物放 <buildDir>/tests/。
 // 用法：builder.exe -test tests/kvmem_blocks_test.cpp [-test-args "--flag"]
-func runTestMode(repoRoot, vsRoot, msvcVer, sdkVer, files, testArgs string) {
+func runTestMode(repoRoot, vsRoot, msvcVer, sdkVer, files, testArgs string, cuda cudaInfo,
+	archID string) {
 	childExtraEnv = msvcEnvVars(vsRoot, msvcVer, sdkVer)
 	// Go 的 exec.LookPath 用父进程 PATH（cmd.Env 不参与），与引擎流程调
 	// cmake/ninja 一样必须给绝对路径。
@@ -372,7 +373,18 @@ func runTestMode(repoRoot, vsRoot, msvcVer, sdkVer, files, testArgs string) {
 		base := strings.TrimSuffix(filepath.Base(src), filepath.Ext(src))
 		exe := filepath.Join(outDir, base+".exe")
 		printInfo("== 测试 " + f + " ==")
-		if err := run(repoRoot, clPath, "-nologo", "-std:c++20", "-EHsc", "-MT", "-utf-8",
+		if strings.EqualFold(filepath.Ext(src), ".cu") {
+			// CUDA 测试：nvcc 编译（宿主侧走同一个 cl），静态 cudart 便于直接运行。
+			if cuda.nvcc == "" {
+				printError(".cu 测试需要 nvcc，但未找到 CUDA 工具链")
+				os.Exit(90)
+			}
+			if err := run(repoRoot, cuda.nvcc, "-arch=sm_"+archID, "-std=c++20",
+				"-I"+filepath.Join(repoRoot, "src"), "-I"+filepath.Join(repoRoot, "include"),
+				src, "-o", exe); err != nil {
+				os.Exit(1)
+			}
+		} else if err := run(repoRoot, clPath, "-nologo", "-std:c++20", "-EHsc", "-MT", "-utf-8",
 			"-W3", "-I"+filepath.Join(repoRoot, "src"), src, "-Fe:"+exe); err != nil {
 			os.Exit(1)
 		}
@@ -1032,13 +1044,18 @@ func main() {
 		childExtraEnv = append(childExtraEnv, ccacheEnvVars(repoRoot, opts.ccacheDir)...)
 	}
 
-	// ---- 独立测试模式：只需要 MSVC 工具链，不需要 cmake/ninja/CUDA ----
+	// ---- 独立测试模式：cl 编 .cpp；.cu 需要 nvcc。不需要 cmake/ninja ----
 	if *testFlag != "" {
 		if vsRoot == "" {
 			printError("-test 需要 MSVC 工具链，但未找到 Visual Studio")
 			os.Exit(90)
 		}
-		runTestMode(repoRoot, vsRoot, msvcVer, sdkVer, *testFlag, *testArgs)
+		cuda, cudaErr := findCuda()
+		if cudaErr != nil {
+			cuda = cudaInfo{}
+		}
+		runTestMode(repoRoot, vsRoot, msvcVer, sdkVer, *testFlag, *testArgs, cuda,
+			archSpecResolved.id)
 		return
 	}
 
