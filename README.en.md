@@ -1,5 +1,11 @@
-[![English](https://img.shields.io/badge/Language-English-2ea44f?style=flat-square)](README.md)
-[![简体中文](https://img.shields.io/badge/Language-%E7%AE%80%E4%BD%93%E4%B8%AD%E6%96%87-d73a49?style=flat-square)](README.zh-CN.md)
+[![English](https://img.shields.io/badge/Language-English-2ea44f?style=flat-square)](README.en.md)
+[![简体中文](https://img.shields.io/badge/Language-%E7%AE%80%E4%BD%93%E4%B8%AD%E6%96%87-d73a49?style=flat-square)](README.md)
+
+> **这是英文版。主文档已改为中文，见 [README.md](README.md)** —— 那一份以**部署与性能**为核心，
+> 覆盖三版对比、编译、运行、推荐配置与全部调优旋钮。本页保留作为英文参考，
+> 横线以下是上游 NINFER 的完整 README 原文。
+
+---
 
 # Ternary Bonsai 2 27B on **NINFER** (Ada / `sm_89`, Linux)
 
