@@ -86,6 +86,12 @@ std::string format_kv_cache(ninfer::KvCacheStorage storage) {
         return "nvfp4";
     case ninfer::KvCacheStorage::Fp8KeyNvfp4Value:
         return "k8v4";
+    // sm_89-only packed int4. Without these two the CLI accepted the flag and then reported the
+    // very dtype it had just been handed as "unknown", which reads like the flag was ignored.
+    case ninfer::KvCacheStorage::RotatedInt4KeyInt4ValueGroup64:
+        return "rk4v4";
+    case ninfer::KvCacheStorage::RK4V4E8:
+        return "rk4v4-e8";
     }
     return "unknown";
 }
