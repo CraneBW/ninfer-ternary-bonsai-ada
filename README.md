@@ -175,6 +175,25 @@ decode 保持 20% 领先（接受率那一格的差别见上）。
    那一行 `bf16`/`fp8`/`int8` 会先 OOM，只有它跑得起来。已实测 **247,646 token 深埋召回
    答对**。要速度用 `fp8`，要最准用 `int8`。
 
+**服务端侧复核**（`ninfer-serve` + `/v1/chat/completions`，30k 提示，`--max-context 40960`——
+四档共同装得下的深度，`bf16` 是 64 KiB/token，200K 要 12.8 GB 放不进 16 GB 卡。
+真交替 2 轮，**每臂重启所以前缀是冷的**）：
+
+| KV 档 | prefill | TTFT | decode | MTP 接受率 |
+|---|---:|---:|---:|---:|
+| `bf16` | 2.22k / 2.21k | 12.7 / 12.8 s | **146.6 / 146.6** | 94.4% |
+| `int8` | 2.28k / 2.27k | 12.4 / 12.4 s | **157.1 / 157.0** | 94.4% |
+| **`fp8`** | 2.25k / 2.24k | 12.6 / 12.6 s | **157.1 / 157.1** | 94.4% |
+| `rk4v4` | 2.20k / 2.20k | 12.8 / 12.8 s | **156.1 / 155.9** | 94.4% |
+
+**两条**：① **prefill 与 KV 档基本无关**（极差 3.6%）——prefill 是**权重带宽**受限
+（要读 7.12 GiB 权重），KV 写入只占零头，换档不会让长提示更快进上下文。
+② **decode 只有 `bf16` 明显慢**，其余三档约 +7%，`int8` 与 `fp8` 打平、`rk4v4` 落后 0.6%。
+**排序与上面 CLI 那张表一致**，所以那张表的口径是可靠的。
+
+> ⚠️ 两个口径陷阱：**每臂必须冷前缀**（第二次起命中 99.9%，`prefill X tok/s` 那行要么是残量
+> 要么不打）；**深度必须四档都装得下**。
+
 ### 1.4 数值
 
 | 配置 | PPL |
@@ -247,6 +266,28 @@ int8 档的偏移是 **+0.0015%**，量级正是 int8 激活量化误差本身�
 > 上游文档里的金判据是 ≈6.445，那是它自己的协议。对账要跟本机自己的历史基线比。
 
 ---
+
+### 1.5 服务端的两条行为（都会咬人）
+
+**① `reasoning_effort` 的默认值是模型自带的 `xhigh`。**
+`chat_template.cpp:432` 的 `result.reasoning_effort.default_effort = ReasoningEffort::XHigh;`。
+**请求里开思考而不指定档位，就是最高档**——不是调用方设的。要降档得显式传
+`reasoning_effort: low|medium|high`（`request.h:142` 认 none/minimal/low/medium/high/xhigh）。
+
+**② `--default-thinking-budget` 是许可证，不是刹车。**
+思考/正文的切分靠模型吐控制 token（`frontend.cpp:557`）；预算只喂给一个**默认整个不启用**的
+语义追踪器（`semantic.in_reasoning = starts_in_reasoning && thinking.budget.has_value()`，
+注释说明默认不启用是为了不把每个 token 解码两遍），超预算的动作是**抛
+`model output exceeded the licensed thinking budget`——报错，不替模型收尾。**
+⇒ **它不解决"想不停"。**
+
+**给使用者的三条**（都是上面两条的直接推论，不含模型行为）：
+
+| 想要 | 怎么做 |
+|---|---|
+| 思考的档位可控 | 请求里显式传 `reasoning_effort`，别依赖默认值 |
+| 思考有终点 | 要么给 `--default-thinking-budget`（**它会在越界时报错，所以别把它当"自动收尾"用**），要么走 agent 循环——每一步以工具调用收尾，思考因此有终点 |
+| 只要速度 | `--no-thinking`（取舍见 §2.5） |
 
 ## 2. 部署
 
