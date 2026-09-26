@@ -272,6 +272,10 @@ void launch_ternary_attn(const Tensor& activation, const Weight& query_key_weigh
                          const Weight& gate_value_weight, Tensor& q, Tensor& gate, Tensor& k,
                          Tensor& v, std::int32_t query_rows, std::int32_t kv_rows,
                          detail::TernaryS8Scratch scratch, cudaStream_t stream) {
+    // FOUR projections, ONE activation: quantize it once here and let the four dispatches below
+    // skip their own pass (they compare the shape the scratch records). Without this the absmax
+    // reduction and the int8 code pass ran four times over the same k x T bytes.
+    detail::quantize_ternary_s8_activation(activation, scratch, stream);
     const Weight q_head = detail::ternary_row_view(query_key_weight, 0, query_rows);
     const Weight k_tail = detail::ternary_row_view(query_key_weight, query_rows, kv_rows);
     const Weight g_head = detail::ternary_row_view(gate_value_weight, 0, query_rows);

@@ -31,4 +31,17 @@ void launch_ternary_gemm_t8(const Tensor& x, const Weight& w, Tensor& out,
                             std::int32_t out_row_stride, cudaStream_t stream,
                             TernaryS8Scratch scratch);
 
+// Runs the int8 activation-quantization pass ONCE for a folded activation that several projections
+// are about to share, and stamps the shape into `scratch` so their launches skip it.
+//
+// The fused parents are why this exists: attn_input_proj hands one activation to four
+// ternary_dispatch_basis calls and gdn_input_proj hands one to three, and every one of them used to
+// redo the absmax reduction and the code pass over the same k x T bytes -- measured at 144 of the
+// 400 quantize launches in one prefill, i.e. 36% of that kernel's 8.17 ms, plus the L2 traffic of
+// reading x twice per redundant pass.
+//
+// Costs nothing when the caller does not use it: launch_pq2_mma_s8 quantizes whenever the scratch's
+// recorded shape does not match, which is always true for a scratch nobody pre-quantized.
+void quantize_ternary_s8_activation(const Tensor& x, TernaryS8Scratch& scratch, cudaStream_t stream);
+
 } // namespace ninfer::ops::detail
