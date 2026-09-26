@@ -203,7 +203,9 @@ The table lists executable defaults. The examples above select FP8 KV and MTP3.
 | `--prefill-chunk N` | positive text-prefill chunk, in multiples of 128 | `1024` |
 | `--max-new N` | requested output-token limit | `128` |
 | `--device N` | CUDA device index | `0` |
-| `--kv-dtype bf16\|int8\|fp8\|nvfp4\|k8v4` | KV-cache storage | `bf16` |
+| `--kv-dtype bf16\|int8\|fp8\|nvfp4\|k8v4` | KV-cache storage, both sides at once | `bf16` |
+| `--cache-type-k bf16\|int8\|fp8\|nvfp4\|int4\|int4-e8` | key-side KV-cache storage | `bf16` |
+| `--cache-type-v bf16\|int8\|fp8\|nvfp4\|int4` | value-side KV-cache storage | `bf16` |
 | `--spec mtp\|dflash\|dflash2` | speculative backend | off |
 | `--draft-tokens N` | MTP `1..5`; DFlash/DFlash2 `1..15` | unset |
 | `--lm-head-draft` | optimized proposal head | off |
@@ -247,7 +249,11 @@ Run `./build/apps/ninfer --help` for the exact option contract.
 The registered model IDs have a native context limit of 262,144 tokens. The practical allocation
 on one RTX 5090 depends on the selected artifact, media workload, output budget, and KV-cache type.
 Artifact identity selects the weight profile;
-`--kv-dtype` selects runtime KV storage. The prepared prompt must fit
+`--kv-dtype` selects runtime KV storage, and `--cache-type-k` / `--cache-type-v` select each side
+separately. The paged-KV kernels are specialized per `(key, value)` pair, so only the compiled pairs
+are accepted (`bf16/bf16`, `int8/int8`, `fp8/fp8`, `nvfp4/nvfp4`, `fp8/nvfp4`, `int4/int4`,
+`int4-e8/int4`); an unspecified side stays at `bf16`, `--kv-dtype` sets both at once, and the two
+forms cannot be combined. The prepared prompt must fit
 `--max-context`; generation stops at the remaining context capacity when necessary.
 `--kv-capacity N` controls the shared physical Main Text KV pool independently and is rounded up to
 the 64-token page size. `--kv-capacity auto` loads the selected weights, measures the remaining GPU

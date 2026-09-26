@@ -5,6 +5,7 @@
 #include "core/arena.h"
 #include "core/decode_graph.h"
 #include "core/device.h"
+#include "kvmem/kvmem_bridge.h"
 #include "ninfer/ops/kv_cache_append.h"
 #include "ninfer/ops/sampling.h"
 #include "ninfer/ops/sliding_window_attention.h"
@@ -38,6 +39,9 @@ struct ExecutionCore {
     Tensor& prefill_hidden;
     std::uint32_t prefill_chunk;
     ProposalHead proposal_head;
+    // KVMem K3 retrieval query capture: null unless KVMem is enabled, in which
+    // case a prefilling card stores the prompt's last-token query here.
+    const ninfer::kvmem::KvmemQueryCapture* kvmem_query = nullptr;
 };
 
 struct PrefillContext {
@@ -47,6 +51,7 @@ struct PrefillContext {
     const qwen3_6::PagedKVCache& text_cache;
     const qwen3_6::PagedKVCache* mtp_cache;
     DFlashPersistentState* dflash;
+    // Prompt index the next chunk starts at; it also indexes the full prompt for Vision.
     std::uint32_t text_kv_base;
     const ops::SamplingConfig* sampling;
     Tensor* rewrite_checkpoint_hidden;
@@ -54,6 +59,9 @@ struct PrefillContext {
     std::int32_t state_destination_slot                     = 0;
     std::uint32_t mtp_proposal_extent                       = 0;
     const qwen3_6::DFlashDecodeIngress* dflash_host_ingress = nullptr;
+    // Cache-slot and RoPE shift of a KVMem-compacted lineage: the first new token is written at
+    // `text_kv_base + text_kv_offset` instead of `text_kv_base`.
+    std::int32_t text_kv_offset = 0;
 };
 
 struct OrdinaryBatchContext {

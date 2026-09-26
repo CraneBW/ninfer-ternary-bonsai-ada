@@ -88,6 +88,21 @@ int main() {
     failures +=
         check(help.find("nvfp4") != std::string::npos && help.find("k8v4") != std::string::npos,
               "CLI help omits a production KV storage mode");
+    const ninfer::cli::Options split_k8v4 =
+        parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--cache-type-k", "fp8",
+               "--cache-type-v", "nvfp4"});
+    failures += check(split_k8v4.kv_cache == ninfer::KvCacheStorage::Fp8KeyNvfp4Value,
+                      "per-side fp8/nvfp4 did not select asymmetric K8V4 KV");
+    failures += check(rejects([] {
+                          (void)parse({"ninfer-cli", "model.ninfer", "--prompt", "hello",
+                                       "--cache-type-k", "int8", "--cache-type-v", "nvfp4"});
+                      }),
+                      "CLI accepted a key/value pair without a kernel");
+    failures += check(rejects([] {
+                          (void)parse({"ninfer-cli", "model.ninfer", "--prompt", "hello",
+                                       "--kv-dtype", "fp8", "--cache-type-v", "nvfp4"});
+                      }),
+                      "CLI accepted --kv-dtype together with a per-side cache type");
     const ninfer::cli::Options logging =
         parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--log-level", "debug"});
     failures += check(logging.log_level == ninfer::product::LogLevel::Debug,

@@ -71,7 +71,8 @@ KvCapacityPolicy parse_kv_capacity(const char* text) {
 std::string serve_usage_text(const char* argv0) {
     return std::string("usage: ") + argv0 +
            " <model.ninfer> [--host H] [--port N] [--api-key KEY] "
-           "[--model-id ID] [--max-context N] [--kv-capacity N|auto] [--max-concurrency N] "
+           "[--model-id ID] [--max-context N] [--kv-capacity N|auto] "
+           "[--kv-device-tokens N] [--max-concurrency N] "
            "[--max-pending-requests N] [--pending-timeout-ms N] "
            "[--prefill-chunk N] [--log-stats-interval-ms N] [--device N] "
            "[--context-cost-presets FILE] "
@@ -82,7 +83,11 @@ std::string serve_usage_text(const char* argv0) {
            "[--max-long-anchors-per-continuation N] "
            "[--request-log-jsonl FILE] "
            "[--response-store-max-records N] [--response-store-max-mib N] "
-           "[--kv-dtype bf16|int8|fp8|nvfp4|k8v4|rk4v4|rk4v4-e8] [--spec mtp|dflash|dflash2 --draft-tokens N] "
+           "[--kv-dtype bf16|int8|fp8|nvfp4|k8v4|rk4v4|rk4v4-e8 | "
+           "--cache-type-k <bf16|int8|fp8|nvfp4|int4|int4-e8> "
+           "--cache-type-v <bf16|int8|fp8|nvfp4|int4>] "
+           "[--kvmem [--kvmem-budget N] [--kvmem-gen-reserve N]] "
+           "[--spec mtp|dflash|dflash2 --draft-tokens N] "
            "[--default-max-tokens N] [--default-thinking-budget N] "
            "[--vision] [--vision-max-tokens N] [--no-cuda-graph] [--no-prefix-reuse] "
            "[--lm-head-draft] [--no-thinking] [--preserve-thinking] "
@@ -107,7 +112,23 @@ std::string serve_usage_text(const char* argv0) {
            "       --vision-max-tokens sets the Vision scratchpad token capacity (default 8192)\n"
            "       --kv-capacity auto leaves " +
            std::to_string(kDefaultKvCapacityHeadroomBytes / (1024ULL * 1024ULL)) +
-           " MiB of sizing headroom\n"
+           " MiB of sizing headroom (" +
+           std::to_string(kKvMemAutomaticHeadroomBytes / (1024ULL * 1024ULL)) +
+           " MiB under --kvmem, whose pool is sized by the working set it needs)\n"
+           "       --kv-device-tokens caps the KV page pool below --max-context; the rest of the "
+           "context is backed by host memory, so it needs the host KV tier\n"
+           "       --cache-type-k/--cache-type-v choose each side of the KV cache; an omitted "
+           "side stays at bf16, and the pair must have a kernel (see the server error for the "
+           "supported list)\n"
+           "       --kvmem keeps the device KV pool a resident working set and backs the rest of "
+           "the context with host memory; --kvmem-budget narrows the working set in tokens "
+           "(0 or omitted keeps the whole context). Without --kv-capacity or --kv-device-tokens "
+           "the pool is sized automatically from the working set it needs\n"
+           "       --kvmem-gen-reserve keeps that many tokens of the pool free for decoding "
+           "(default " +
+           std::to_string(kDefaultKvMemGenReserveTokens) +
+           "; 0 disables generation-time reclaim). Too small a reserve evicts freshly retrieved "
+           "content mid-generation; a pool that cannot afford it clamps it down\n"
            "       --no-prefix-reuse disables compatible-prefix caching (enabled by default)\n"
            "       context cache defaults: device-state=max-concurrency, private=2x concurrency, "
            "shared=max(max-concurrency,4), anchors=2; Host state=8 slots, Host KV=8192 MiB\n"
@@ -141,7 +162,16 @@ ServeOptions parse_serve_options(int argc, char** argv) {
     }
     bool default_max_tokens_explicit = false;
     bool kv_capacity_explicit        = false;
+    bool kv_device_tokens_explicit   = false;
     bool context_capacity_explicit   = false;
+    bool kv_dtype_explicit           = false;
+    bool kvmem_switch                = false;
+    bool kvmem_budget_given          = false;
+    std::uint32_t kvmem_budget       = 0;
+    bool kvmem_gen_reserve_given     = false;
+    std::uint32_t kvmem_gen_reserve  = 0;
+    std::optional<KvKeyStorage> kv_key_storage;
+    std::optional<KvValueStorage> kv_value_storage;
     if (argc >= 2 && (std::string(argv[1]) == "--help" || std::string(argv[1]) == "-h")) {
         options.help_requested = true;
         return options;
@@ -171,6 +201,15 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         } else if (arg == "--kv-capacity") {
             options.kv_capacity  = parse_kv_capacity(require_value("--kv-capacity"));
             kv_capacity_explicit = true;
+        } else if (arg == "--kv-device-tokens") {
+            const int value =
+                parse_nonnegative_int(require_value("--kv-device-tokens"), "kv-device-tokens");
+            if (value == 0) {
+                throw std::invalid_argument("--kv-device-tokens must be positive");
+            }
+            options.kv_capacity        = KvCapacityPolicy::device_budget(
+                static_cast<std::uint32_t>(value));
+            kv_device_tokens_explicit = true;
         } else if (arg == "--max-concurrency") {
             options.max_concurrency = static_cast<std::uint32_t>(
                 parse_nonnegative_int(require_value("--max-concurrency"), "max-concurrency"));
@@ -273,6 +312,36 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         } else if (arg == "--kv-dtype") {
             options.kv_storage =
                 KvStoragePolicy::explicit_storage(parse_kv_dtype(require_value("--kv-dtype")));
+            kv_dtype_explicit = true;
+        } else if (arg == "--cache-type-k") {
+            const std::string_view text = require_value("--cache-type-k");
+            const auto parsed           = parse_kv_key_storage(text);
+            if (!parsed) {
+                throw std::invalid_argument(
+                    "--cache-type-k must be bf16, int8, fp8, nvfp4, int4, or int4-e8");
+            }
+            kv_key_storage = *parsed;
+        } else if (arg == "--cache-type-v") {
+            const std::string_view text = require_value("--cache-type-v");
+            const auto parsed           = parse_kv_value_storage(text);
+            if (!parsed) {
+                throw std::invalid_argument(
+                    "--cache-type-v must be bf16, int8, fp8, nvfp4, or int4");
+            }
+            kv_value_storage = *parsed;
+        } else if (arg == "--kvmem") {
+            kvmem_switch = true;
+        } else if (arg == "--kvmem-budget") {
+            const int value =
+                parse_nonnegative_int(require_value("--kvmem-budget"), "kvmem-budget");
+            if (value == 0) { throw std::invalid_argument("--kvmem-budget must be positive"); }
+            kvmem_budget       = static_cast<std::uint32_t>(value);
+            kvmem_budget_given = true;
+        } else if (arg == "--kvmem-gen-reserve") {
+            const int value = parse_nonnegative_int(require_value("--kvmem-gen-reserve"),
+                                                    "kvmem-gen-reserve");
+            kvmem_gen_reserve       = static_cast<std::uint32_t>(value);
+            kvmem_gen_reserve_given = true;
         } else if (arg == "--spec") {
             options.speculative.backend =
                 product::parse_speculative_backend(require_value("--spec"));
@@ -345,8 +414,43 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             throw std::invalid_argument("unknown argument: " + arg);
         }
     }
-    if (!kv_capacity_explicit) {
-        options.kv_capacity = KvCapacityPolicy::explicit_capacity(options.max_context);
+    if (kv_capacity_explicit && kv_device_tokens_explicit) {
+        throw std::invalid_argument("--kv-capacity and --kv-device-tokens cannot be combined");
+    }
+    options.kvmem = resolve_kvmem_options(kvmem_switch, kvmem_budget_given, kvmem_budget,
+                                          kvmem_gen_reserve_given, kvmem_gen_reserve);
+    if ((kvmem_budget_given || kvmem_gen_reserve_given) && !options.kvmem.enabled) {
+        throw std::invalid_argument(
+            "--kvmem-budget and --kvmem-gen-reserve size the KVMem window, so they need --kvmem "
+            "(or NINFER_KVMEM=1) to be enabled");
+    }
+    if (!kv_capacity_explicit && !kv_device_tokens_explicit) {
+        // KVMem keeps the device pool a resident working set, so a front end that enabled it
+        // without choosing a pool gets an automatic one, bounded by the working set the runtime
+        // needs instead of by whatever device memory happens to be left. Without the host KV
+        // tier the context has no backing, so the pool keeps covering it.
+        options.kv_capacity = options.kvmem.enabled && options.allow_prefix_reuse
+                                  ? KvCapacityPolicy::automatic(kKvMemAutomaticHeadroomBytes)
+                                  : KvCapacityPolicy::explicit_capacity(options.max_context);
+    }
+    if (kv_dtype_explicit && (kv_key_storage || kv_value_storage)) {
+        throw std::invalid_argument(
+            "--kv-dtype sets both sides of the KV cache, so it cannot be combined with "
+            "--cache-type-k or --cache-type-v");
+    }
+    if (!kv_dtype_explicit && (kv_key_storage || kv_value_storage)) {
+        // An omitted side stays at bf16, so a single-sided request that has no kernel
+        // fails here with the supported-pair list instead of running the wrong decode.
+        const auto resolved = resolve_kv_cache_storage(
+            kv_key_storage.value_or(KvKeyStorage::BFloat16),
+            kv_value_storage.value_or(KvValueStorage::BFloat16));
+        if (!resolved) {
+            throw std::invalid_argument(
+                "--cache-type-k/--cache-type-v select a pair without a kernel; supported "
+                "pairs: " +
+                std::string(kSupportedKvCachePairList));
+        }
+        options.kv_storage = KvStoragePolicy::explicit_storage(*resolved);
     }
     if (!options.allow_prefix_reuse) {
         if (context_capacity_explicit) {
@@ -356,6 +460,11 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         options.context_cache.enabled                = false;
         options.context_cache.host_state_slots       = 0;
         options.context_cache.host_kv_capacity_bytes = 0;
+    }
+    if (kv_device_tokens_explicit && !options.allow_prefix_reuse) {
+        throw std::invalid_argument(
+            "--kv-device-tokens needs the host KV tier to back the context, so it cannot be "
+            "combined with --no-prefix-reuse");
     }
     if (options.port <= 0 || options.port > 65535) {
         throw std::invalid_argument("--port must be in [1,65535]");

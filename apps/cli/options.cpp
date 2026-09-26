@@ -86,10 +86,13 @@ ReasoningEffort parse_reasoning_effort(std::string_view text) {
 std::string usage_text(const char* argv0) {
     return std::string("usage: ") + argv0 +
            " <model.ninfer> (--prompt <text>|--messages <messages.json>)\n"
-           "       [--max-context N] [--kv-capacity N|auto] [--prefill-chunk N] [--max-new N]\n"
-           "       [--device N]\n"
-           "       [--kv-dtype bf16|int8|fp8|nvfp4|k8v4|rk4v4|rk4v4-e8] [--spec mtp|dflash|dflash2 "
-           "--draft-tokens "
+           "       [--max-context N] [--kv-capacity N|auto] [--kv-device-tokens N] "
+           "[--prefill-chunk N] [--max-new N]\n"
+           "       [--device N] [--kvmem [--kvmem-budget N] [--kvmem-gen-reserve N]]\n"
+           "       [--kv-dtype bf16|int8|fp8|nvfp4|k8v4|rk4v4|rk4v4-e8] "
+           "[--cache-type-k bf16|int8|fp8|nvfp4|int4|int4-e8 "
+           "--cache-type-v bf16|int8|fp8|nvfp4|int4]\n"
+           "       [--spec mtp|dflash|dflash2 --draft-tokens "
            "N]\n"
            "       [--lm-head-draft]\n"
            "       [--temperature F] [--top-p F] [--top-k N] [--min-p F]\n"
@@ -113,6 +116,14 @@ std::string usage_text(const char* argv0) {
            "--kv-capacity auto leaves " +
            std::to_string(kDefaultKvCapacityHeadroomBytes / (1024ULL * 1024ULL)) +
            " MiB of sizing headroom.\n"
+           "--kv-device-tokens caps the KV page pool below --max-context; the rest of the\n"
+           "context is then backed by host memory, which only --kvmem can decode from.\n"
+           "--kvmem keeps the device KV pool a resident working set and backs the rest of the\n"
+           "context with host memory; --kvmem-budget narrows the working set in tokens (0 or\n"
+           "omitted keeps the whole context), and --kvmem-gen-reserve keeps that many tokens of\n"
+           "the pool free for decoding (default " +
+           std::to_string(kDefaultKvMemGenReserveTokens) +
+           "). Without --kvmem every KV page stays resident on the device.\n"
            "Sampling defaults come from the loaded model and thinking mode; flags override "
            "individual fields.\n";
 }
@@ -125,7 +136,16 @@ Options parse_options(int argc, char** argv) {
     }
     if (argc < 2) { throw std::invalid_argument(".ninfer model path is required"); }
     options.artifact_path     = argv[1];
-    bool kv_capacity_explicit = false;
+    bool kv_capacity_explicit      = false;
+    bool kv_device_tokens_explicit = false;
+    bool kv_dtype_explicit         = false;
+    bool kvmem_switch              = false;
+    bool kvmem_budget_given        = false;
+    std::uint32_t kvmem_budget     = 0;
+    bool kvmem_gen_reserve_given    = false;
+    std::uint32_t kvmem_gen_reserve = 0;
+    std::optional<KvKeyStorage> kv_key_storage;
+    std::optional<KvValueStorage> kv_value_storage;
 
     for (int i = 2; i < argc; ++i) {
         const std::string_view arg(argv[i]);
@@ -145,12 +165,41 @@ Options parse_options(int argc, char** argv) {
         } else if (arg == "--kv-capacity") {
             options.kv_capacity  = parse_kv_capacity(value(arg));
             kv_capacity_explicit = true;
+        } else if (arg == "--kv-device-tokens") {
+            options.kv_capacity = KvCapacityPolicy::device_budget(
+                parse_u32(value(arg), "kv-device-tokens"));
+            kv_device_tokens_explicit = true;
+        } else if (arg == "--kvmem") {
+            kvmem_switch = true;
+        } else if (arg == "--kvmem-budget") {
+            kvmem_budget       = parse_u32(value(arg), "kvmem-budget");
+            kvmem_budget_given = true;
+        } else if (arg == "--kvmem-gen-reserve") {
+            kvmem_gen_reserve       = parse_u32(value(arg), "kvmem-gen-reserve", true);
+            kvmem_gen_reserve_given = true;
         } else if (arg == "--prefill-chunk") {
             options.prefill_chunk = parse_u32(value(arg), "prefill-chunk");
         } else if (arg == "--device") {
             options.device = parse_device(value(arg));
         } else if (arg == "--kv-dtype") {
             options.kv_storage = KvStoragePolicy::explicit_storage(parse_kv_cache(value(arg)));
+            kv_dtype_explicit = true;
+        } else if (arg == "--cache-type-k") {
+            const std::string_view text = value(arg);
+            const auto parsed           = parse_kv_key_storage(text);
+            if (!parsed) {
+                throw std::invalid_argument(
+                    "--cache-type-k must be bf16, int8, fp8, nvfp4, int4, or int4-e8");
+            }
+            kv_key_storage = *parsed;
+        } else if (arg == "--cache-type-v") {
+            const std::string_view text = value(arg);
+            const auto parsed           = parse_kv_value_storage(text);
+            if (!parsed) {
+                throw std::invalid_argument(
+                    "--cache-type-v must be bf16, int8, fp8, nvfp4, or int4");
+            }
+            kv_value_storage = *parsed;
         } else if (arg == "--spec") {
             options.speculative.backend = product::parse_speculative_backend(value(arg));
         } else if (arg == "--draft-tokens") {
@@ -215,8 +264,39 @@ Options parse_options(int argc, char** argv) {
         }
     }
 
-    if (!kv_capacity_explicit) {
+    if (kv_capacity_explicit && kv_device_tokens_explicit) {
+        throw std::invalid_argument("--kv-capacity and --kv-device-tokens cannot be combined");
+    }
+    options.kvmem = resolve_kvmem_options(kvmem_switch, kvmem_budget_given, kvmem_budget,
+                                          kvmem_gen_reserve_given, kvmem_gen_reserve);
+    if ((kvmem_budget_given || kvmem_gen_reserve_given) && !options.kvmem.enabled) {
+        throw std::invalid_argument(
+            "--kvmem-budget and --kvmem-gen-reserve size the KVMem window, so they need --kvmem "
+            "(or NINFER_KVMEM=1) to be enabled");
+    }
+    if (!kv_capacity_explicit && !kv_device_tokens_explicit) {
+        // The pool covers the context unless the caller sized it. Under KVMem that is still the
+        // entitlement: --kvmem-budget is what narrows the resident window, and the device pool
+        // follows it through the planner rather than through this line.
         options.kv_capacity = KvCapacityPolicy::explicit_capacity(options.max_context);
+    }
+
+    if (kv_dtype_explicit && (kv_key_storage || kv_value_storage)) {
+        throw std::invalid_argument(
+            "--kv-dtype sets both sides of the KV cache, so it cannot be combined with "
+            "--cache-type-k or --cache-type-v");
+    }
+    if (!kv_dtype_explicit && (kv_key_storage || kv_value_storage)) {
+        const auto resolved = resolve_kv_cache_storage(
+            kv_key_storage.value_or(KvKeyStorage::BFloat16),
+            kv_value_storage.value_or(KvValueStorage::BFloat16));
+        if (!resolved) {
+            throw std::invalid_argument(
+                "--cache-type-k/--cache-type-v select a pair without a kernel; supported "
+                "pairs: " +
+                std::string(kSupportedKvCachePairList));
+        }
+        options.kv_storage = KvStoragePolicy::explicit_storage(*resolved);
     }
 
     const bool has_prompt   = !options.prompt.empty();

@@ -573,6 +573,10 @@ void DeviceKVPagePool::copy_page(DeviceKVPageHandle source, DeviceKVPageHandle d
     }
 }
 
+std::int32_t DeviceKVPagePool::physical_index_of(DeviceKVPageHandle handle) const {
+    return physical_index(handle);
+}
+
 void DeviceKVPagePool::copy_to_host(std::span<const DeviceKVPageHandle> source,
                                     HostKVAllocationView destination, cudaStream_t stream) const {
     if (!destination.valid() || destination.page_count() != source.size() ||

@@ -82,6 +82,10 @@ struct SequencePlanningInputs {
     bool use_cuda_graph = true;
     bool causal_scoring = false;
     int device          = 0;
+    // The KV page pool may sit below the logical context: host memory backs the
+    // rest of the address space. Set by the device-budget capacity policy.
+    bool host_backed_kv = false;
+    KvMemOptions kvmem;
     ContextCacheOptions context_cache;
 };
 
@@ -105,6 +109,8 @@ struct SequencePlanImpl<NINFER_QWEN36_VARIANT> {
     bool use_cuda_graph = true;
     bool causal_scoring = false;
     int device          = 0;
+    bool host_backed_kv = false;
+    KvMemOptions kvmem;
     ContextCacheOptions context_cache;
     NINFER_QWEN36_RUNTIME_NS::PersistentLayout persistent;
     NINFER_QWEN36_RUNTIME_NS::WorkspacePlan workspace;

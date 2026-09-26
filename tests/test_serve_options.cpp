@@ -80,6 +80,72 @@ int main() {
     failures += check(kv_help.find("nvfp4") != std::string::npos &&
                           kv_help.find("k8v4") != std::string::npos,
                       "serve help omits a production KV storage mode");
+    failures += check(kv_help.find("--cache-type-k") != std::string::npos,
+                      "serve help omits the per-side KV cache knobs");
+
+    const ServeOptions split_k8v4 = parse({"ninfer-serve", "model.ninfer", "--cache-type-k",
+                                           "fp8", "--cache-type-v", "nvfp4"});
+    failures += check(split_k8v4.kv_cache == ninfer::KvCacheStorage::Fp8KeyNvfp4Value,
+                      "per-side fp8/nvfp4 did not select asymmetric K8V4 KV");
+    const ServeOptions split_int4e8 = parse({"ninfer-serve", "model.ninfer", "--cache-type-k",
+                                             "int4-e8", "--cache-type-v", "int4"});
+    failures += check(split_int4e8.kv_cache == ninfer::KvCacheStorage::RK4V4E8,
+                      "per-side int4-e8/int4 did not select rk4v4-e8 KV");
+    bool unsupported_pair_rejected = false;
+    try {
+        (void)parse({"ninfer-serve", "model.ninfer", "--cache-type-k", "int8", "--cache-type-v",
+                     "nvfp4"});
+    } catch (const std::invalid_argument&) { unsupported_pair_rejected = true; }
+    failures += check(unsupported_pair_rejected,
+                      "a key/value pair without a kernel was accepted");
+    bool mixed_kv_flags_rejected = false;
+    try {
+        (void)parse({"ninfer-serve", "model.ninfer", "--kv-dtype", "fp8", "--cache-type-v",
+                     "nvfp4"});
+    } catch (const std::invalid_argument&) { mixed_kv_flags_rejected = true; }
+    failures += check(mixed_kv_flags_rejected,
+                      "--kv-dtype was accepted together with a per-side cache type");
+
+    const ServeOptions kvmem = parse({"ninfer-serve", "model.ninfer", "--kvmem"});
+    failures += check(kvmem.kvmem.enabled, "--kvmem did not enable the KVMem window");
+    // KVMem sizes its own pool: a front end that enabled it without choosing one gets an
+    // automatic pool bounded by the working set, not by whatever device memory is left.
+    failures += check(kvmem.kv_capacity.mode == ninfer::KvCapacityMode::Automatic &&
+                          kvmem.kv_capacity.explicit_tokens == 0,
+                      "--kvmem did not fall back to an automatic device pool");
+    failures += check(kvmem.kvmem.gen_reserve_tokens == ninfer::kDefaultKvMemGenReserveTokens,
+                      "--kvmem did not default the generation headroom");
+    const ServeOptions kvmem_window =
+        parse({"ninfer-serve", "model.ninfer", "--kvmem", "--kvmem-budget", "512"});
+    failures += check(kvmem_window.kvmem.enabled && kvmem_window.kvmem.budget_tokens == 512,
+                      "--kvmem-budget did not narrow the KVMem window");
+    const ServeOptions kvmem_reserve =
+        parse({"ninfer-serve", "model.ninfer", "--kvmem", "--kvmem-gen-reserve", "4096"});
+    failures += check(kvmem_reserve.kvmem.gen_reserve_tokens == 4096,
+                      "--kvmem-gen-reserve did not set the generation headroom");
+    const ServeOptions kvmem_no_reserve =
+        parse({"ninfer-serve", "model.ninfer", "--kvmem", "--kvmem-gen-reserve", "0"});
+    failures += check(kvmem_no_reserve.kvmem.gen_reserve_tokens == 0,
+                      "zero --kvmem-gen-reserve was not honored");
+    const ServeOptions kvmem_pool =
+        parse({"ninfer-serve", "model.ninfer", "--kvmem", "--kv-device-tokens", "512"});
+    failures += check(kvmem_pool.kv_capacity.mode == ninfer::KvCapacityMode::DeviceBudget &&
+                          kvmem_pool.kv_capacity.explicit_tokens == 512,
+                      "an explicit --kv-device-tokens did not win over the automatic pool");
+    bool zero_kvmem_budget_rejected = false;
+    try {
+        (void)parse({"ninfer-serve", "model.ninfer", "--kvmem", "--kvmem-budget", "0"});
+    } catch (const std::invalid_argument&) { zero_kvmem_budget_rejected = true; }
+    failures += check(zero_kvmem_budget_rejected, "zero --kvmem-budget was accepted");
+    bool lone_gen_reserve_rejected = false;
+    try {
+        (void)parse({"ninfer-serve", "model.ninfer", "--kvmem-gen-reserve", "4096"});
+    } catch (const std::invalid_argument&) { lone_gen_reserve_rejected = true; }
+    failures += check(lone_gen_reserve_rejected, "--kvmem-gen-reserve was accepted without --kvmem");
+    failures += check(kv_help.find("--kvmem-budget") != std::string::npos,
+                      "serve help omits the KVMem window");
+    failures += check(kv_help.find("--kvmem-gen-reserve") != std::string::npos,
+                      "serve help omits the KVMem generation headroom");
 
     const ServeOptions model_alias =
         parse({"ninfer-serve", "model.ninfer", "--model-id", "deployment-alias"});

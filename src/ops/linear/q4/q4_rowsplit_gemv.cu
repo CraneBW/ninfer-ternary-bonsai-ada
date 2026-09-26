@@ -14,7 +14,8 @@ void launch_gemv(const Tensor& x, const Weight& w, Tensor& out, cudaStream_t str
     const std::int32_t rows = out.ne[0];
     const std::int32_t k    = x.ne[0];
     const dim3 grid(static_cast<unsigned>(div_up(rows, Schedule::kRowsPerCta)), 1u, 1u);
-    constexpr dim3 block(static_cast<unsigned>(Schedule::kThreads), 1u, 1u);
+    // CUDA 13 起 dim3 的构造函数才是 constexpr；const 才能在 CUDA 12.8 上编译。
+    const dim3 block(static_cast<unsigned>(Schedule::kThreads), 1u, 1u);
     const std::size_t dynamic_shared_bytes =
         Schedule::kActivationAccess == Q4GemvActivationAccess::CtaSharedFullK
             ? static_cast<std::size_t>(k) * sizeof(__nv_bfloat16)

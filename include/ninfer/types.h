@@ -3,8 +3,10 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -40,6 +42,105 @@ enum class KvCacheStorage : std::uint8_t {
     RK4V4E8,
 };
 
+// One side of the KV cache's element encoding, as selected by --cache-type-k /
+// --cache-type-v. The engine and its kernels are specialized per (key, value)
+// pair rather than per side, so the two knobs are resolved into a single
+// KvCacheStorage before the engine is built; see resolve_kv_cache_storage().
+enum class KvKeyStorage : std::uint8_t {
+    BFloat16,             // bf16
+    Int8Group64,          // int8
+    Fp8E4M3Row256,        // fp8
+    Nvfp4Group16,         // nvfp4
+    RotatedInt4Group64,   // int4
+    RotatedInt4E8Group64, // int4-e8
+};
+
+enum class KvValueStorage : std::uint8_t {
+    BFloat16,           // bf16
+    Int8Group64,        // int8
+    Fp8E4M3Row256,      // fp8
+    Nvfp4Group16,       // nvfp4
+    RotatedInt4Group64, // int4
+};
+
+// Option spelling of each side, shared by every front end's diagnostics.
+[[nodiscard]] inline constexpr const char* kv_key_storage_name(KvKeyStorage storage) noexcept {
+    switch (storage) {
+    case KvKeyStorage::BFloat16: return "bf16";
+    case KvKeyStorage::Int8Group64: return "int8";
+    case KvKeyStorage::Fp8E4M3Row256: return "fp8";
+    case KvKeyStorage::Nvfp4Group16: return "nvfp4";
+    case KvKeyStorage::RotatedInt4Group64: return "int4";
+    case KvKeyStorage::RotatedInt4E8Group64: return "int4-e8";
+    }
+    return "unknown";
+}
+
+[[nodiscard]] inline constexpr const char* kv_value_storage_name(KvValueStorage storage) noexcept {
+    switch (storage) {
+    case KvValueStorage::BFloat16: return "bf16";
+    case KvValueStorage::Int8Group64: return "int8";
+    case KvValueStorage::Fp8E4M3Row256: return "fp8";
+    case KvValueStorage::Nvfp4Group16: return "nvfp4";
+    case KvValueStorage::RotatedInt4Group64: return "int4";
+    }
+    return "unknown";
+}
+
+[[nodiscard]] inline std::optional<KvKeyStorage> parse_kv_key_storage(
+    std::string_view text) noexcept {
+    if (text == "bf16") { return KvKeyStorage::BFloat16; }
+    if (text == "int8") { return KvKeyStorage::Int8Group64; }
+    if (text == "fp8") { return KvKeyStorage::Fp8E4M3Row256; }
+    if (text == "nvfp4") { return KvKeyStorage::Nvfp4Group16; }
+    if (text == "int4") { return KvKeyStorage::RotatedInt4Group64; }
+    if (text == "int4-e8") { return KvKeyStorage::RotatedInt4E8Group64; }
+    return std::nullopt;
+}
+
+[[nodiscard]] inline std::optional<KvValueStorage> parse_kv_value_storage(
+    std::string_view text) noexcept {
+    if (text == "bf16") { return KvValueStorage::BFloat16; }
+    if (text == "int8") { return KvValueStorage::Int8Group64; }
+    if (text == "fp8") { return KvValueStorage::Fp8E4M3Row256; }
+    if (text == "nvfp4") { return KvValueStorage::Nvfp4Group16; }
+    if (text == "int4") { return KvValueStorage::RotatedInt4Group64; }
+    return std::nullopt;
+}
+
+// Every (key, value) pair the paged-KV kernels are compiled for. A combination
+// outside this list is rejected rather than silently running the wrong decode.
+inline constexpr const char* kSupportedKvCachePairList =
+    "bf16/bf16, int8/int8, fp8/fp8, nvfp4/nvfp4, fp8/nvfp4, int4/int4, int4-e8/int4";
+
+[[nodiscard]] inline std::optional<KvCacheStorage> resolve_kv_cache_storage(
+    KvKeyStorage key, KvValueStorage value) noexcept {
+    switch (key) {
+    case KvKeyStorage::BFloat16:
+        if (value == KvValueStorage::BFloat16) { return KvCacheStorage::BFloat16; }
+        break;
+    case KvKeyStorage::Int8Group64:
+        if (value == KvValueStorage::Int8Group64) { return KvCacheStorage::Int8Group64; }
+        break;
+    case KvKeyStorage::Fp8E4M3Row256:
+        if (value == KvValueStorage::Fp8E4M3Row256) { return KvCacheStorage::Fp8E4M3Row256; }
+        if (value == KvValueStorage::Nvfp4Group16) { return KvCacheStorage::Fp8KeyNvfp4Value; }
+        break;
+    case KvKeyStorage::Nvfp4Group16:
+        if (value == KvValueStorage::Nvfp4Group16) { return KvCacheStorage::Nvfp4Group16; }
+        break;
+    case KvKeyStorage::RotatedInt4Group64:
+        if (value == KvValueStorage::RotatedInt4Group64) {
+            return KvCacheStorage::RotatedInt4KeyInt4ValueGroup64;
+        }
+        break;
+    case KvKeyStorage::RotatedInt4E8Group64:
+        if (value == KvValueStorage::RotatedInt4Group64) { return KvCacheStorage::RK4V4E8; }
+        break;
+    }
+    return std::nullopt;
+}
+
 enum class EnginePurpose : std::uint8_t {
     Generation,
     CausalScoring,
@@ -48,9 +149,22 @@ enum class EnginePurpose : std::uint8_t {
 enum class KvCapacityMode : std::uint8_t {
     Explicit,
     Automatic,
+    // The device page pool is a budget that may sit below `max_context`: the
+    // context stays the logical upper bound, and the KV beyond the budget is
+    // backed by host memory instead of device pages. Only meaningful with a
+    // mechanism that parks resident pages and restores them on demand.
+    DeviceBudget,
 };
 
 inline constexpr std::size_t kDefaultKvCapacityHeadroomBytes = 1024ULL * 1024ULL * 1024ULL;
+
+// Headroom the automatic capacity resolution leaves free when it is sizing a KVMem working set.
+// The default is a sizing margin: it keeps the resolver from filling memory it may still need,
+// which is what a pool that has to cover the whole context wants. A KVMem pool is instead
+// pinned to the working set the runtime asks for, so the margin would only refuse to start on
+// a device that fits the working set comfortably -- a quarter gibibyte is enough for the
+// driver and the desktop.
+inline constexpr std::size_t kKvMemAutomaticHeadroomBytes = 256ULL * 1024ULL * 1024ULL;
 
 struct KvCapacityPolicy {
     KvCapacityMode mode                  = KvCapacityMode::Explicit;
@@ -65,6 +179,11 @@ struct KvCapacityPolicy {
     [[nodiscard]] static constexpr KvCapacityPolicy
     automatic(std::size_t headroom_bytes = kDefaultKvCapacityHeadroomBytes) noexcept {
         return KvCapacityPolicy{KvCapacityMode::Automatic, 0, headroom_bytes};
+    }
+
+    [[nodiscard]] static constexpr KvCapacityPolicy
+    device_budget(std::uint32_t tokens) noexcept {
+        return KvCapacityPolicy{KvCapacityMode::DeviceBudget, tokens, 0};
     }
 };
 
@@ -200,6 +319,64 @@ struct ContextCostOptions {
     std::filesystem::path preset_path;
 };
 
+// Sparse long-context memory. The device page pool stays a working set and the rest of the
+// address space is backed by host memory, so the pool may sit below `max_context` -- see
+// KvCapacityMode::DeviceBudget. `budget_tokens` is the selection window: how much history
+// stays in the resident working set. 0 keeps the whole context in the window, which is the
+// identity configuration the mechanism falls back to when nothing narrower is asked for.
+// `gen_reserve_tokens` is the generation headroom: the pool keeps that much room free so a
+// decode round keeps appending without having to move the window on every token. Leaving this
+// struct default lets Engine resolve it from NINFER_KVMEM / NINFER_KVMEM_BUDGET /
+// NINFER_KVMEM_GEN_RESERVE.
+struct KvMemOptions {
+    bool enabled           = false;
+    std::uint32_t budget_tokens = 0;
+    std::uint32_t gen_reserve_tokens = 0;
+};
+
+// KVMem's production default for the generation headroom, the same number the upstream KVMem
+// line ships. A pool that cannot afford it clamps it down rather than failing.
+inline constexpr std::uint32_t kDefaultKvMemGenReserveTokens = 8192;
+
+// Resolve the KVMem switch, window and generation headroom from the front end's flags, falling
+// back to the environment spellings for front ends that do not expose them (and for processes
+// that already set them). The flag wins over the environment; the budget and the reserve are
+// both read as tokens, and a non-positive or malformed value leaves the value at its default.
+[[nodiscard]] inline KvMemOptions resolve_kvmem_options(bool switch_given, bool budget_given,
+                                                        std::uint32_t budget_tokens,
+                                                        bool reserve_given = false,
+                                                        std::uint32_t reserve_tokens = 0) noexcept {
+    const auto from_env = [](const char* name) -> std::uint32_t {
+        const char* env = std::getenv(name);
+        if (env == nullptr || *env == '\0') { return 0; }
+        const long long parsed = std::strtoll(env, nullptr, 10);
+        if (parsed <= 0) { return 0; }
+        constexpr long long kMaximumTokens =
+            static_cast<long long>(std::numeric_limits<std::uint32_t>::max());
+        return static_cast<std::uint32_t>(parsed > kMaximumTokens ? kMaximumTokens : parsed);
+    };
+    KvMemOptions out;
+    out.enabled = switch_given;
+    if (!out.enabled) {
+        const char* env = std::getenv("NINFER_KVMEM");
+        out.enabled     = env != nullptr && env[0] == '1';
+    }
+    if (budget_given) {
+        out.budget_tokens = budget_tokens;
+    } else if (out.enabled) {
+        out.budget_tokens = from_env("NINFER_KVMEM_BUDGET");
+    }
+    if (!out.enabled) {
+        out.gen_reserve_tokens = 0;
+    } else if (reserve_given) {
+        out.gen_reserve_tokens = reserve_tokens;
+    } else {
+        out.gen_reserve_tokens = from_env("NINFER_KVMEM_GEN_RESERVE");
+        if (out.gen_reserve_tokens == 0) { out.gen_reserve_tokens = kDefaultKvMemGenReserveTokens; }
+    }
+    return out;
+}
+
 struct EngineOptions {
     std::filesystem::path artifact_path;
     EnginePurpose purpose              = EnginePurpose::Generation;
@@ -230,6 +407,7 @@ struct EngineOptions {
     bool wddm_evictable_budget             = false;
     ContextCacheOptions context_cache;
     ContextCostOptions context_cost;
+    KvMemOptions kvmem;
     StartupObserver startup_observer;
 };
 

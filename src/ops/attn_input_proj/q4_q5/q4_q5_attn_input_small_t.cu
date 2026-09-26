@@ -26,7 +26,8 @@ void launch_q4_gemv(const Tensor& x, const Weight& weight, Tensor& q, Tensor& ke
                     cudaStream_t stream) {
     using Schedule = Q4GemvR1W8DirectSchedule;
     const dim3 grid(static_cast<unsigned>(div_up(kParentRows, Schedule::kRowsPerCta)), 1u, 1u);
-    constexpr dim3 block(static_cast<unsigned>(Schedule::kThreads), 1u, 1u);
+    // CUDA 13 起 dim3 的构造函数才是 constexpr；const 才能在 CUDA 12.8 上编译。
+    const dim3 block(static_cast<unsigned>(Schedule::kThreads), 1u, 1u);
     q4_rowsplit_gemv_kernel<Schedule, true, kSplitRow><<<grid, block, 0, stream>>>(
         static_cast<const __nv_bfloat16*>(x.data), static_cast<const std::uint8_t*>(weight.qdata),
         static_cast<const std::uint8_t*>(weight.scales), static_cast<__nv_bfloat16*>(q.data),

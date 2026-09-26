@@ -38,6 +38,8 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <initializer_list>
 #include <limits>
 #include <stdexcept>
@@ -225,12 +227,13 @@ TextContext::TextContext(DeviceContext& ctx, const LoadedModelData& weights, Wor
                          qwen3_6::PagedKVCacheView kv, LinearAttentionStatePool& state,
                          qwen3_6::RoundState& io, Tensor& prefill_hidden,
                          std::uint32_t prefill_chunk, std::uint32_t text_kv_base,
-                         qwen3_6::PagedKVCacheView mtp_kv,
+                         std::int32_t text_kv_offset, qwen3_6::PagedKVCacheView mtp_kv,
                          const qwen3_6::PagedKVCache* batch_text_kv,
                          const qwen3_6::PagedKVCache* batch_mtp_kv)
     : ctx_(ctx), weights_(weights), work_(work), kv_(kv), mtp_kv_(mtp_kv), state_(state), io_(io),
       prefill_hidden_(prefill_hidden), prefill_chunk_(prefill_chunk), text_kv_base_(text_kv_base),
-      batch_text_kv_(batch_text_kv), batch_mtp_kv_(batch_mtp_kv) {
+      text_kv_offset_(text_kv_offset), batch_text_kv_(batch_text_kv),
+      batch_mtp_kv_(batch_mtp_kv) {
     if (prefill_chunk_ == 0 ||
         prefill_chunk_ > static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max())) {
         throw std::invalid_argument("TextContext effective prefill chunk must fit positive int32");
@@ -845,6 +848,22 @@ void TextContext::attn_mix(const FullLayerW& w, Tensor& x, int fidx, Phase ph) {
     Tensor kn          = results.normalized_key.view({kCfg.head_dim, kCfg.n_kv, T});
     ops::rmsnorm(q, *w.q_norm, kCfg.rms_eps, true, qn, s);
     ops::rmsnorm(k, *w.k_norm, kCfg.rms_eps, true, kn, s);
+
+    // KVMem K3: keep the last prompt token's query for the retrieval scorer, taken
+    // BEFORE the position rotation. Only a prefilling card carries the capture
+    // buffer, so the buffer ends up holding the request's final prompt column, and
+    // the stored query matches the raw-K domain the scorer rebuilds the cached
+    // keys in (a key is position independent, so blocks written at other
+    // distances are only comparable once RoPE is out of the way).
+    if (kvmem_query_ != nullptr && ph == Phase::Prefill && active_sequence_batch_ == 0 && T > 0 &&
+        fidx < static_cast<int>(kvmem_query_->layers)) {
+        ninfer::kvmem::kvmem_capture_query(qn.data, kvmem_query_->q_heads, kvmem_query_->head_dim,
+                                           static_cast<std::uint32_t>(T),
+                                           static_cast<std::uint32_t>(T - 1),
+                                           const_cast<void*>(kvmem_query_->data),
+                                           static_cast<std::uint32_t>(fidx), s);
+    }
+
     const Tensor& cache_positions =
         active_cache_positions_ != nullptr ? *active_cache_positions_ : io_.pos;
     const Tensor& rope_positions =
@@ -1110,7 +1129,9 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
         static_cast<std::uint64_t>(std::numeric_limits<std::int32_t>::max())) {
         throw std::overflow_error("TextContext::prefill absolute position exceeds int32");
     }
-    const int base_i = static_cast<int>(base);
+    // Cache slots and RoPE positions of a KVMem-compacted lineage are shifted away from the
+    // prompt index; every other use of `base` above stays in prompt space.
+    const int kv_base_i = static_cast<int>(base + static_cast<std::uint32_t>(text_kv_offset_));
 
     const std::int64_t base64    = static_cast<std::int64_t>(base);
     const std::int64_t split_abs = prefill_split_frontier_;
@@ -1165,7 +1186,7 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
             copy_i32(ids.data() + t0, ids_device, s);
 
             Tensor positions = roots.positions;
-            ops::fill_i32_positions(positions, base_i + t0, s);
+            ops::fill_i32_positions(positions, kv_base_i + t0, s);
 
             Tensor rope_positions = positions;
             std::vector<std::int32_t> rope_positions_host;
@@ -1186,7 +1207,7 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
             }
             ScopedPositions scoped_cache(active_cache_positions_, positions);
             ScopedPositions scoped_rope(active_rope_positions_, rope_positions);
-            const auto visible = static_cast<std::uint32_t>(base_i + t0 + len);
+            const auto visible = static_cast<std::uint32_t>(kv_base_i + t0 + len);
             const ops::CausalAttentionExecutionEnvelope chunk_envelope{visible, visible};
             ScopedEnvelope scoped_envelope(active_causal_attention_envelope_, chunk_envelope);
 
@@ -1217,8 +1238,8 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
                 // Set io_.pos to the bonus token's absolute position (base + T) before picking so
                 // the sampler RNG is keyed by it (prefill purpose keeps it distinct from the first
                 // decode step, which reuses the same io_.pos).
-                ops::set_i32_scalar(io_.pos, base_i + T, s);
-                ops::set_i32_scalar(io_.rope_pos, base_i + T + rope_delta_, s);
+                ops::set_i32_scalar(io_.pos, kv_base_i + T, s);
+                ops::set_i32_scalar(io_.rope_pos, kv_base_i + T + rope_delta_, s);
                 if (sampling_config_ != nullptr) {
                     ops::sample(logits, io_.token, kCfg.token_domain, sampling_config_, io_.pos,
                                 ops::kSamplePurposePrefill, work_, s);
@@ -1283,12 +1304,12 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
                                       &logits, &draft0);
 
                     Tensor ar_position = io_.mtp->position.slice(0, 0, 1);
-                    ops::set_i32_scalar(ar_position, base_i + T, s);
+                    ops::set_i32_scalar(ar_position, kv_base_i + T, s);
                     for (int i = 1; i < static_cast<int>(mtp_proposal_extent_); ++i) {
                         Tensor prev_token     = io_.mtp->draft_tokens.slice(0, i - 1, 1);
                         Tensor next_token     = io_.mtp->draft_tokens.slice(0, i, 1);
                         Tensor next_hidden    = work_.alloc(DType::BF16, {kCfg.hidden, 1});
-                        const auto ar_visible = static_cast<std::uint32_t>(base_i + T + i);
+                        const auto ar_visible = static_cast<std::uint32_t>(kv_base_i + T + i);
                         const ops::CausalAttentionExecutionEnvelope ar_envelope{ar_visible,
                                                                                 ar_visible};
                         mtp_forward_ar_step(prev_token, io_.mtp->ar_hidden, ar_position,

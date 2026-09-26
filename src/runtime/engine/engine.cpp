@@ -34,6 +34,11 @@ void resolve_kv_storage(EngineOptions& options) {
 
 EngineOptions normalize_engine_options(EngineOptions options) {
     resolve_kv_storage(options);
+    // A caller that configured nothing gets the environment spelling, so front ends without
+    // the KVMem flags (and processes that already export NINFER_KVMEM) keep working.
+    if (!options.kvmem.enabled && options.kvmem.budget_tokens == 0) {
+        options.kvmem = resolve_kvmem_options(false, false, 0);
+    }
     switch (options.purpose) {
     case EnginePurpose::Generation:
         break;

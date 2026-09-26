@@ -525,6 +525,9 @@ mtp-template   32,32,32,32,32,32,31    几乎不衰减，接受长度 7.97（上
 | `NINFER_TERNARY_PREFILL` | `mma` | `block`/`ref` 为 A/B 对照 |
 | `NINFER_TERNARY_HADAMARD` | 开 | `=0` 关旋转（**输出无意义**，仅诊断） |
 | `NINFER_TERNARY_S8_DEBUG` | 关 | `=1` 打印**每次调用实际走的档位** |
+| `NINFER_KVMEM` | 关 | `=1` 开启 KVMem（等价于 `--kvmem`） |
+| `NINFER_KVMEM_BUDGET` | 0 | KVMem 常驻窗口的 token 数（0 = 整个 context） |
+| `NINFER_KVMEM_GEN_RESERVE` | 8192 | KVMem 留给 decode 的池余量 |
 
 **改 dispatch 之后第一件事是开探针确认分支真的被走到了**——只看速度看不出走没走对分支。
 这条是本仓库最贵的一课，详见 `.claude/skills/ninfer-perf-tuning/SKILL.md`。
@@ -569,6 +572,21 @@ mtp-template   32,32,32,32,32,32,31    几乎不衰减，接受长度 7.97（上
 - **s8 阈值重拟合 33 → 17** —— 上游的 33 是对着它自己的 bf16 档量的；本机两条线的交叉点在 16/17。
   顺带消掉了 T=32 上一个 74% 的台阶
 
+**KVMem：把 KV 换出到主机内存**（融合自 [naamfung/zatfung](https://github.com/naamfung/zatfung)）
+- 长上下文不再要求整个 context 的 KV 都留在显存：设备池只保留一个**常驻窗口**，其余换出到 host。
+  窗口外的页不是"原地留空"，而是**紧凑打包 + re-RoPE** —— 被换出的区间搬走，留下的页重新定相，
+  坐标不变。这是它真能省下显存的原因；原地选块的实现省不掉一次 tile 迭代，等于白开。
+- **默认关**。不写 `--kvmem` 时全部 KV 驻留显存，行为与本分支融合前一致。
+- 配套参数：`--kvmem` 开启；`--kv-device-tokens N` 把设备池压到 context 以下（省下的就是
+  它给回显存的部分）；`--kvmem-budget N` 缩常驻窗口；`--kvmem-gen-reserve N` 给 decode 留池余量。
+  CLI 与 server 两端都有这几个开关，环境变量 `NINFER_KVMEM` / `NINFER_KVMEM_BUDGET` /
+  `NINFER_KVMEM_GEN_RESERVE` 是给不暴露这些 flag 的前端的等价写法。
+- 需要 `--kv-dtype int8`：换出与打分直接寻址 int8-group64 的码本平面。
+- **可以和 MTP 同时开**。draft 层 attend 全历史、留不了窗口，它的 KV 跟着 text 一起紧凑化
+  （同预算、同 frontier），页池按逻辑容量开。这条是本分支打通的：原实现用三处
+  `speculative_backend == None` 把投机排除在换出之外，因为两边的 frontier 共用一个 `kv_offset`，
+  只压 text 会让 draft 层的 RoPE 位置整体错开。
+
 **明确试过但无效的**（负面结论同样记在代码里）
 - 加宽 small_t 的 tile —— 是回归（45.2 → 19.0 t/s），累加器吃掉了驻留 CTA
 - 用 `__launch_bounds__` 换 occupancy —— 三处独立实测都单调变慢
@@ -594,6 +612,7 @@ mtp-template   32,32,32,32,32,32,31    几乎不衰减，接受长度 7.97（上
 | [Don-Chad/ninfer-3090](https://github.com/Don-Chad/ninfer-3090) | Ampere 早期工作 |
 | **[Ambolio/ninfer-4090-windows](https://github.com/Ambolio/ninfer-4090-windows)** | **本分支源码树的直接基座** |
 | **[shensanshu/ninfer-ada-ternary](https://www.modelscope.cn/shensanshu/ninfer-ada-ternary)**（魔搭） | **三元移植本身的出处**：`patches/` 引擎侧改动、`tools/` 打包与验证工具、`docs/` 技术记录 |
+| **[naamfung/zatfung](https://github.com/naamfung/zatfung)** | **KVMem 的来源** —— 宿主端 KV 换出（紧凑打包 + re-RoPE）、窗口化续写、设备预算与逻辑 entitlement 解耦。分叉自本仓库的 `ad6cb46`，`src/kvmem/*`、`logical_kv_store.h` 的 KVMem 逻辑与相关文档都出自这条线 |
 
 **方法参考**：三元编解码语义对齐 llama.cpp 生态的 `ggml-quants.c`；折叠 Hadamard 基参考 PrismML 的
 公开运行时与其 `prism.hadamard.*` 元数据契约；张量核 FWT 的设计思路受公开的 HadaCore / TurboQuant 工作启发。

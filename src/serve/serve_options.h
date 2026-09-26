@@ -47,6 +47,9 @@ struct ServeOptions {
     // has been measured under fp8. Naming bf16 here keeps the server's behaviour unchanged; a
     // deployment that wants fp8 asks for it with --kv-dtype fp8 and owns that measurement.
     KvStoragePolicy kv_storage = KvStoragePolicy::explicit_storage(KvCacheStorage::BFloat16);
+    // Off by default: a server that says nothing keeps every KV page resident on the device,
+    // which is what this repo measured before the KVMem line arrived. --kvmem opts in.
+    KvMemOptions kvmem;
     SpeculativeOptions speculative;
     ContextCacheOptions context_cache;
     bool enable_vision              = false;

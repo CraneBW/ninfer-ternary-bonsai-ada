@@ -28,6 +28,9 @@ struct Options {
     // decode win only starts to pay past ~16k tokens while the short-context default stays bf16.
     // See kAutomaticKvStorageMinContext for the measurement behind the threshold.
     KvStoragePolicy kv_storage = KvStoragePolicy::automatic();
+    // Off by default, like the server: leaving it alone keeps every KV page resident on the
+    // device, which is the behaviour this repo measured before the KVMem line arrived.
+    KvMemOptions kvmem;
     SpeculativeOptions speculative;
     bool enable_vision  = false;
     bool use_cuda_graph = true;

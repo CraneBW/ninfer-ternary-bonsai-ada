@@ -275,10 +275,24 @@ RequestBasePlan ProgramImplCore::plan_request(const PreparedPromptData& prompt,
     } else if (speculative_backend == SpeculativeBackend::DFlash) {
         base->backend_kv_page_entitlement = pages_for_tokens(reserved_context_tokens);
     }
+    // The device claim and the logical entitlement are separate quantities. A host-backed
+    // address space may sit on a page pool smaller than the context, so the request only
+    // claims the pool and accounts the difference as Host KV bytes; the entitlement itself
+    // stays the logical mapping bound.
+    std::uint32_t root_device_kv_pages = base->text_kv_page_entitlement;
+    std::size_t root_host_kv_bytes     = 0;
+    if (host_backed_kv) {
+        const std::uint32_t device_budget_pages =
+            text_kv_pages->physical_pool().capacity_pages();
+        root_device_kv_pages = std::min(base->text_kv_page_entitlement, device_budget_pages);
+        root_host_kv_bytes =
+            static_cast<std::size_t>(base->text_kv_page_entitlement - root_device_kv_pages) *
+            text_host_kv_page_stride;
+    }
     detail::PhysicalDeviceResources root_active{
         .active_lanes     = 1,
         .state_slots      = 1U,
-        .main_kv_pages    = base->text_kv_page_entitlement,
+        .main_kv_pages    = root_device_kv_pages,
         .backend_kv_pages = base->backend_kv_page_entitlement,
     };
     if (prompt.has_media()) {
@@ -365,6 +379,10 @@ RequestBasePlan ProgramImplCore::plan_request(const PreparedPromptData& prompt,
                         opportunity.kind == PromptCacheMarkerKind::PrivateLongAnchor,
                         opportunity.evidence);
         }
+        // KVMem K1b: the completion-time window keeps the sink head and the refolded
+        // tail and publishes the endpoint at the true prompt frontier, so the
+        // continuation resumes without a window-edge anchor and without
+        // re-prefilling the retained window.
         std::sort(base->capture_groups.begin(), base->capture_groups.end(),
                   [](const CaptureGroup& left, const CaptureGroup& right) {
                       return std::tie(left.frontier, left.input_order) <
@@ -418,7 +436,10 @@ RequestBasePlan ProgramImplCore::plan_request(const PreparedPromptData& prompt,
         }
     }
     root_active.state_slots = 1U;
-    const detail::PhysicalResources root_vector{.device = root_active};
+    const detail::PhysicalResources root_vector{
+        .device = root_active,
+        .host   = {.state_slots = 0U, .kv_bytes = root_host_kv_bytes},
+    };
     base->root_demand = detail::PhysicalDemand{
         .active_entitlement       = root_vector,
         .reservation_added        = root_vector,
@@ -477,7 +498,9 @@ std::optional<AdmissionCandidate> ProgramImplCore::inspect_lane(
             !state_store->valid(shared_source->state)) {
             throw std::logic_error("catalog shared-prefix summary disagrees with Program state");
         }
-        if (!base.allow_prefix_reuse || !prompt.identity.reusable) { return std::nullopt; }
+        if (!base.allow_prefix_reuse || !prompt.identity.reusable) {
+            return std::nullopt;
+        }
         const auto* shared_identity = shared_source->identity->prefix_identity();
         if (shared_identity == nullptr ||
             !qwen3_6::detail::prefix_matches(prompt, shared_source->identity->ledger(),
@@ -493,12 +516,25 @@ std::optional<AdmissionCandidate> ProgramImplCore::inspect_lane(
         plan->source_mode                     = must_retain_private_source
                                                     ? runtime::PrivateSourceMode::Retain
                                                     : runtime::PrivateSourceMode::ConsumeToActive;
-        if (!base.allow_prefix_reuse || !prompt.identity.reusable) { return std::nullopt; }
+        if (!base.allow_prefix_reuse || !prompt.identity.reusable) {
+            return std::nullopt;
+        }
+        // A KVMem-compacted lineage no longer holds its token prefix contiguously: its KV stops
+        // at the window frontier while the ledger remembers the whole prompt. The latest
+        // checkpoint still describes that window truthfully, and older ones remain usable down to
+        // the window's own floor. Below the floor the retained tail would hand this request
+        // tokens its checkpoint state never saw, so those checkpoints are refused instead of
+        // quietly resuming on a state the KV does not match.
+        const std::uint32_t reuse_floor = source->kv_reuse_floor;
+        if (selected.frontier < reuse_floor) { return std::nullopt; }
         if (selected.kind == runtime::CheckpointKind::SessionEndpoint) {
             if (selected.ordinal != 0) {
                 throw std::logic_error("private endpoint checkpoint ordinal is invalid");
             }
-            if (selected.frontier == 0 || selected.frontier != source->execution_frontier) {
+            if (selected.frontier == 0 ||
+                selected.frontier !=
+                    static_cast<std::uint32_t>(static_cast<std::int64_t>(source->execution_frontier) -
+                                               static_cast<std::int64_t>(source->kv_offset))) {
                 throw std::logic_error("catalog endpoint summary disagrees with Program state");
             }
             if (!qwen3_6::detail::prefix_matches(prompt, source->ledger, source->prefix_identity,
@@ -524,6 +560,13 @@ std::optional<AdmissionCandidate> ProgramImplCore::inspect_lane(
             plan->reuse       = ReusePath::PrivateLongAnchor;
             plan->reuse_base  = selected.frontier;
             plan->source_mode = runtime::PrivateSourceMode::Retain;
+            // The KVMem window-edge anchor is re-captured from the reused state at
+            // the start of this request, so it does not need to survive in the
+            // source: consuming it lets the image become the active state directly
+            // instead of leaving an unsettled fork, which would forbid the capture.
+            if (selected.frontier == text_kv_addresses->kvmem_window_edge(prompt.token_ids.size())) {
+                plan->source_mode = runtime::PrivateSourceMode::ConsumeToActive;
+            }
         } else {
             if (selected.ordinal != 0) {
                 throw std::logic_error("private rewrite checkpoint ordinal is invalid");
@@ -541,6 +584,24 @@ std::optional<AdmissionCandidate> ProgramImplCore::inspect_lane(
             plan->reuse      = restore_path(source->rewrite_checkpoint.kind);
             plan->reuse_base = selected.frontier;
         }
+    }
+    // The reused token ledger is consumed up to `reuse_base`, but the KV of a KVMem-compacted
+    // lineage stops at its compacted window. Address, pin and page decisions follow the KV
+    // frontier; prompt slicing, matching and position bookkeeping follow the ledger frontier.
+    plan->kv_frontier = plan->reuse_base;
+    if (source != nullptr) {
+        const std::int64_t kv_frontier =
+            static_cast<std::int64_t>(plan->reuse_base) + static_cast<std::int64_t>(source->kv_offset);
+        if (kv_frontier < 0 || kv_frontier > static_cast<std::int64_t>(source->execution_frontier)) {
+            throw std::logic_error("private checkpoint KV frontier is inconsistent");
+        }
+        plan->kv_frontier = static_cast<std::uint32_t>(kv_frontier);
+        plan->reuse_floor = source->kv_reuse_floor;
+    }
+    // A compressed KVMem window re-bases cache slots and RoPE positions together, which an MRoPE
+    // prompt cannot follow: Vision positions are absolute per axis and are not ours to shift.
+    if (source != nullptr && plan->kv_frontier != plan->reuse_base && !prompt.vision_items.empty()) {
+        return std::nullopt;
     }
 
     if (speculative_backend == SpeculativeBackend::Mtp) {
@@ -670,7 +731,14 @@ std::optional<AdmissionCandidate> ProgramImplCore::inspect_lane(
 
     plan->capture_groups.reserve(base.capture_groups.size());
     for (CaptureGroup group : base.capture_groups) {
-        if (group.frontier <= plan->reuse_base) { continue; }
+        // A KVMem window-edge anchor is re-armed at its own frontier: the reused
+        // prefix already carries the state that frontier describes, so renewing the
+        // anchor costs one snapshot instead of a re-derivation from root.
+        const bool rearmed_window_anchor = group.long_anchor && group.frontier == plan->reuse_base;
+        if (group.frontier < plan->reuse_base ||
+            (group.frontier == plan->reuse_base && !rearmed_window_anchor)) {
+            continue;
+        }
         if (group.rewrite &&
             (plan->rewrite_disposition !=
                  RewriteCheckpointDisposition::ReplaceAtCommittedFrontier ||
@@ -845,22 +913,24 @@ std::optional<AdmissionCandidate> ProgramImplCore::inspect_lane(
             source != nullptr ? (source->kv ? &*source->kv : nullptr)
                               : (shared_source->kv ? &*shared_source->kv : nullptr);
         if (source_kv == nullptr) { throw std::logic_error("checkpoint has no KV address space"); }
+        // KV geometry follows the cache-slot frontier, not the consumed ledger length.
+        const std::uint32_t kv_frontier = plan->kv_frontier;
         const std::uint32_t backend_frontier =
-            backend_frontier_at(speculative_backend, plan->reuse_base);
+            backend_frontier_at(speculative_backend, kv_frontier);
         if (plan->source_mode == runtime::PrivateSourceMode::Retain) {
             plan->text_prefix_fork_required    = true;
             plan->backend_prefix_fork_required = source_kv->backend && backend_frontier != 0;
         } else if (source != nullptr) {
             plan->text_prefix_fork_required =
-                partial_tail_cow_required(*text_kv_addresses, source_kv->text, plan->reuse_base);
+                partial_tail_cow_required(*text_kv_addresses, source_kv->text, kv_frontier);
             plan->backend_prefix_fork_required =
                 source_kv->backend && backend_frontier != 0 &&
                 partial_tail_cow_required(*backend_kv_addresses, *source_kv->backend,
                                           backend_frontier);
         }
-        const std::uint32_t main_required = pages_for_tokens(plan->reuse_base);
+        const std::uint32_t main_required = pages_for_tokens(kv_frontier);
         const std::uint32_t main_device =
-            device_kv_prefix_pages(*text_kv_addresses, source_kv->text, plan->reuse_base);
+            device_kv_prefix_pages(*text_kv_addresses, source_kv->text, kv_frontier);
         if (main_device > main_required) {
             throw std::logic_error("Text KV resident prefix exceeds checkpoint requirement");
         }
@@ -896,7 +966,7 @@ std::optional<AdmissionCandidate> ProgramImplCore::inspect_lane(
         }
         if (plan->text_prefix_fork_required) {
             const std::uint32_t page_size = static_cast<std::uint32_t>(kPagedKVPageSize);
-            if (plan->reuse_base % page_size != 0) {
+            if (kv_frontier % page_size != 0) {
                 add_kv_transfer(runtime::ContextResourceClass::MainKV,
                                 runtime::ContextTransferDirection::DeviceToDevice, *text_kv_pages,
                                 1);
@@ -925,9 +995,9 @@ std::optional<AdmissionCandidate> ProgramImplCore::inspect_lane(
             throw std::logic_error("retained source has no KV address space");
         }
         const std::uint32_t main_full_pages =
-            plan->reuse_base / static_cast<std::uint32_t>(kPagedKVPageSize);
+            plan->kv_frontier / static_cast<std::uint32_t>(kPagedKVPageSize);
         const std::uint32_t backend_frontier =
-            backend_frontier_at(speculative_backend, plan->reuse_base);
+            backend_frontier_at(speculative_backend, plan->kv_frontier);
         const std::uint32_t backend_full_pages =
             backend_frontier / static_cast<std::uint32_t>(kPagedKVPageSize);
         if (main_full_pages > active.main_kv_pages ||
@@ -944,9 +1014,9 @@ std::optional<AdmissionCandidate> ProgramImplCore::inspect_lane(
                 },
         };
         detail::PhysicalResources source_replica_additions;
-        const std::uint32_t main_required = pages_for_tokens(plan->reuse_base);
+        const std::uint32_t main_required = pages_for_tokens(plan->kv_frontier);
         const std::uint32_t main_device =
-            device_kv_prefix_pages(*text_kv_addresses, source_kv->text, plan->reuse_base);
+            device_kv_prefix_pages(*text_kv_addresses, source_kv->text, plan->kv_frontier);
         if (main_device > main_required) {
             throw std::logic_error("retained Text KV replica count exceeds requirement");
         }
@@ -1009,7 +1079,7 @@ std::optional<AdmissionCandidate> ProgramImplCore::inspect_lane(
                 return true;
             };
         if (!plan_retained_tail_release(
-                *text_kv_addresses, *text_kv_pages, source_kv->text, plan->reuse_base,
+                *text_kv_addresses, *text_kv_pages, source_kv->text, plan->kv_frontier,
                 active_resources.device.main_kv_pages,
                 source_replica_additions.device.main_kv_pages, plan->text_prefix_fork_required,
                 plan->text_retained_tail_release, runtime::ContextResourceClass::MainKV)) {
@@ -1126,22 +1196,22 @@ std::optional<AdmissionCandidate> ProgramImplCore::inspect_lane(
 
         if (!source->kv) { throw std::logic_error("private checkpoint has no KV address space"); }
         const std::uint32_t main_shared =
-            shared_kv_prefix_pages(*text_kv_addresses, source->kv->text, plan->reuse_base);
+            shared_kv_prefix_pages(*text_kv_addresses, source->kv->text, plan->kv_frontier);
         const std::uint32_t main_missing_shared = missing_shared_device_kv_prefix_pages(
-            *text_kv_addresses, source->kv->text, plan->reuse_base);
+            *text_kv_addresses, source->kv->text, plan->kv_frontier);
         if (main_shared > exclusive_active.main_kv_pages) {
             throw std::logic_error("shared Main KV exceeds the active entitlement");
         }
         exclusive_active.main_kv_pages -= main_shared;
         shared_replica_additions.device.main_kv_pages = main_missing_shared;
-        const std::uint32_t main_shared_device =
-            shared_device_kv_prefix_pages(*text_kv_addresses, source->kv->text, plan->reuse_base);
+        const std::uint32_t main_shared_device = shared_device_kv_prefix_pages(
+            *text_kv_addresses, source->kv->text, plan->kv_frontier);
         conversions.main_kv_pages =
-            device_kv_prefix_pages(*text_kv_addresses, source->kv->text, plan->reuse_base) -
+            device_kv_prefix_pages(*text_kv_addresses, source->kv->text, plan->kv_frontier) -
             main_shared_device;
         if (source->kv->backend) {
             const std::uint32_t backend_frontier =
-                backend_frontier_at(speculative_backend, plan->reuse_base);
+                backend_frontier_at(speculative_backend, plan->kv_frontier);
             const std::uint32_t backend_shared = shared_kv_prefix_pages(
                 *backend_kv_addresses, *source->kv->backend, backend_frontier);
             const std::uint32_t backend_missing_shared = missing_shared_device_kv_prefix_pages(
@@ -1159,15 +1229,15 @@ std::optional<AdmissionCandidate> ProgramImplCore::inspect_lane(
                 backend_shared_device;
         }
         retained_host.kv_bytes =
-            host_kv_prefix_bytes(*text_kv_addresses, source->kv->text, plan->reuse_base);
+            host_kv_prefix_bytes(*text_kv_addresses, source->kv->text, plan->kv_frontier);
         const auto [main_tail_restore, main_discarded_host_bytes] =
             private_tail_restore(*text_kv_addresses, *text_kv_pages, source->kv->text,
-                                 plan->reuse_base, plan->text_prefix_fork_required);
+                                 plan->kv_frontier, plan->text_prefix_fork_required);
         transient_source_restores.device.main_kv_pages = main_tail_restore;
         transient_host_bytes                           = main_discarded_host_bytes;
         if (source->kv->backend) {
             const std::uint32_t backend_frontier =
-                backend_frontier_at(speculative_backend, plan->reuse_base);
+                backend_frontier_at(speculative_backend, plan->kv_frontier);
             const std::size_t backend_bytes =
                 host_kv_prefix_bytes(*backend_kv_addresses, *source->kv->backend, backend_frontier);
             if (backend_bytes > std::numeric_limits<std::size_t>::max() - retained_host.kv_bytes) {

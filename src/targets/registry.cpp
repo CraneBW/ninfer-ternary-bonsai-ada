@@ -34,6 +34,7 @@ void validate_options(const EngineOptions& options) {
     }
     switch (options.kv_capacity.mode) {
     case KvCapacityMode::Explicit:
+    case KvCapacityMode::DeviceBudget:
         if (options.kv_capacity.explicit_tokens == 0) {
             throw std::invalid_argument("Engine explicit kv_capacity must be nonzero");
         }

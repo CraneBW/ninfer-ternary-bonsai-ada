@@ -199,6 +199,9 @@ public:
 
     [[nodiscard]] std::uint32_t capacity_pages() const noexcept;
     [[nodiscard]] std::uint32_t allocated_pages() const noexcept;
+    // Public, validating access to the physical plane index of a handle. The KVMem
+    // executor needs it to address per-layer plane tensors for in-place re-phasing.
+    [[nodiscard]] std::int32_t physical_index_of(DeviceKVPageHandle handle) const;
     [[nodiscard]] std::uint32_t reserved_pages() const noexcept;
     [[nodiscard]] std::uint32_t available_pages() const noexcept;
     [[nodiscard]] std::size_t plane_count() const noexcept;
