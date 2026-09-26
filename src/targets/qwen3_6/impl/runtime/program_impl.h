@@ -840,6 +840,12 @@ ProgramImplCore::ProgramImplCore(const LoadedModelData& model_in, const Sequence
     text_kv_addresses = std::make_unique<KVAddressSpaceStore>(
         *text_kv_pages, decoder->text_kv.execution_tables(), address_capacity,
         decoder->text_kv.execution_tables().logical_page_capacity());
+    // KVMem K3: the query capture must exist before the decode graphs are
+    // captured, because those graphs bake the buffer's address.
+    text_kv_addresses->install_kvmem_query(
+        static_cast<std::uint32_t>(TextConfig::full_attention_layers()),
+        static_cast<std::uint32_t>(TextConfig::query_heads),
+        static_cast<std::uint32_t>(TextConfig::head_dim));
     state_images =
         std::make_unique<qwen3_6::StateImageDevicePool>(backing, plan.persistent.state_images);
     if (plan.context_cache.host_state_slots != 0) {
@@ -1120,7 +1126,7 @@ std::vector<float> ProgramImplCore::causal_score(PreparedPromptData&& prompt,
             const std::uint32_t nominal = std::min(prefill_chunk, predictor_count - cursor);
             schedule::PrefillContext schedule_state{
                 {device, model, work, state_images->linear(), nullptr, io, prefill_hidden,
-                 prefill_chunk, proposal_head},
+                 prefill_chunk, proposal_head, text_kv_addresses->kvmem_query_capture()},
                 decoder->text_kv.execution_view(text_kv_addresses->execution_row(*address)),
                 {},
                 decoder->text_kv,
@@ -9022,7 +9028,7 @@ runtime::ExecutionTiming ProgramImplCore::append_forced_tokens(
                 schedule::PrefillContext schedule_state{
                     {device, model, work, state_images->linear(),
                      replay_records ? &*replay_records : nullptr, io, prefill_hidden, prefill_chunk,
-                     proposal_head},
+                     proposal_head, text_kv_addresses->kvmem_query_capture()},
                     text_kv_view(sequence),
                     mtp_kv_view(sequence),
                     decoder->text_kv,
@@ -11284,7 +11290,8 @@ void ProgramImplCore::prepare_graphs() {
                                        io,
                                        prefill_hidden,
                                        prefill_chunk,
-                                       proposal_head};
+                                       proposal_head,
+                                       text_kv_addresses->kvmem_query_capture()};
     };
 
     if (speculative_backend == SpeculativeBackend::None) {
@@ -11629,7 +11636,7 @@ ProgramImplCore::advance_prefill(SequenceState& sequence, RequestControl& reques
         schedule::PrefillContext schedule_state{
             {device, model, work, state_images->linear(),
              replay_records ? &*replay_records : nullptr, io, prefill_hidden, prefill_chunk,
-             proposal_head},
+             proposal_head, text_kv_addresses->kvmem_query_capture()},
             text_kv_view(sequence),
             mtp_kv_view(sequence),
             decoder->text_kv,

@@ -5,6 +5,7 @@
 #include "core/arena.h"
 #include "core/decode_graph.h"
 #include "core/device.h"
+#include "kvmem/kvmem_bridge.h"
 #include "ninfer/ops/kv_cache_append.h"
 #include "ninfer/ops/sampling.h"
 #include "ninfer/ops/sliding_window_attention.h"
@@ -38,6 +39,9 @@ struct ExecutionCore {
     Tensor& prefill_hidden;
     std::uint32_t prefill_chunk;
     ProposalHead proposal_head;
+    // KVMem K3 retrieval query capture: null unless KVMem is enabled, in which
+    // case a prefilling card stores the prompt's last-token query here.
+    const ninfer::kvmem::KvmemQueryCapture* kvmem_query = nullptr;
 };
 
 struct PrefillContext {

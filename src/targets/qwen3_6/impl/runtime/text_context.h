@@ -8,6 +8,7 @@
 #include "core/gdn_replay_records.h"
 #include "core/tensor.h"
 #include "core/weight.h"
+#include "kvmem/kvmem_bridge.h"
 #include "ninfer/ops/sampling.h"
 #include "ninfer/ops/softmax_attention.h"
 #include "ninfer/ops/sparse_moe.h"
@@ -176,6 +177,12 @@ public:
         prefill_split_frontier_ = position;
     }
 
+    // KVMem K3: arm the retrieval query capture. Set only by the prefill
+    // schedule, so the buffer ends up holding the request's last prompt token.
+    void set_kvmem_query_capture(const ninfer::kvmem::KvmemQueryCapture* capture) noexcept {
+        kvmem_query_ = capture;
+    }
+
     void set_rewrite_checkpoint_hidden_output(Tensor* output) noexcept {
         rewrite_checkpoint_hidden_output_ = output;
     }
@@ -327,6 +334,7 @@ private:
     std::int64_t prefill_split_frontier_      = -1;
     Tensor* rewrite_checkpoint_hidden_output_ = nullptr;
     std::uint32_t mtp_proposal_extent_        = 0;
+    const ninfer::kvmem::KvmemQueryCapture* kvmem_query_ = nullptr;
 
     const Weight* embed_                        = nullptr;
     const Tensor* final_norm_                   = nullptr;

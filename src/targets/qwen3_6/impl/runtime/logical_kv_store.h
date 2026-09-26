@@ -1,11 +1,13 @@
 #pragma once
 
+#include "core/arena.h"
 #include "core/host_kv_arena.h"
 #include "core/paged_kv_cache.h"
 #include "kvmem/kvmem_blocks.h"
 #include "kvmem/kvmem_bridge.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstdlib>
 #include <array>
 #include <cstddef>
@@ -2057,6 +2059,50 @@ private:
         ++kvmem_plans_;
     }
 
+    // KVMem K3: fill the ledger's retrieval scores from the captured query. A
+    // block whose K is not device-resident (evicted to the host arena) keeps
+    // score 0 -- "no evidence". With no capture installed, or with nothing
+    // scoreable, every score stays 0 and the window selection is the unranked
+    // one, so a KVMem-disabled run is bit-identical to the K2 path.
+    void kvmem_score_window(std::size_t index, DeviceKVPagePool& pool, cudaStream_t stream) {
+        const ninfer::kvmem::KvmemQueryCapture* query = kvmem_query_capture();
+        if (query == nullptr) { return; }
+        auto& repo            = kvmem_repos_[index];
+        const std::uint32_t n = repo.block_count();
+        if (n == 0) { return; }
+        std::vector<std::int32_t> pages(n, -1);
+        std::vector<std::int32_t> baked(n, 0);
+        bool scoreable = false;
+        for (std::uint32_t id = 0; id < n; ++id) {
+            if (repo.tier_of(id) != ninfer::kvmem::KvTier::Gpu) { continue; }
+            if (kvmem_block_pages_[index].size() <= id ||
+                !kvmem_block_pages_[index][id].valid()) {
+                continue;
+            }
+            pages[id] = pool.physical_index_of(pages_->physical(kvmem_block_pages_[index][id]));
+            baked[id] = static_cast<std::int32_t>(repo.baked_pos_of(id));
+            scoreable = true;
+        }
+        if (!scoreable) { return; }
+        std::vector<float> scores(n, 0.0f);
+        try {
+            ninfer::kvmem::kvmem_score_blocks(pool, *query, pages.data(), baked.data(), n,
+                                              scores.data(), stream);
+        } catch (const std::exception& error) {
+            // Retrieval only ranks the middle quota: a geometry it cannot read
+            // must not make the compaction fail, it must leave it unranked.
+            std::fprintf(stderr, "KVMEM_TRACE score_failed %s\n", error.what());
+            return;
+        }
+        for (std::uint32_t id = 0; id < n; ++id) { repo.add_scores(id, scores[id], 0.0); }
+        if (std::getenv("NINFER_KVMEM_TRACE") != nullptr) {
+            for (std::uint32_t id = 0; id < n; ++id) {
+                std::fprintf(stderr, "KVMEM_TRACE score id=%u page=%d pos=%d retrieval=%.5f\n", id,
+                             pages[id], baked[id], scores[id]);
+            }
+        }
+    }
+
 public:
     // KVMem K1b: compact one address's KV into a budget-driven working window.
     //
@@ -2121,13 +2167,19 @@ public:
                 cfg.recent_tokens =
                     std::max<std::uint32_t>(1, budget_blocks / 4) * kPagedKVPageSize;
             }
-            sel = repo.preview_select(cfg, std::move(mandatory_ids));  // K3 feeds the ids
+            kvmem_score_window(index, pool, stream);
+            sel = repo.preview_select(cfg, std::move(mandatory_ids));  // K3 ranks the middle
         }
         ninfer::kvmem::KvWindowPlan plan = repo.set_selection(sel, cfg);
         const std::uint32_t window_tokens = static_cast<std::uint32_t>(plan.total_window_tokens);
         const std::uint32_t window_pages  = window_tokens / kPagedKVPageSize;
         if (plan.remaps.size() != window_pages) {
             throw std::logic_error("KVMem compaction plan geometry diverged");
+        }
+        if (std::getenv("NINFER_KVMEM_TRACE") != nullptr) {
+            std::fprintf(stderr, "KVMEM_TRACE select window_tokens=%u ids=", window_tokens);
+            for (const std::uint32_t id : sel.block_ids) { std::fprintf(stderr, "%u,", id); }
+            std::fprintf(stderr, "\n");
         }
         // The packed window is a whole number of pages, but the newest retained page holds the most
         // recent tokens and only the columns up to the previous KV frontier are written -- unless
@@ -2332,6 +2384,25 @@ public:
         return kvmem_budget_ < kv_tokens ? kvmem_budget_ : 0U;
     }
 
+    // KVMem K3: install the device query-capture buffer
+    // (bf16 [layers][q_heads][head_dim]). Called once at start-up so the address
+    // stays stable across CUDA-graph capture; the prefill schedule writes the
+    // request's query there and kvmem_compact ranks its ledger with it.
+    void install_kvmem_query(std::uint32_t layers, std::uint32_t q_heads, std::uint32_t head_dim) {
+        if (!kvmem_enabled_ || layers == 0 || q_heads == 0 || head_dim == 0) { return; }
+        const std::uint64_t bytes =
+            static_cast<std::uint64_t>(layers) * q_heads * head_dim * sizeof(std::uint16_t);
+        kvmem_query_buffer_ = DeviceBuffer(static_cast<std::size_t>(bytes));
+        kvmem_query_buffer_.fill(0);
+        kvmem_query_ =
+            ninfer::kvmem::KvmemQueryCapture{kvmem_query_buffer_.p, layers, q_heads, head_dim};
+    }
+
+    // Null until install_kvmem_query ran, i.e. unless KVMem is enabled.
+    [[nodiscard]] const ninfer::kvmem::KvmemQueryCapture* kvmem_query_capture() const noexcept {
+        return kvmem_query_.valid() ? &kvmem_query_ : nullptr;
+    }
+
 private:
     bool kvmem_enabled_ = false;
     std::uint32_t kvmem_budget_ = 0;  // NINFER_KVMEM_BUDGET tokens; 0 = unbounded
@@ -2342,6 +2413,10 @@ private:
     std::vector<std::vector<HostKVAllocation>> kvmem_block_hosts_;
     std::unique_ptr<HostKVArena> kvmem_host_arena_;
     HostKVPageLayout kvmem_host_layout_{};
+    // KVMem K3: the request query the prefill schedule captured, and the device
+    // buffer behind it.
+    DeviceBuffer kvmem_query_buffer_;
+    ninfer::kvmem::KvmemQueryCapture kvmem_query_{};
     // Per address: the lowest window slot a resumed request may continue from.
     std::vector<std::uint32_t> kvmem_reuse_floors_;
     std::uint64_t kvmem_plans_       = 0;

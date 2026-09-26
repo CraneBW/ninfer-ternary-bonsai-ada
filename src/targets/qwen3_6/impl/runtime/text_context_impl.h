@@ -38,6 +38,8 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <initializer_list>
 #include <limits>
 #include <stdexcept>
@@ -846,6 +848,22 @@ void TextContext::attn_mix(const FullLayerW& w, Tensor& x, int fidx, Phase ph) {
     Tensor kn          = results.normalized_key.view({kCfg.head_dim, kCfg.n_kv, T});
     ops::rmsnorm(q, *w.q_norm, kCfg.rms_eps, true, qn, s);
     ops::rmsnorm(k, *w.k_norm, kCfg.rms_eps, true, kn, s);
+
+    // KVMem K3: keep the last prompt token's query for the retrieval scorer, taken
+    // BEFORE the position rotation. Only a prefilling card carries the capture
+    // buffer, so the buffer ends up holding the request's final prompt column, and
+    // the stored query matches the raw-K domain the scorer rebuilds the cached
+    // keys in (a key is position independent, so blocks written at other
+    // distances are only comparable once RoPE is out of the way).
+    if (kvmem_query_ != nullptr && ph == Phase::Prefill && active_sequence_batch_ == 0 && T > 0 &&
+        fidx < static_cast<int>(kvmem_query_->layers)) {
+        ninfer::kvmem::kvmem_capture_query(qn.data, kvmem_query_->q_heads, kvmem_query_->head_dim,
+                                           static_cast<std::uint32_t>(T),
+                                           static_cast<std::uint32_t>(T - 1),
+                                           const_cast<void*>(kvmem_query_->data),
+                                           static_cast<std::uint32_t>(fidx), s);
+    }
+
     const Tensor& cache_positions =
         active_cache_positions_ != nullptr ? *active_cache_positions_ : io_.pos;
     const Tensor& rope_positions =

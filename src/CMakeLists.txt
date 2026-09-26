@@ -376,6 +376,7 @@ endif()
 # KVMem（K0/K1/K2）：宿主决策层 + 相位重铸内核。
 target_sources(ninfer_ops PRIVATE
   kvmem/kvmem_rerope.cu
+  kvmem/kvmem_score.cu
 )
 
 ninfer_internal_includes(ninfer_ops)

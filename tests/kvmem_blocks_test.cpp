@@ -161,6 +161,36 @@ static void test_mandatory() {
     }
 }
 
+// 5) Retrieval ranking (K3): a block the query scored high enters the middle
+//    quota; the same block is absent when nothing carries a score, i.e. the
+//    unranked K2 order is preserved whenever the scorer contributes nothing.
+static void test_retrieval_quota() {
+    const auto select_with = [](bool ranked) {
+        KvBlockRepository repo = make_chain(64);
+        KvSelectConfig cfg;
+        cfg.budget_tokens = 16 * 64;
+        cfg.sink_tokens   = 64;
+        cfg.recent_tokens = 64;
+        if (ranked) { repo.add_scores(40, 1.0, 0.0); }
+        return repo.preview_select(cfg, {});
+    };
+    const auto kept = [](const KvSelection& sel, std::uint32_t id) {
+        return std::find(sel.block_ids.begin(), sel.block_ids.end(), id) != sel.block_ids.end();
+    };
+
+    const KvSelection unranked = select_with(false);
+    CHECK(unranked.block_ids.size() == 16, "retrieval: expected 16, got %zu",
+          unranked.block_ids.size());
+    CHECK(!kept(unranked, 40u), "retrieval: unscored blocks must stay out of the window");
+
+    const KvSelection ranked = select_with(true);
+    CHECK(ranked.block_ids.size() == 16, "retrieval: expected 16, got %zu",
+          ranked.block_ids.size());
+    CHECK(kept(ranked, 40u), "retrieval: the top-scoring block must be retained");
+    CHECK(std::is_sorted(ranked.block_ids.begin(), ranked.block_ids.end()),
+          "retrieval: selection not ascending");
+}
+
 int main() {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     test_passthrough();
@@ -171,6 +201,8 @@ int main() {
     std::printf("shift ok\n");
     test_mandatory();
     std::printf("mandatory ok\n");
+    test_retrieval_quota();
+    std::printf("retrieval ok\n");
     std::printf("failures=%d  VERDICT: %s\n", failures, failures == 0 ? "PASS" : "FAIL");
     return failures == 0 ? 0 : 1;
 }
