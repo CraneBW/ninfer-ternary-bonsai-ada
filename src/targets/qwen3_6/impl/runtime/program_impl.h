@@ -59,6 +59,18 @@ std::uint32_t kv_pages_for_frontier(std::uint32_t frontier) noexcept {
     return frontier == 0 ? 0U : 1U + (frontier - 1U) / static_cast<std::uint32_t>(kPagedKVPageSize);
 }
 
+// Largest prefill piece a KVMem offload can make room for: the device pool minus the minimum
+// compaction window, rounded down to the prefill chunk alignment. A pool that cannot hold the
+// configured chunk beside that window therefore prefills in smaller pieces.
+std::uint32_t kvmem_prefill_piece_cap(std::uint32_t pool_pages) noexcept {
+    const std::uint32_t spare = pool_pages > KVAddressSpaceStore::kMinimumWindowPages
+                                    ? pool_pages - KVAddressSpaceStore::kMinimumWindowPages
+                                    : 0U;
+    const std::uint32_t tokens = spare * static_cast<std::uint32_t>(kPagedKVPageSize);
+    return std::max<std::uint32_t>(kPrefillChunkAlignment,
+                                   tokens / kPrefillChunkAlignment * kPrefillChunkAlignment);
+}
+
 std::size_t context_resource_index(runtime::ContextResourceClass resource) {
     switch (resource) {
     case runtime::ContextResourceClass::State:
@@ -10105,8 +10117,22 @@ void ProgramImplCore::start_sequence(std::uint32_t lane, SequenceState& sequence
                            prompt_tokens + (initial_mtp_extent == 0 ? 0U : initial_mtp_extent - 1U))
             : speculative_backend == SpeculativeBackend::DFlash ? prompt_tokens
                                                                 : 0U;
-        ensure_sequence_kv_mapped(sequence, kv_tokens(kv_offset, prompt_tokens),
-                                  backend_materialized);
+        // A device pool below the prompt cannot be mapped in one batch, so a KVMem prefill maps its
+        // pieces in the chunk loop, which offloads the window-external pages before each piece
+        // needs the room. Where the pool already covers the prompt -- and on every configuration
+        // without a device budget -- the whole prompt is mapped here exactly as before.
+        const std::uint32_t prompt_kv_frontier = kv_tokens(kv_offset, prompt_tokens);
+        if (kv_pages_for_frontier(prompt_kv_frontier) <=
+            text_kv_pages->physical_pool().capacity_pages()) {
+            ensure_sequence_kv_mapped(sequence, prompt_kv_frontier, backend_materialized);
+        } else if (!(text_kv_addresses->kvmem_enabled() &&
+                     speculative_backend == SpeculativeBackend::None)) {
+            throw std::invalid_argument(
+                "the KV device pool cannot hold this prompt: it needs " +
+                std::to_string(kv_pages_for_frontier(prompt_kv_frontier)) + " pages and the pool "
+                "has " + std::to_string(text_kv_pages->physical_pool().capacity_pages()) +
+                ", and KVMem prefill offload is unavailable for this configuration");
+        }
         install_sampling(sequence, request, request_plan.sampling);
         sequence.rope_delta = staged.prompt.rope_delta;
         set_device_i32(io.rope_delta, sequence.rope_delta);
@@ -11703,10 +11729,77 @@ ProgramImplCore::advance_prefill(SequenceState& sequence, RequestControl& reques
             if (is_masked_draft_backend(speculative_backend)) {
                 mark_workspace_usage(workspace_plan.dflash_context);
             }
+            // KVMem: a device pool below the prompt cannot hold it, so the prefill maps one piece
+            // at a time and hands the window-external pages to the host tier before the next piece
+            // needs the room. The piece is capped to leave the minimum compaction window, and
+            // wherever the pool already covers the prompt this collapses to the configured chunk.
+            const std::uint32_t pool_pages = text_kv_pages->physical_pool().capacity_pages();
+            const bool chunked_kv_prefill =
+                text_kv_addresses->kvmem_enabled() &&
+                speculative_backend == SpeculativeBackend::None &&
+                kv_pages_for_frontier(kv_tokens(sequence.kv_offset, staged.prompt_tokens)) >
+                    pool_pages;
+            const std::uint32_t piece_cap = kvmem_prefill_piece_cap(pool_pages);
+            // Move the window-external pages to Host so the incoming piece fits the pool. The
+            // retained window is the configured budget, narrowed only as far as the piece needs.
+            const auto kvmem_offload = [&](std::uint32_t incoming_tokens) {
+                if (incoming_tokens == 0 || !sequence.kv) { return; }
+                // The address maps every slot up to the piece's end, so that many pages have to
+                // be device-resident at once. Only when that exceeds the pool is the window
+                // outside the piece's reach offloaded.
+                const std::uint32_t target = kv_pages_for_frontier(
+                    kv_tokens(sequence.kv_offset, staged.cursor + incoming_tokens));
+                if (target <= pool_pages) { return; }
+                if (speculative_backend != SpeculativeBackend::None ||
+                    sequence.rewrite_checkpoint.valid || sequence.endpoint_valid ||
+                    !sequence.shared_prefix_references.empty()) {
+                    throw std::runtime_error(
+                        "KVMem prefill needs to offload KV pages, but this sequence's KV geometry "
+                        "is fixed");
+                }
+                const std::uint32_t needed = kv_pages_for_frontier(incoming_tokens);
+                if (pool_pages < needed + KVAddressSpaceStore::kMinimumWindowPages) {
+                    throw std::invalid_argument(
+                        "the KV device pool cannot hold one prefill piece beside the minimum KVMem "
+                        "window: raise --kv-device-tokens or lower --prefill-chunk");
+                }
+                const std::uint32_t logical = text_kv_addresses->mapping_limit(sequence.kv->text);
+                const std::uint32_t window = text_kv_addresses->kvmem_compact(
+                    sequence.kv->text,
+                    (pool_pages - needed) * static_cast<std::uint32_t>(kPagedKVPageSize),
+                    device.stream);
+                if (window == 0) {
+                    throw std::runtime_error(
+                        "KVMem prefill offload could not move the window-external KV pages: a KV "
+                        "page is shared");
+                }
+                // The packed window drops the evicted pages from the address, so the growth
+                // entitlement has to be re-established for the rest of the prefill.
+                text_kv_addresses->resize_entitlement(sequence.kv->text, logical);
+                sequence.kv_offset =
+                    static_cast<std::int32_t>(window) - static_cast<std::int32_t>(staged.cursor);
+                sequence.execution_frontier = window;
+                sequence.text_kv_valid      = window;
+                const std::uint32_t floor_slots =
+                    text_kv_addresses->kvmem_reuse_floor(sequence.kv->text);
+                if (floor_slots != 0 && floor_slots <= window) {
+                    sequence.kv_reuse_floor =
+                        std::max(sequence.kv_reuse_floor, staged.cursor - (window - floor_slots));
+                }
+            };
             std::uint32_t remaining          = nominal;
             std::uint32_t final_chunk_tokens = 0;
             bool finalized                   = false;
             while (remaining != 0) {
+                const std::uint32_t piece = chunked_kv_prefill
+                                                ? std::min(remaining, piece_cap)
+                                                : remaining;
+                if (chunked_kv_prefill) {
+                    kvmem_offload(piece);
+                    ensure_sequence_kv_mapped(
+                        sequence, kv_tokens(sequence.kv_offset, staged.cursor + piece),
+                        backend_kv_valid(sequence));
+                }
                 schedule_state.text_kv_base           = staged.cursor;
                 schedule_state.text_kv_offset         = sequence.kv_offset;
                 selectors                             = state_selectors(sequence);
@@ -11720,7 +11813,7 @@ ProgramImplCore::advance_prefill(SequenceState& sequence, RequestControl& reques
                     schedule_state.rewrite_checkpoint_hidden = nullptr;
                 }
 
-                const bool final_candidate = staged.cursor + remaining == staged.prompt_tokens;
+                const bool final_candidate = staged.cursor + piece == staged.prompt_tokens;
                 const std::optional<std::uint32_t> capture_frontier =
                     staged.next_capture < staged.capture_groups.size()
                         ? std::optional<std::uint32_t>(
@@ -11742,16 +11835,16 @@ ProgramImplCore::advance_prefill(SequenceState& sequence, RequestControl& reques
                     }
                     mark_workspace_usage(workspace_plan.vision->capacity_bytes);
                     result = schedule::prefill_multimodal_chunk(schedule_state, staged.prompt,
-                                                                *staged.vision, remaining,
+                                                                *staged.vision, piece,
                                                                 split_frontier, final_candidate);
                 } else {
                     result = schedule::prefill_text_chunk(
                         schedule_state, std::span<const TokenId>(staged.prompt.token_ids),
-                        remaining, split_frontier, final_candidate);
+                        piece, split_frontier, final_candidate);
                 }
                 timing.include(result.timing);
                 timing.resume_post();
-                if (result.processed_tokens == 0 || result.processed_tokens > remaining) {
+                if (result.processed_tokens == 0 || result.processed_tokens > piece) {
                     throw std::logic_error("ordinary prefill chunk made invalid progress");
                 }
                 if (staged.vision) { staged.vision->release_encoded_media_payloads(); }

@@ -844,6 +844,10 @@ private:
 
 class KVAddressSpaceStore {
 public:
+    // kvmem_compact keeps a sink, a recent tail and a middle quota, so its window cannot be
+    // narrower than one page per band.
+    static constexpr std::uint32_t kMinimumWindowPages = 4;
+
     KVAddressSpaceStore(LogicalKVPageStore& pages, KVExecutionTablePool& tables,
                         std::uint32_t address_capacity, std::uint32_t page_capacity,
                         KvMemOptions kvmem = {})
@@ -1754,6 +1758,16 @@ public:
         return entitlement(require(handle));
     }
 
+    // Highest logical page count this active address may map. It stays above the device claim
+    // wherever the host tier carries the difference, so a caller that reclaims pages (a mid
+    // prefill offload) can re-establish the growth entitlement from it.
+    [[nodiscard]] std::uint32_t mapping_limit(KVAddressSpaceHandle handle) const {
+        const Address& address = require(handle);
+        return std::max(entitlement(address), address.logical_entitlement);
+    }
+
+    [[nodiscard]] bool kvmem_enabled() const noexcept { return kvmem_enabled_; }
+
     [[nodiscard]] std::uint32_t committed_frontier(KVAddressSpaceHandle handle) const {
         return require(handle).committed_frontier;
     }
@@ -2183,7 +2197,7 @@ public:
             sel.block_ids.resize(budget_blocks);
             for (std::uint32_t i = 0; i < budget_blocks; ++i) { sel.block_ids[i] = i; }
         } else {
-            if (budget_blocks < 4) {
+            if (budget_blocks < kMinimumWindowPages) {
                 throw std::invalid_argument(
                     "KVMem compaction budget must span at least four pages "
                     "(sink/recent/middle)");
@@ -2341,7 +2355,14 @@ public:
 
         // ---- 4) release the evicted pages' device storage ----
         for (const std::uint32_t id : plan.stage_out) {
-            pages_->release_reference(block_pages[id], false);
+            const LogicalKVPageHandle logical = block_pages[id];
+            // The block leaves the address's window on this step, so its active reference goes
+            // with it; without that the page keeps a reference and its device storage is never
+            // returned to the pool. The parked Host copy owns the block until it is staged back.
+            if (pages_->active_address_references(logical) != 0) {
+                pages_->release_active_reference(logical);
+            }
+            pages_->release_reference(logical, false);
             block_pages[id] = LogicalKVPageHandle{};
         }
 

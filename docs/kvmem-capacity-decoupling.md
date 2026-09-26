@@ -1,7 +1,7 @@
 # KVMem 容量解耦设计：令 CTX 脱离显存上限（zatfung）
 
-状态：设计，未实现。目标分支 vD（从 vC 派生）。前置：K0/K1a/K1b/K2 已实现、K3 检索打分已接入
-（见 `kvmem-k0-k1-design.md`）。
+状态：第一、二步已落地（第二步只剩生成期回收），第三步未实现。目标分支 vD（从 vC 派生）。
+前置：K0/K1a/K1b/K2 已实现、K3 检索打分已接入（见 `kvmem-k0-k1-design.md`）。
 
 ## 1. 要解决的问题
 
@@ -105,6 +105,16 @@ pages_for_tokens(prompt_tokens + effective_output - 1)` 与 `prepare_activation`
 答案与物理充足时一致。
 
 **风险**：中。引入「页可能不在 device」的运行态，所有读页路径都要能处理。
+
+**已落地部分（prefill 侧）**：记账把「逻辑 entitlement」与「device 声索」分开（后者取
+`min(entitlement, 池页数)`，差额记 Host KV 字节）；prefill 不再一次映射整个 prompt，改为按
+块（piece）映射，并在每块之前判断「该块末端需要的页数是否超过池」，超了就调用现成的
+`kvmem_compact` 把窗口外的页停到 host（保留窗口 = 池 − 本块页数，因此块上限 =
+池 − 最小窗口，且尽量维持 `--prefill-chunk`）。换出后补回增长预留。实测 `--max-context 8192`
+下池 20 页与 10 页两种配置三轮对话均通过（池 10 页时单轮 prefill 内换出 3 次），缓存命中
+97.2%/97.1%，答案与物理充足时一致。
+
+**未落地**：生成期回收。单请求的输出若长到超出池的剩余空间，仍会失败——需要第四步。
 
 ### 第三步：工作集固定
 
