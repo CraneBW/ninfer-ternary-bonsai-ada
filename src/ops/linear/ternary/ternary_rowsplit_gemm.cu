@@ -11,6 +11,7 @@
 #include "ops/linear/ternary/ternary_rowsplit_mma.cuh"
 #include "ops/linear/ternary/ternary_rowsplit_mma_s8.cuh"
 #include "ops/linear/ternary/ternary_rowsplit_mma_small_t.cuh"
+#include "ops/linear/ternary/ternary_small_t_plan.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -147,7 +148,17 @@ bool gemv_admits(const Tensor& x, const Weight& w, std::int32_t max_tokens) {
 }
 
 void launch_small_t(const Tensor& x, const Weight& w, Tensor& out, std::int32_t out_row_stride,
-                    cudaStream_t stream, std::int32_t rows_override);
+                    cudaStream_t stream, std::int32_t rows_override, TernaryS8Scratch scratch);
+
+// Defined next to note_rung, declared here because the split runs inside launch_small_t.
+void note_split(std::int32_t rows, std::int32_t k, std::int32_t tokens, std::int32_t row_block,
+                std::int32_t slices);
+
+// The row block and the split-K policy live in ternary_small_t_plan.h rather than here: the
+// workspace allocator in ternary_dispatch.cpp has to size the split-K reduction buffer for the same
+// slice count this file will ask for, and the two agreeing by construction is the whole point.
+static_assert(kSmallTSplitGroupK == TernarySmallTSchedule::kGroupK,
+              "the plan header's K step and the kernel's must be the same group count");
 
 // A warp takes one whole 128-wide quant group, so K has to hold whole K groups. Declared here
 // rather than next to the verify route that first needed it, so both entry points name it.
@@ -189,7 +200,9 @@ void launch_ternary_gemm_t1(const Tensor& x, const Weight& w, Tensor& out,
         if (decode_uses_small_t() && (w.k % kSmallTGroupK) == 0) {
             // One token wide, so the activation each CTA re-stages is a quarter of the verify
             // path's: 32, and not the per-shape table -- that table was measured at T = 4 only.
-            launch_small_t(x, w, out, out_row_stride, stream, 32);
+            // Empty scratch on purpose: split-K was measured on the verify shape, and T = 1 is a
+            // different work point (a slice would cut a k loop that is already the whole kernel).
+            launch_small_t(x, w, out, out_row_stride, stream, 32, TernaryS8Scratch{});
             return;
         }
         launch_pq2_gemv_tile(x, w, out, out_row_stride, x.ne[1], stream);
@@ -287,64 +300,36 @@ int verify_token_cap() {
     return cap;
 }
 
-// Row block per CTA, i.e. how many mma m-tiles share one activation staging. 16 is the shape the
-// kernel was written at and stays the reference; 32 and 48 exist because activations cost more of
-// the load pipe than codes do, so widening the block should leave that cost flat while the codes
-// grow. Measured on the six verify shapes at tokens=4 that is worth 6-15% on the largest one
-// (34816x5120: 84 -> 77 -> 71 us) and is inside noise on the rest -- a net ~0.5-0.9 ms a round,
-// which is small enough that the engine-level A/B, not the kernel harness, decides it.
-//
-// It is NOT the free win the load-mix argument predicts: dropping activation traffic by a third
-// only moved the effective rate from 453 to 480 GB/s against a 637 GB/s ceiling, so the kernel is
-// not L2-bandwidth-bound after all. Kept env-selectable rather than hardcoded for that reason.
-//
-// WHICH row block, asked PER SHAPE on the verify path rather than once globally. The response is
-// shape-dependent and not monotone, so no single value can be right -- and that, not the size of the
-// effect, is why P4's global sweep came out flat and kept 32. Re-measured by bucketing the decode
-// window of three nsys traces (T = 4, 73 rounds, sm_89), microseconds per round by output rows:
-//
-//     n        rows=16   rows=32   rows=48
-//     248320      2243      2173      2193
-//      34816      5668      5228      5466
-//       6144      2273      2195         -
-//       5120      4293      4573      4604
-//       4096       629       613       767
-//       1024       180       237       296
-//      total     15286     15019     15681
-//
-// 16 wins at or below 5120 and 32 wins above it, worth 337 us a round over all-32 (1.6%). The
-// 5120 bucket is not a mixture artifact: it improves at BOTH of its k values (k=17408 50.1 -> 46.7
-// us, k=6144 19.5 -> 17.7 us). WHY is not pinned down -- ncu puts the family at 56 registers with
-// DRAM the top utilizer (87.6% on the 34816 head, 63.9% on the 5120 one) and L2 at only 22-27%, so
-// it is neither L2-bound nor short of occupancy in the usual sense. The threshold is measured, not
-// derived, and it is scoped to the verify path because that is the only place it was measured.
-inline constexpr std::int32_t kSmallTNarrowRowMax = 5120;
-
-// 0 = no override. Read once: this is on the path of every small_t launch.
-int small_t_rows_env() {
-    static const int value = [] {
-        const char* raw  = std::getenv("NINFER_TERNARY_SMALL_T_ROWS");
-        const int parsed = raw == nullptr ? 0 : std::atoi(raw);
-        return (parsed == 16 || parsed == 32 || parsed == 48) ? parsed : 0;
-    }();
-    return value;
-}
-
-int small_t_rows_for(std::int32_t output_rows, std::int32_t rows_override) {
-    if (const int forced = small_t_rows_env(); forced != 0) { return forced; }
-    if (rows_override != 0) { return rows_override; }
-    return output_rows <= kSmallTNarrowRowMax ? 16 : 32;
-}
-
 void launch_small_t(const Tensor& x, const Weight& w, Tensor& out, std::int32_t out_row_stride,
-                    cudaStream_t stream, std::int32_t rows_override) {
+                    cudaStream_t stream, std::int32_t rows_override, TernaryS8Scratch scratch) {
     const std::int32_t rows = w.n;
-    const auto* x_ptr       = static_cast<const __nv_bfloat16*>(x.data);
-    const auto* codes       = static_cast<const std::uint8_t*>(w.qdata);
-    const auto* scales      = static_cast<const std::uint8_t*>(w.scales);
-    auto* out_ptr           = static_cast<__nv_bfloat16*>(out.data);
-    const auto grid_for     = [rows](int row_block) {
-        return dim3(static_cast<unsigned>(div_up(rows, row_block)), 1u, 1u);
+    const std::int32_t tokens = x.ne[1];
+    const int row_block = small_t_rows_for(rows, rows_override);
+    // Split-K. Slices go in blockIdx.z; each slice sums a sub-range of the K steps and writes raw
+    // fp32 partials, which ternary_s8_reduce_kernel then adds up. This is NOT bit-identical to the
+    // unsplit path -- the K terms are combined in a different order -- so the rollback arm
+    // (NINFER_TERNARY_SMALL_T_KSPLIT=0) is part of the gate, not a convenience.
+    //
+    // The bound the arena declared: partial_floats is what the allocator actually handed over, and
+    // the launcher caps its OWN slice count against it rather than assuming it got what it asked
+    // for. That is the same contract launch_pq2_mma_s8_tile keeps with the same buffer.
+    std::int32_t slices = small_t_slices(rows, w.k, tokens, row_block);
+    if (slices > 1) {
+        const std::int64_t per_slice = static_cast<std::int64_t>(rows) * tokens;
+        const std::int64_t fits = per_slice > 0 && scratch.partial_floats > 0
+                                      ? scratch.partial_floats / per_slice
+                                      : 0;
+        if (slices > fits) { slices = static_cast<std::int32_t>(fits); }
+        if (slices < 2 || scratch.partial == nullptr) { slices = 1; }
+    }
+
+    const auto* x_ptr   = static_cast<const __nv_bfloat16*>(x.data);
+    const auto* codes   = static_cast<const std::uint8_t*>(w.qdata);
+    const auto* scales  = static_cast<const std::uint8_t*>(w.scales);
+    auto* out_ptr       = static_cast<__nv_bfloat16*>(out.data);
+    const auto grid_for = [rows, slices](int block) {
+        return dim3(static_cast<unsigned>(div_up(rows, block)), 1u,
+                    static_cast<unsigned>(slices));
     };
     const auto args = [&](auto tag) {
         constexpr int kRows = decltype(tag)::value;
@@ -355,16 +340,35 @@ void launch_small_t(const Tensor& x, const Weight& w, Tensor& out, std::int32_t 
         // identity now keeps that change to this expression and leaves the kernel template alone.
         ternary_small_t_mma_kernel<8, (kRows == 16 ? 4 : (kRows == 32 ? 3 : 2)), kRows>
             <<<grid_for(kRows), TernarySmallTSchedule::kThreads, 0, stream>>>(
-                x_ptr, codes, scales, out_ptr, rows, w.k, x.ne[1], out_row_stride,
-                TernaryIdentityEpilogue{});
+                x_ptr, codes, scales, out_ptr, rows, w.k, tokens, out_row_stride,
+                TernaryIdentityEpilogue{}, slices > 1 ? scratch.partial : nullptr);
     };
     using std::integral_constant;
-    switch (small_t_rows_for(rows, rows_override)) {
+    switch (row_block) {
     case 16: args(integral_constant<int, 16>{}); break;
     case 48: args(integral_constant<int, 48>{}); break;
     default: args(integral_constant<int, 32>{}); break;
     }
     CUDA_CHECK(cudaGetLastError());
+
+    if (slices > 1) {
+        // The split is invisible in the rung trace -- the rung name is still "small_t", and the row
+        // block is whatever the policy picked -- so it says so itself rather than leaving a reader
+        // to infer it from a speed change. Same NINFER_TERNARY_S8_DEBUG switch as note_rung, and the
+        // same budget, so it cannot become a printf in a hot loop by accident.
+        note_split(rows, w.k, tokens, row_block, slices);
+        // One thread per (token, row) element. The kernel writes with `rows` as the row stride --
+        // NOT out_row_stride -- and the reduce reads the same layout back, which is why the two can
+        // share one buffer without the caller having to know which stride it was built at. On this
+        // route the two are equal anyway (ternary_dispatch_basis_strided passes w.n), but the
+        // reduce is written against `rows` regardless so the pair stays consistent if that changes.
+        const std::int64_t total = static_cast<std::int64_t>(rows) * tokens;
+        const int threads = 256;
+        const unsigned blocks = static_cast<unsigned>((total + threads - 1) / threads);
+        ternary_s8_reduce_kernel<<<blocks, threads, 0, stream>>>(
+            scratch.partial, out_ptr, out_row_stride, rows, tokens, slices);
+        CUDA_CHECK(cudaGetLastError());
+    }
 }
 
 // small_t with a token loop, expressed at the LAUNCHER rather than in the kernel.
@@ -396,8 +400,10 @@ void launch_small_t_tiled(const Tensor& x, const Weight& w, Tensor& out,
         Tensor x_tile   = x.slice(1, t0, tile);
         Tensor out_tile = out.slice(1, t0, tile);
         // 32, not the per-shape table: P4 swept the prefill work points and 32 won, and a tile is
-        // eight tokens wide, which is twice the width the table was measured at.
-        launch_small_t(x_tile, w, out_tile, out_row_stride, stream, 32);
+        // eight tokens wide, which is twice the width the table was measured at. The empty scratch
+        // also keeps split-K off this route: its tiles are 8 tokens wide, which would pass the
+        // split's own token gate, and the split was measured on the verify shape rather than here.
+        launch_small_t(x_tile, w, out_tile, out_row_stride, stream, 32, TernaryS8Scratch{});
     }
 }
 
@@ -806,6 +812,29 @@ void note_rung(const char* rung, const Tensor& x, const Weight& w, std::int32_t 
                  static_cast<int>(w.n), static_cast<int>(out_row_stride));
 }
 
+// The split-K arm of the small-t rung, which the rung line above cannot show: the rung name stays
+// "small_t" and the row block is whatever the shape policy picked. Shares note_rung's switch and
+// budget so it cannot turn into a printf in a hot loop by accident, and so one env var turns on
+// everything that describes which kernel actually ran.
+void note_split(std::int32_t rows, std::int32_t k, std::int32_t tokens, std::int32_t row_block,
+                std::int32_t slices) {
+    static const int min_t = [] {
+        const char* value = std::getenv("NINFER_TERNARY_S8_DEBUG_MIN_T");
+        return value == nullptr ? 0 : std::atoi(value);
+    }();
+    static int budget = [] {
+        const char* value = std::getenv("NINFER_TERNARY_S8_DEBUG_BUDGET");
+        return value == nullptr ? 24 : std::atoi(value);
+    }();
+    if (budget <= 0 || std::getenv("NINFER_TERNARY_S8_DEBUG") == nullptr) { return; }
+    if (tokens < min_t) { return; }
+    --budget;
+    std::fprintf(stderr, "[ternary] split     n=%d k=%d T=%d rows/cta=%d slices=%d ctas=%d\n",
+                 static_cast<int>(rows), static_cast<int>(k), static_cast<int>(tokens),
+                 static_cast<int>(row_block), static_cast<int>(slices),
+                 static_cast<int>(div_up(rows, row_block) * slices));
+}
+
 void launch_ternary_gemm_t8(const Tensor& x, const Weight& w, Tensor& out,
                             std::int32_t out_row_stride, cudaStream_t stream,
                             TernaryS8Scratch scratch) {
@@ -830,8 +859,9 @@ void launch_ternary_gemm_t8(const Tensor& x, const Weight& w, Tensor& out,
     if (gemv_admits(x, w, verify_token_cap())) {
         if (verify_uses_small_t() && (w.k % kSmallTGroupK) == 0) {
             note_rung("small_t", x, w, out_row_stride);
-            // 0 = pick the row block per shape: this is the path the table above was measured on.
-            launch_small_t(x, w, out, out_row_stride, stream, 0);
+            // 0 = pick the row block per shape, and the scratch decides whether the shape also
+            // splits K: both were measured on this path and on no other.
+            launch_small_t(x, w, out, out_row_stride, stream, 0, scratch);
             return;
         }
         // The A/B arm below is NOT interchangeable with the small-T kernel over the whole cap.

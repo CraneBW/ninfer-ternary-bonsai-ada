@@ -6,6 +6,7 @@
 #include "ops/linear/ternary/ternary_rotation.h"
 #include "ops/linear/ternary/ternary_rowsplit_storage.cuh"
 #include "ops/linear/ternary/ternary_s8_scratch.h"
+#include "ops/linear/ternary/ternary_small_t_plan.h"
 
 #include <stdexcept>
 #include <string>
@@ -37,22 +38,31 @@ TernaryLaunch select_ternary_launch(std::int32_t n, std::int32_t k, std::int32_t
 TernaryS8Scratch allocate_ternary_s8_scratch(WorkspaceArena& workspace, std::int32_t n,
                                              std::int32_t k, std::int32_t tokens) {
     TernaryS8Scratch scratch{};
-    if (tokens < kTernaryS8ScratchMinTokens) {
-        // Below the lowest count the rung can be ASKED for, not below the count it is chosen at --
-        // see kTernaryS8ScratchMinTokens for why those two differ and what gating on the wrong one
-        // cost. Nothing above this line can ask for int8, so nothing is allocated.
-        return scratch;
+    // int8 codes and scales, from the lowest count the rung can be ASKED for. Below it nothing can
+    // ask for int8 (see kTernaryS8ScratchMinTokens for why "askable" and "chosen" differ and what
+    // gating on the wrong one cost), and leaving codes null also keeps the int8 quantization pass
+    // off a path that would run it for nothing -- quantize_ternary_s8_activation keys off exactly
+    // that pointer.
+    if (tokens >= kTernaryS8ScratchMinTokens) {
+        const DeviceSpan codes  = workspace.alloc_bytes(ternary_s8_codes_bytes(k, tokens));
+        const DeviceSpan scales = workspace.alloc_bytes(ternary_s8_scales_bytes(tokens));
+        scratch.codes           = static_cast<std::int8_t*>(codes.data);
+        scratch.scales          = static_cast<float*>(scales.data);
     }
-    const DeviceSpan codes  = workspace.alloc_bytes(ternary_s8_codes_bytes(k, tokens));
-    const DeviceSpan scales = workspace.alloc_bytes(ternary_s8_scales_bytes(tokens));
-    scratch.codes           = static_cast<std::int8_t*>(codes.data);
-    scratch.scales          = static_cast<float*>(scales.data);
-    // Split-K reduction buffer, taken only for the shapes that will really slice. The launcher caps
-    // its own slice count against partial_floats, so an arena that under-delivers degrades to a
-    // single slice rather than overrunning; and the size here is bounded by
-    // ternary_s8_partial_budget_bytes(), which is the term ternary_rotation_workspace_bytes()
-    // declares for it (SKILL trap 8: any new scratch has to be counted where the arena is sized).
-    const int slices = ternary_s8_slices(n, tokens, k);
+    // Split-K reduction buffer, taken only for the shapes that will really slice. TWO rungs slice K
+    // and they do it at opposite ends of the token range -- int8 above 64 tokens, small-t at 8 and
+    // below -- so a shape never asks for both, but both spend out of this one buffer and both size
+    // it against ternary_s8_partial_budget_bytes(), which is the term
+    // ternary_rotation_workspace_bytes() declares for it (SKILL trap 8: any new scratch has to be
+    // counted where the arena is sized).
+    //
+    // The small-t count is computed from the SAME header the launcher reads, against the row block
+    // its own policy will pick, so the two cannot disagree about how many slices are coming. If
+    // they ever did, the launcher's cap against partial_floats would degrade it to fewer slices
+    // rather than overrun -- but the point of sharing the header is that it does not come to that.
+    int slices = tokens >= kTernaryS8ScratchMinTokens ? ternary_s8_slices(n, tokens, k) : 1;
+    const std::int32_t small_t_count = small_t_slices(n, k, tokens, small_t_rows_for(n, 0));
+    if (small_t_count > slices) { slices = small_t_count; }
     if (slices > 1) {
         const std::size_t bytes = ternary_s8_partial_bytes(n, tokens, slices);
         // The capacity statement declares the BOUND (ternary_s8_partial_budget_bytes), not this
