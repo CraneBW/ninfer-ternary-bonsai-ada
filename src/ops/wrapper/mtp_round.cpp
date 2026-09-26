@@ -53,8 +53,9 @@ void mtp_prepare_next_round(const Tensor& verify_ids, const Tensor& next_anchors
     constexpr const char* op = "mtp_prepare_next_round";
     const std::int32_t T     = verify_ids.ne[0];
     const std::int32_t batch = verify_ids.ne[1];
-    if (T < 2 || T > 6) {
-        throw std::invalid_argument("mtp_prepare_next_round: T must be in [2,6]");
+    // 8 = one draft ceiling (7) plus the token the round starts from; see round_state.h.
+    if (T < 2 || T > 8) {
+        throw std::invalid_argument("mtp_prepare_next_round: T must be in [2,8]");
     }
     if (batch < 1) { throw std::invalid_argument("mtp_prepare_next_round: B must be positive"); }
     if (max_context <= 0) {
