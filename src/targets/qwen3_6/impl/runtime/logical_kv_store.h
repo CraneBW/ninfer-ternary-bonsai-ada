@@ -847,6 +847,10 @@ public:
     // kvmem_compact keeps a sink, a recent tail and a middle quota, so its window cannot be
     // narrower than one page per band.
     static constexpr std::uint32_t kMinimumWindowPages = 4;
+    // Floor of the automatic sink/recent clamps (1024 + 4096 tokens). A budget below it cannot
+    // hold the automatic bands, so the planner is handed explicit proportional ones instead --
+    // otherwise a budget of 4K..5K tokens would refuse to plan at all.
+    static constexpr std::uint32_t kAutoBandFloorTokens = 1024 + 4096;
 
     KVAddressSpaceStore(LogicalKVPageStore& pages, KVExecutionTablePool& tables,
                         std::uint32_t address_capacity, std::uint32_t page_capacity,
@@ -872,6 +876,25 @@ public:
                 // window-edge anchor frontier are the same number.
                 kvmem_budget_ -= kvmem_budget_ % kPagedKVPageSize;
             }
+            // Generation headroom. The pool has to keep this much room free while a request
+            // decodes, so kvmem_compact_generation reclaims the window-external blocks once the
+            // resident window would leave less than it. The request is the configured value,
+            // clamped to the room this pool actually has beyond the window: a pool that only
+            // spans the window reserves nothing, and the mechanism stays inert exactly where the
+            // pool covers the context.
+            constexpr std::uint32_t kPageTokens =
+                static_cast<std::uint32_t>(kPagedKVPageSize);
+            const std::uint32_t pool_pages = pages.physical_pool().capacity_pages();
+            const std::uint32_t window_pages =
+                kvmem.budget_tokens == 0 ? page_capacity : kvmem_budget_ / kPageTokens;
+            const std::uint32_t spare_pages =
+                pool_pages > window_pages ? pool_pages - window_pages : 0U;
+            const std::uint32_t room_pages =
+                pool_pages > kMinimumWindowPages ? pool_pages - kMinimumWindowPages : 0U;
+            std::uint32_t reserve =
+                std::min(kvmem.gen_reserve_tokens, room_pages * kPageTokens);
+            reserve = std::min(reserve, spare_pages * kPageTokens);
+            kvmem_gen_reserve_ = reserve - reserve % kPageTokens;
             kvmem_repos_.resize(address_capacity);
             kvmem_block_pages_.resize(address_capacity);
             kvmem_block_hosts_.resize(address_capacity);
@@ -2177,8 +2200,19 @@ public:
             static_cast<std::uint64_t>(repo.block_count()) * kPagedKVPageSize;
         if (budget_tokens == 0 || ledger_tokens <= budget_tokens) { return 0; }
         for (std::uint32_t page = 0; page < address.page_count; ++page) {
-            if (pages_->address_references(membership(address, page)) != 1) {
-                        return 0;
+            const std::uint32_t references = pages_->address_references(membership(address, page));
+            if (references != 1) {
+                // A page this address shares with another view cannot move: its phases are
+                // baked for the other view's slots too. The caller is expected to have gated
+                // this out; the trace names the page that blocked the compaction.
+                if (std::getenv("NINFER_KVMEM_TRACE") != nullptr) {
+                    std::fprintf(stderr,
+                                 "KVMEM_TRACE compact_skip shared page=%u references=%u "
+                                 "budget=%u ledger=%llu\n",
+                                 page, references, budget_tokens,
+                                 static_cast<unsigned long long>(ledger_tokens));
+                }
+                return 0;
             }
         }
         DeviceKVPagePool& pool = pages_->physical_pool();
@@ -2202,10 +2236,11 @@ public:
                     "KVMem compaction budget must span at least four pages "
                     "(sink/recent/middle)");
             }
-            if (budget_tokens < 4096) {
+            if (budget_tokens < kAutoBandFloorTokens) {
                 // Explicit bands: the auto clamps (sink 1024..2048, recent
-                // 4096..16384) exceed a small budget. Keep one sink page, one
-                // recent page and let the quota fill the middle.
+                // 4096..16384) do not fit a budget below their floor, and the
+                // selection refuses to plan rather than shrink them. Keep one
+                // sink page, one recent page and let the quota fill the middle.
                 cfg.sink_tokens  = std::clamp(budget_blocks / 8, 1u, budget_blocks / 4) *
                                   kPagedKVPageSize;
                 cfg.recent_tokens =
@@ -2293,6 +2328,22 @@ public:
                               kvmem_host_arena_->writable_view(block_hosts[id]));
         }
 
+        // ---- 1b) give the evicted pages' device storage back BEFORE anything reserves ----
+        // The window's pages are all device-resident when compaction is called on a full pool, so
+        // a stage-in reservation taken first would find nothing free. The parked Host copy owns
+        // the block from here on, and a selected block never appears in stage_out.
+        for (const std::uint32_t id : plan.stage_out) {
+            const LogicalKVPageHandle logical = block_pages[id];
+            // The block leaves the address's window on this step, so its active reference goes
+            // with it; without that the page keeps a reference and its device storage is never
+            // returned to the pool.
+            if (pages_->active_address_references(logical) != 0) {
+                pages_->release_active_reference(logical);
+            }
+            pages_->release_reference(logical, false);
+            block_pages[id] = LogicalKVPageHandle{};
+        }
+
         // ---- 2) stage in: fresh pages for cold selected blocks ----
         if (!plan.stage_in.empty()) {
             std::optional<DeviceKVPageReservation> reservation =
@@ -2312,6 +2363,10 @@ public:
                     block_hosts[id].release();
                 }
                 pages_->commit_coverage(logical, kPagedKVPageSize);
+                // A restored page joins the window of a LIVE address the same way a grown page
+                // does, so it carries that address's active reference too: without it the next
+                // deactivate finds a window page with no active reference and refuses.
+                if (address.active) { pages_->retain_active_reference(logical); }
             }
         }
 
@@ -2353,20 +2408,7 @@ public:
             KVMEM_CUDA_CHECK(cudaFree(d_dst));
         }
 
-        // ---- 4) release the evicted pages' device storage ----
-        for (const std::uint32_t id : plan.stage_out) {
-            const LogicalKVPageHandle logical = block_pages[id];
-            // The block leaves the address's window on this step, so its active reference goes
-            // with it; without that the page keeps a reference and its device storage is never
-            // returned to the pool. The parked Host copy owns the block until it is staged back.
-            if (pages_->active_address_references(logical) != 0) {
-                pages_->release_active_reference(logical);
-            }
-            pages_->release_reference(logical, false);
-            block_pages[id] = LogicalKVPageHandle{};
-        }
-
-        // ---- 5) rewire the window and shrink the address ----
+        // ---- 4) rewire the window and shrink the address ----
         const std::uint32_t old_page_count = address.page_count;
         std::uint32_t slot = 0;
         for (const ninfer::kvmem::KvRemap& rm : plan.remaps) {
@@ -2383,7 +2425,7 @@ public:
         address.committed_frontier = kv_window;
         if (address.active) { publish_membership(address, stream); }
 
-        // ---- 6) ledger tiers ----
+        // ---- 5) ledger tiers ----
         // The tracker keeps its ledger order: evicted blocks stay registered as Host with their
         // parked bytes, so a later round can select one again and stage it back in. Only their
         // window placement goes stale, and a destructive truncate drops the ones that leave the
@@ -2416,6 +2458,30 @@ public:
     }
 
     [[nodiscard]] std::uint32_t kvmem_budget_tokens() const noexcept { return kvmem_budget_; }
+
+    // KVMem: the pool room generation may not consume, in tokens. Zero means a decode round has
+    // no dedicated headroom, so a window that reaches the pool simply stops there.
+    [[nodiscard]] std::uint32_t kvmem_gen_reserve_tokens() const noexcept {
+        return kvmem_gen_reserve_;
+    }
+
+    // KVMem: make room for the tokens a decode round keeps appending. The window is compacted
+    // back to `pool - generation headroom`, which parks the blocks that leave the working set in
+    // the host tier and hands their device pages back to the pool -- the same window compaction
+    // the prefill side runs, under the budget generation reserves for itself. Returns the new
+    // window token count, or 0 when nothing needed compacting (disabled, already inside the
+    // budget, or a page of the window is shared).
+    std::uint32_t kvmem_compact_generation(KVAddressSpaceHandle handle,
+                                           cudaStream_t stream = nullptr) {
+        if (!kvmem_enabled_ || kvmem_gen_reserve_ == 0) { return 0; }
+        const std::uint32_t pool_pages   = pages_->physical_pool().capacity_pages();
+        const std::uint32_t reserve_pages =
+            kvmem_gen_reserve_ / static_cast<std::uint32_t>(kPagedKVPageSize);
+        if (reserve_pages + kMinimumWindowPages > pool_pages) { return 0; }
+        const std::uint32_t budget_tokens =
+            (pool_pages - reserve_pages) * static_cast<std::uint32_t>(kPagedKVPageSize);
+        return kvmem_compact(handle, budget_tokens, stream, {}, false);
+    }
 
     // KVMem K1b: the lowest window slot a compacted address may be resumed from, in the slots of
     // the current window. Zero means the address was never compacted. A resume point below it
@@ -2457,6 +2523,9 @@ public:
 private:
     bool kvmem_enabled_ = false;
     std::uint32_t kvmem_budget_ = 0;  // NINFER_KVMEM_BUDGET tokens; 0 = unbounded
+    // Generation headroom in tokens (page-aligned, already clamped to the pool's spare room).
+    // Zero disables generation-time reclaim, which is the identity configuration.
+    std::uint32_t kvmem_gen_reserve_ = 0;
     std::vector<ninfer::kvmem::KvBlockRepository> kvmem_repos_;
     // Per address: block id -> logical page currently holding it (invalid while
     // the block is evicted), and the parked host slot while evicted.

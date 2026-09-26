@@ -781,6 +781,7 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--cache-type-v bf16\|int8\|fp8\|nvfp4\|int4` | value-side KV-cache storage | `bf16` |
 | `--kvmem` | keep the device KV pool a resident working set and back the rest of the context with host memory | off |
 | `--kvmem-budget N` | positive KVMem window in tokens; omitted keeps the whole context | whole context |
+| `--kvmem-gen-reserve N` | pool room kept free for decoding, in tokens; `0` disables generation-time reclaim | `8192` |
 | `--spec mtp\|dflash\|dflash2` | speculative backend | off |
 | `--draft-tokens N` | MTP `1..5`; DFlash/DFlash2 `1..15` | unset |
 | `--lm-head-draft` | optimized proposal head | off |
@@ -814,13 +815,32 @@ The paged-KV kernels are specialized per `(key, value)` pair, so `--cache-type-k
 stays at `bf16`, and any other pair aborts startup with the supported list. `--kv-dtype` sets both
 sides at once and cannot be combined with the per-side flags.
 
-`--kvmem` and `--kvmem-budget` mirror the `NINFER_KVMEM` and `NINFER_KVMEM_BUDGET` environment
-variables, which remain the spelling for front ends that do not expose the flags. KVMem currently
-requires `--kv-dtype int8`, and `--kvmem-budget` requires the mechanism to be enabled. When both
-KVMem and `--kv-device-tokens` are given, the window must not exceed the device pool: keep
-`--kvmem-budget` at or below `--kv-device-tokens`, leaving room for one prefill. A window of zero
-means the whole context, which a device pool below the context always exceeds, so pass
-`--kvmem-budget` explicitly.
+`--kvmem`, `--kvmem-budget` and `--kvmem-gen-reserve` mirror the `NINFER_KVMEM`,
+`NINFER_KVMEM_BUDGET` and `NINFER_KVMEM_GEN_RESERVE` environment variables, which remain the
+spelling for front ends that do not expose the flags. KVMem currently requires `--kv-dtype int8`,
+and the two sizing flags require the mechanism to be enabled. When both KVMem and
+`--kv-device-tokens` are given, the window must not exceed the device pool: keep `--kvmem-budget`
+at or below `--kv-device-tokens`, leaving room for one prefill. A window of zero means the whole
+context, which a device pool below the context always exceeds, so pass `--kvmem-budget` explicitly.
+
+`--kvmem` sizes its own pool when neither `--kv-capacity` nor `--kv-device-tokens` is given: the
+automatic resolution is pinned to the working set the runtime asks for -- one window per lane,
+plus one prefill chunk and the generation headroom -- instead of to the largest capacity that
+fits. Filling the leftover device memory with resident KV would only take room from concurrency
+and prefill. An explicit `--kv-device-tokens` still wins; `--kv-capacity auto` keeps its 1 GiB
+sizing margin only outside KVMem (under KVMem it keeps a quarter gibibyte, because the pool is
+already sized by demand).
+
+`--kvmem-gen-reserve` is the pool room decoding needs. Once the resident window would run past
+the pool, the window-external blocks are parked in the host tier and the window is refolded so
+that much room is free again -- generation then continues until it fills the headroom again, so
+the knob trades the amplitude of a reclaim for how often one runs. A reserve the pool cannot
+afford is clamped to the room it actually has, and a pool that only spans the window reserves
+nothing (no reclaim runs; a generation longer than the window fails with an error naming the
+pool). Two limits come with it: a reclaim moves KV, so it is skipped while a shared KV page, a
+published endpoint or a speculative batch pins the sequence's geometry, and a lineage whose KV
+was reclaimed mid-generation may no longer serve a compatible-prefix resume -- the next turn
+then re-prefills instead of hitting the cache.
 
 Context-cost coefficients resolve once at startup from generic defaults, matching compiled values,
 and optional transfer or artifact-prefill entries from `--context-cost-presets FILE`. A malformed

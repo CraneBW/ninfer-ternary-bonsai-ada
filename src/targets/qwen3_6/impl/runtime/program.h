@@ -1097,6 +1097,18 @@ private:
     // `ledger index + kv_offset`. The ledger, identity, digests and the endpoint stay in prompt
     // space, so the endpoint remains the continuation's resume point.
     void kvmem_apply_window(SequenceState& sequence, std::uint32_t window);
+    // KVMem: make room for the token a decode round is about to append. Once the resident window
+    // has grown into the generation headroom the pool keeps free, the window-external blocks are
+    // parked in the host tier and the window is refolded, so a long generation keeps decoding
+    // instead of running the pool dry. Returns the new window, or 0 when nothing had to move
+    // (no headroom configured, still room left, or the sequence's KV geometry is fixed).
+    std::uint32_t kvmem_reclaim_generation(SequenceState& sequence);
+    // KVMem: refuse a KV mapping the device pool cannot hold on a path that cannot reclaim. A
+    // speculative batch maps its draft window ahead of the batch and pins the KV geometry while
+    // that batch runs, so the failure has to name the pool instead of surfacing as a deep
+    // reservation error.
+    void require_kvmem_generation_fit(const SequenceState& sequence,
+                                      std::uint32_t main_tokens) const;
     [[nodiscard]] qwen3_6::SharedPrefixSummary
     shared_prefix_summary(const SharedPrefixState& shared) const;
     [[nodiscard]] std::optional<MaterializationSourceProtection>

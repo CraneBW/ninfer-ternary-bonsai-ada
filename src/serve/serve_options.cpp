@@ -86,7 +86,8 @@ std::string serve_usage_text(const char* argv0) {
            "[--kv-dtype bf16|int8|fp8|nvfp4|k8v4|rk4v4|rk4v4-e8 | "
            "--cache-type-k <bf16|int8|fp8|nvfp4|int4|int4-e8> "
            "--cache-type-v <bf16|int8|fp8|nvfp4|int4>] "
-           "[--kvmem [--kvmem-budget N]] [--spec mtp|dflash|dflash2 --draft-tokens N] "
+           "[--kvmem [--kvmem-budget N] [--kvmem-gen-reserve N]] "
+           "[--spec mtp|dflash|dflash2 --draft-tokens N] "
            "[--default-max-tokens N] [--default-thinking-budget N] "
            "[--vision] [--vision-max-tokens N] [--no-cuda-graph] [--no-prefix-reuse] "
            "[--lm-head-draft] [--no-thinking] [--preserve-thinking] "
@@ -111,7 +112,9 @@ std::string serve_usage_text(const char* argv0) {
            "       --vision-max-tokens sets the Vision scratchpad token capacity (default 8192)\n"
            "       --kv-capacity auto leaves " +
            std::to_string(kDefaultKvCapacityHeadroomBytes / (1024ULL * 1024ULL)) +
-           " MiB of sizing headroom\n"
+           " MiB of sizing headroom (" +
+           std::to_string(kKvMemAutomaticHeadroomBytes / (1024ULL * 1024ULL)) +
+           " MiB under --kvmem, whose pool is sized by the working set it needs)\n"
            "       --kv-device-tokens caps the KV page pool below --max-context; the rest of the "
            "context is backed by host memory, so it needs the host KV tier\n"
            "       --cache-type-k/--cache-type-v choose each side of the KV cache; an omitted "
@@ -119,7 +122,13 @@ std::string serve_usage_text(const char* argv0) {
            "supported list)\n"
            "       --kvmem keeps the device KV pool a resident working set and backs the rest of "
            "the context with host memory; --kvmem-budget narrows the working set in tokens "
-           "(0 or omitted keeps the whole context)\n"
+           "(0 or omitted keeps the whole context). Without --kv-capacity or --kv-device-tokens "
+           "the pool is sized automatically from the working set it needs\n"
+           "       --kvmem-gen-reserve keeps that many tokens of the pool free for decoding "
+           "(default " +
+           std::to_string(kDefaultKvMemGenReserveTokens) +
+           "; 0 disables generation-time reclaim). Too small a reserve evicts freshly retrieved "
+           "content mid-generation; a pool that cannot afford it clamps it down\n"
            "       --no-prefix-reuse disables compatible-prefix caching (enabled by default)\n"
            "       context cache defaults: device-state=max-concurrency, private=2x concurrency, "
            "shared=max(max-concurrency,4), anchors=2; Host state=8 slots, Host KV=8192 MiB\n"
@@ -159,6 +168,8 @@ ServeOptions parse_serve_options(int argc, char** argv) {
     bool kvmem_switch                = false;
     bool kvmem_budget_given          = false;
     std::uint32_t kvmem_budget       = 0;
+    bool kvmem_gen_reserve_given     = false;
+    std::uint32_t kvmem_gen_reserve  = 0;
     std::optional<KvKeyStorage> kv_key_storage;
     std::optional<KvValueStorage> kv_value_storage;
     if (argc >= 2 && (std::string(argv[1]) == "--help" || std::string(argv[1]) == "-h")) {
@@ -325,6 +336,11 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             if (value == 0) { throw std::invalid_argument("--kvmem-budget must be positive"); }
             kvmem_budget       = static_cast<std::uint32_t>(value);
             kvmem_budget_given = true;
+        } else if (arg == "--kvmem-gen-reserve") {
+            const int value = parse_nonnegative_int(require_value("--kvmem-gen-reserve"),
+                                                    "kvmem-gen-reserve");
+            kvmem_gen_reserve       = static_cast<std::uint32_t>(value);
+            kvmem_gen_reserve_given = true;
         } else if (arg == "--spec") {
             options.speculative.backend =
                 product::parse_speculative_backend(require_value("--spec"));
@@ -400,8 +416,21 @@ ServeOptions parse_serve_options(int argc, char** argv) {
     if (kv_capacity_explicit && kv_device_tokens_explicit) {
         throw std::invalid_argument("--kv-capacity and --kv-device-tokens cannot be combined");
     }
+    options.kvmem = resolve_kvmem_options(kvmem_switch, kvmem_budget_given, kvmem_budget,
+                                          kvmem_gen_reserve_given, kvmem_gen_reserve);
+    if ((kvmem_budget_given || kvmem_gen_reserve_given) && !options.kvmem.enabled) {
+        throw std::invalid_argument(
+            "--kvmem-budget and --kvmem-gen-reserve size the KVMem window, so they need --kvmem "
+            "(or NINFER_KVMEM=1) to be enabled");
+    }
     if (!kv_capacity_explicit && !kv_device_tokens_explicit) {
-        options.kv_capacity = KvCapacityPolicy::explicit_capacity(options.max_context);
+        // KVMem keeps the device pool a resident working set, so a front end that enabled it
+        // without choosing a pool gets an automatic one, bounded by the working set the runtime
+        // needs instead of by whatever device memory happens to be left. Without the host KV
+        // tier the context has no backing, so the pool keeps covering it.
+        options.kv_capacity = options.kvmem.enabled && options.allow_prefix_reuse
+                                  ? KvCapacityPolicy::automatic(kKvMemAutomaticHeadroomBytes)
+                                  : KvCapacityPolicy::explicit_capacity(options.max_context);
     }
     if (kv_dtype_explicit && (kv_key_storage || kv_value_storage)) {
         throw std::invalid_argument(
@@ -421,12 +450,6 @@ ServeOptions parse_serve_options(int argc, char** argv) {
                 std::string(kSupportedKvCachePairList));
         }
         options.kv_cache = *resolved;
-    }
-    options.kvmem = resolve_kvmem_options(kvmem_switch, kvmem_budget_given, kvmem_budget);
-    if (kvmem_budget_given && !options.kvmem.enabled) {
-        throw std::invalid_argument(
-            "--kvmem-budget narrows the KVMem window, so it needs --kvmem (or NINFER_KVMEM=1) "
-            "to be enabled");
     }
     if (!options.allow_prefix_reuse) {
         if (context_capacity_explicit) {

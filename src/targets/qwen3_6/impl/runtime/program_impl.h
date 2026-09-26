@@ -20,6 +20,8 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <exception>
 #include <iterator>
 #include <limits>
@@ -7403,6 +7405,87 @@ void ProgramImplCore::kvmem_apply_window(SequenceState& sequence, std::uint32_t 
     sequence.dflash_context_frontier = std::min(sequence.dflash_context_frontier, window);
 }
 
+std::uint32_t ProgramImplCore::kvmem_reclaim_generation(SequenceState& sequence) {
+    if (!sequence.kv || !text_kv_addresses->kvmem_enabled()) { return 0; }
+    const std::uint32_t reserve_tokens = text_kv_addresses->kvmem_gen_reserve_tokens();
+    // Only when the append itself would run past the pool: the compaction below keeps
+    // `pool - generation headroom` resident, so it hands back the whole headroom at once and the
+    // window then grows for that many tokens before the next reclaim. Reclaiming earlier would
+    // move the window for no room the append actually needed.
+    const std::uint32_t pool_pages = text_kv_pages->physical_pool().capacity_pages();
+    const std::uint32_t next_pages =
+        kv_pages_for_frontier(sequence.execution_frontier + 1U);
+    if (reserve_tokens == 0 || next_pages <= pool_pages) { return 0; }
+    // A speculative batch, a published endpoint and a shared prefix pin this lineage's KV
+    // geometry: their views name the pages by slot, so a reclaim would move KV those views
+    // already read. NOTE the deliberate exclusion of `rewrite_checkpoint`: a prefix-cache
+    // checkpoint also carries a KV requirement, but that requirement is written at completion
+    // (`set_checkpoint_requirement` in the finish path, after the round-boundary compaction),
+    // so nothing has named this geometry yet while the request is still decoding. A later
+    // reuse of the compacted lineage is handled by the plan's own geometry: it resumes at
+    // `reuse_base + source.kv_offset` and refuses a resume below `kv_reuse_floor`, so a window
+    // that lost its middle costs a cache miss rather than a wrong read. Gating on it here would
+    // block every reclaim for a prefix-caching request, i.e. all of them.
+    const bool pinned = speculative_backend != SpeculativeBackend::None ||
+                        sequence.endpoint_valid ||
+                        !sequence.shared_prefix_references.empty();
+    if (pinned) {
+        if (std::getenv("NINFER_KVMEM_TRACE") != nullptr) {
+            std::fprintf(stderr,
+                         "KVMEM_TRACE gen_reclaim pinned frontier=%u next=%u pool=%u spec=%d "
+                         "endpoint=%d shared=%zu\n",
+                         sequence.execution_frontier, next_pages, pool_pages,
+                         speculative_backend != SpeculativeBackend::None ? 1 : 0,
+                         sequence.endpoint_valid ? 1 : 0, sequence.shared_prefix_references.size());
+        }
+        return 0;
+    }
+    // The packed window drops the evicted pages from the address, so the growth entitlement has
+    // to be re-established from the logical bound the address still names -- without it the
+    // reclaimed pages come back with no reservation behind them and the next append fails.
+    const std::uint32_t logical = text_kv_addresses->mapping_limit(sequence.kv->text);
+    const std::uint32_t window =
+        text_kv_addresses->kvmem_compact_generation(sequence.kv->text, device.stream);
+    if (std::getenv("NINFER_KVMEM_TRACE") != nullptr) {
+        std::fprintf(stderr,
+                     "KVMEM_TRACE gen_reclaim frontier=%u next=%u pool=%u reserve=%u logical=%u "
+                     "window=%u\n",
+                     sequence.execution_frontier, next_pages, pool_pages, reserve_tokens, logical,
+                     window);
+    }
+    if (window == 0) {
+        if (std::getenv("NINFER_KVMEM_TRACE") != nullptr) {
+            std::fprintf(stderr,
+                         "KVMEM_TRACE gen_reclaim blocked frontier=%u next=%u pool=%u reserve=%u "
+                         "logical=%u\n",
+                         sequence.execution_frontier, next_pages, pool_pages, reserve_tokens,
+                         logical);
+        }
+        // The window is at the pool and nothing could be reclaimed: the append is about to fail
+        // deep inside the page pool. Name the pool and the knob that fixes it instead.
+        throw std::runtime_error(
+            "KVMem cannot make room for the next generated token: the KV window already spans "
+            "the device pool and cannot be reclaimed (a shared KV page, a published endpoint or "
+            "a speculative batch pins its geometry); raise --kv-device-tokens, lower "
+            "--kvmem-budget or shorten the generation");
+    }
+    text_kv_addresses->resize_entitlement(sequence.kv->text, logical);
+    if (window < sequence.text_kv_valid) { kvmem_apply_window(sequence, window); }
+    return window;
+}
+
+void ProgramImplCore::require_kvmem_generation_fit(const SequenceState& sequence,
+                                                   std::uint32_t main_tokens) const {
+    if (!sequence.kv || !text_kv_addresses->kvmem_enabled()) { return; }
+    if (kv_pages_for_frontier(main_tokens) <= text_kv_pages->physical_pool().capacity_pages()) {
+        return;
+    }
+    throw std::runtime_error(
+        "KVMem cannot map this sequence's KV into the device pool: a speculative batch maps its "
+        "draft window ahead of the batch and cannot reclaim while it is being prepared; raise "
+        "--kv-device-tokens or lower --kvmem-budget");
+}
+
 qwen3_6::SharedPrefixSummary
 ProgramImplCore::shared_prefix_summary(const SharedPrefixState& shared) const {
     if (!shared.kv || !shared.identity || shared.frontier == 0 ||
@@ -12039,6 +12122,19 @@ ProgramImplCore::decode_ordinary_batch(std::span<const std::uint32_t> lanes,
 
     const auto start = Clock::now();
     try {
+        // KVMem: a single long generation can outgrow the device pool. Reclaim the
+        // window-external blocks before the batch maps the next frontier, then re-derive the
+        // envelope from the frontier the rows carry now -- a reclaim moves the rows' KV slots,
+        // so a frontier read before it would size the attention envelope for storage that has
+        // already been parked on the host.
+        for (const std::uint32_t lane : lanes) {
+            (void)kvmem_reclaim_generation(active_sequence(lane));
+        }
+        maximum_frontier = 0;
+        for (const std::uint32_t lane : lanes) {
+            maximum_frontier =
+                std::max(maximum_frontier, active_sequence(lane).execution_frontier);
+        }
         std::optional<nvtx::ScopedRange> submit_range;
         submit_range.emplace(nvtx::Name::DecodeOrdinarySubmit, nvtx::Category::Decode,
                              static_cast<std::uint64_t>(lanes.size()));
@@ -12226,6 +12322,7 @@ ProgramImplCore::decode_mtp_batch(std::span<const std::uint32_t> lanes,
             mtp_host_ingress->state_destination_slots[row] = selectors.destination;
             mtp_host_ingress->rope_deltas[row]             = sequence.rope_delta;
             mtp_host_ingress->sampling[row]                = request.sampling_host;
+            require_kvmem_generation_fit(sequence, frontier + extent + 1);
             ensure_sequence_kv_mapped(sequence, frontier + extent + 1,
                                       std::min(capacity, frontier + extent + draft_window));
         }
@@ -12420,6 +12517,7 @@ ProgramImplCore::decode_dflash_batch(std::span<const std::uint32_t> lanes,
             dflash_host_ingress->state_source_slots[row] = selectors.source;
             dflash_host_ingress->state_destination_slots[row] = selectors.destination;
             dflash_host_ingress->sampling[row]                = request.sampling_host;
+            require_kvmem_generation_fit(sequence, frontier + extent + 1U);
             ensure_sequence_kv_mapped(sequence, frontier + extent + 1U,
                                       backend_kv_cache() ? frontier : 0U);
         }

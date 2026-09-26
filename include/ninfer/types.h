@@ -158,6 +158,14 @@ enum class KvCapacityMode : std::uint8_t {
 
 inline constexpr std::size_t kDefaultKvCapacityHeadroomBytes = 1024ULL * 1024ULL * 1024ULL;
 
+// Headroom the automatic capacity resolution leaves free when it is sizing a KVMem working set.
+// The default is a sizing margin: it keeps the resolver from filling memory it may still need,
+// which is what a pool that has to cover the whole context wants. A KVMem pool is instead
+// pinned to the working set the runtime asks for, so the margin would only refuse to start on
+// a device that fits the working set comfortably -- a quarter gibibyte is enough for the
+// driver and the desktop.
+inline constexpr std::size_t kKvMemAutomaticHeadroomBytes = 256ULL * 1024ULL * 1024ULL;
+
 struct KvCapacityPolicy {
     KvCapacityMode mode                  = KvCapacityMode::Explicit;
     std::uint32_t explicit_tokens        = 2048;
@@ -269,18 +277,37 @@ struct ContextCostOptions {
 // KvCapacityMode::DeviceBudget. `budget_tokens` is the selection window: how much history
 // stays in the resident working set. 0 keeps the whole context in the window, which is the
 // identity configuration the mechanism falls back to when nothing narrower is asked for.
-// Leaving this struct default lets Engine resolve it from NINFER_KVMEM / NINFER_KVMEM_BUDGET.
+// `gen_reserve_tokens` is the generation headroom: the pool keeps that much room free so a
+// decode round keeps appending without having to move the window on every token. Leaving this
+// struct default lets Engine resolve it from NINFER_KVMEM / NINFER_KVMEM_BUDGET /
+// NINFER_KVMEM_GEN_RESERVE.
 struct KvMemOptions {
     bool enabled           = false;
     std::uint32_t budget_tokens = 0;
+    std::uint32_t gen_reserve_tokens = 0;
 };
 
-// Resolve the KVMem switch and window from the front end's flags, falling back to the
-// environment spellings for front ends that do not expose them (and for processes that
-// already set them). The flag wins over the environment; both spellings of the budget are
-// read as tokens, and a non-positive or malformed value leaves the window at 0.
+// KVMem's production default for the generation headroom (laamaafung's default is the same
+// number). A pool that cannot afford it clamps it down rather than failing.
+inline constexpr std::uint32_t kDefaultKvMemGenReserveTokens = 8192;
+
+// Resolve the KVMem switch, window and generation headroom from the front end's flags, falling
+// back to the environment spellings for front ends that do not expose them (and for processes
+// that already set them). The flag wins over the environment; the budget and the reserve are
+// both read as tokens, and a non-positive or malformed value leaves the value at its default.
 [[nodiscard]] inline KvMemOptions resolve_kvmem_options(bool switch_given, bool budget_given,
-                                                        std::uint32_t budget_tokens) noexcept {
+                                                        std::uint32_t budget_tokens,
+                                                        bool reserve_given = false,
+                                                        std::uint32_t reserve_tokens = 0) noexcept {
+    const auto from_env = [](const char* name) -> std::uint32_t {
+        const char* env = std::getenv(name);
+        if (env == nullptr || *env == '\0') { return 0; }
+        const long long parsed = std::strtoll(env, nullptr, 10);
+        if (parsed <= 0) { return 0; }
+        constexpr long long kMaximumTokens =
+            static_cast<long long>(std::numeric_limits<std::uint32_t>::max());
+        return static_cast<std::uint32_t>(parsed > kMaximumTokens ? kMaximumTokens : parsed);
+    };
     KvMemOptions out;
     out.enabled = switch_given;
     if (!out.enabled) {
@@ -290,16 +317,15 @@ struct KvMemOptions {
     if (budget_given) {
         out.budget_tokens = budget_tokens;
     } else if (out.enabled) {
-        const char* env = std::getenv("NINFER_KVMEM_BUDGET");
-        if (env != nullptr && *env != '\0') {
-            const long long parsed = std::strtoll(env, nullptr, 10);
-            if (parsed > 0) {
-                constexpr long long kMaximumTokens =
-                    static_cast<long long>(std::numeric_limits<std::uint32_t>::max());
-                out.budget_tokens = static_cast<std::uint32_t>(
-                    parsed > kMaximumTokens ? kMaximumTokens : parsed);
-            }
-        }
+        out.budget_tokens = from_env("NINFER_KVMEM_BUDGET");
+    }
+    if (!out.enabled) {
+        out.gen_reserve_tokens = 0;
+    } else if (reserve_given) {
+        out.gen_reserve_tokens = reserve_tokens;
+    } else {
+        out.gen_reserve_tokens = from_env("NINFER_KVMEM_GEN_RESERVE");
+        if (out.gen_reserve_tokens == 0) { out.gen_reserve_tokens = kDefaultKvMemGenReserveTokens; }
     }
     return out;
 }

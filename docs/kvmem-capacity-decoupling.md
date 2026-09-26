@@ -128,11 +128,12 @@ sink/recent/检索命中块。
 **风险**：中高——这一步改变**注意力可见性语义**：中段会在同一轮内就不可见，而不只是跨轮。
 这是质量权衡，需要用户确认可接受。
 
-### 第四步：（暂缓）生成期回收
+### 第四步：生成期回收（已落地）
 
-只有当第一至第三步落地后，实测出现「单请求生成长过预留 → 失败」时再做。
-届时可参考 laamaafung 的 `reclaim_generation_slot`（`llama-memory-kvmem.cpp:1006-1051`
-与调用点 `:1671-1685`）的约束形式。
+触发条件不再"等实测"：单请求的输出一旦跑出池，就在追加前按窗口换出，换出预算 = `池 − 生成头寸`
+（新增 `--kvmem-gen-reserve`，默认 8192，受池余量钳制）。落点见
+`program_impl.h::kvmem_reclaim_generation` / `logical_kv_store.h::kvmem_compact_generation`，
+实测与取舍见 `HANDOVER-kvmem.md` 第十节（含与第 4.3 节早退闸的有意偏离）。
 
 ## 5. 顺序与回退
 

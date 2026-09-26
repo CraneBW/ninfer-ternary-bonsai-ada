@@ -647,6 +647,32 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
     return out;
 }
 
+// Device pages a KVMem working set actually needs. The mechanism keeps the pool a resident
+// working set instead of an image of the whole address space, so the pool is sized by what the
+// runtime asks of it: every lane holds its window, plus room for the prefill piece it maps next
+// and the headroom it decodes into. Resident KV beyond that only takes room away from
+// concurrency and prefill, which is why an automatic KVMem pool is bounded by this figure and
+// not by the device memory that happens to be free.
+[[nodiscard]] std::uint32_t kvmem_resident_pages(const KvMemOptions& kvmem, std::uint32_t capacity,
+                                                 std::uint32_t prefill_chunk,
+                                                 std::uint32_t max_concurrency,
+                                                 std::uint32_t maximum_pages) {
+    const std::uint64_t window =
+        kvmem.budget_tokens == 0
+            ? static_cast<std::uint64_t>(capacity)
+            : std::min<std::uint64_t>(kvmem.budget_tokens, capacity);
+    const std::uint64_t per_lane =
+        std::min<std::uint64_t>(window + prefill_chunk, capacity);
+    const std::uint64_t demand =
+        per_lane * max_concurrency + kvmem.gen_reserve_tokens;
+    const std::uint64_t tokens = std::min<std::uint64_t>(demand, capacity);
+    const std::uint64_t pages =
+        page_count(static_cast<std::uint32_t>(std::max<std::uint64_t>(tokens, 1)));
+    return std::max<std::uint32_t>(
+        static_cast<std::uint32_t>(std::min<std::uint64_t>(pages, maximum_pages)),
+        max_concurrency);
+}
+
 void validate_target_options(DeviceContext& device, const EngineOptions& options) {
     // Los modos packed int4 (rk4v4, rk4v4-e8) solo existen en el kernel i8 del build sm_89;
     // en otra arquitectura el arranque falla antes de reservar memoria.
@@ -667,7 +693,11 @@ void validate_target_options(DeviceContext& device, const EngineOptions& options
     // The KVMem window is the resident working set, so it cannot exceed the device page
     // pool: a request would have to keep more pages on the device than the pool holds. A
     // window of zero means the whole context, which a device budget below the context always
-    // violates -- ask for an explicit window in that case.
+    // violates -- ask for an explicit window in that case. The generation headroom is not part
+    // of this check: a pool that cannot afford it clamps it down instead of refusing to start.
+    if (options.kvmem.enabled && options.kvmem.budget_tokens > options.max_context) {
+        throw std::invalid_argument("--kvmem-budget cannot exceed --max-context");
+    }
     if (options.kvmem.enabled && options.kv_capacity.mode == KvCapacityMode::DeviceBudget) {
         const std::uint32_t window =
             options.kvmem.budget_tokens == 0 ? options.max_context : options.kvmem.budget_tokens;
@@ -689,25 +719,37 @@ void validate_target_options(DeviceContext& device, const EngineOptions& options
         throw std::invalid_argument("max_concurrency must be in [1,8]");
     }
     const std::uint32_t logical_pages = page_count(options.max_context);
-    // A device budget may sit below the context: the pool then only backs the
-    // resident working set, and host memory carries the rest of the address
-    // space. Every other policy keeps the pool covering the whole context.
-    const bool budgeted_pool = options.kv_capacity.mode == KvCapacityMode::DeviceBudget;
-    const std::uint32_t minimum_pages =
-        budgeted_pool ? options.max_concurrency
-                      : std::max(logical_pages, options.max_concurrency);
     const std::uint64_t maximum_pages64 =
         static_cast<std::uint64_t>(options.max_concurrency) * logical_pages;
     if (maximum_pages64 > std::numeric_limits<std::uint32_t>::max()) {
         throw std::overflow_error("maximum Main KV page count exceeds uint32");
     }
+    const std::uint32_t maximum_pages = static_cast<std::uint32_t>(maximum_pages64);
+    // An automatic pool under KVMem is pinned to the working set the runtime asks for, so the
+    // resolver either fits that figure or refuses the start-up with its byte requirement --
+    // instead of quietly resolving a pool the window cannot live in.
+    const bool kvmem_automatic =
+        options.kvmem.enabled && options.kv_capacity.mode == KvCapacityMode::Automatic;
+    const std::uint32_t kvmem_pages =
+        kvmem_automatic ? kvmem_resident_pages(options.kvmem, options.max_context,
+                                               options.prefill_chunk, options.max_concurrency,
+                                               maximum_pages)
+                        : 0U;
+    // A device budget may sit below the context: the pool then only backs the
+    // resident working set, and host memory carries the rest of the address
+    // space. Every other policy keeps the pool covering the whole context.
+    const bool budgeted_pool = options.kv_capacity.mode == KvCapacityMode::DeviceBudget;
+    const std::uint32_t minimum_pages =
+        kvmem_automatic ? kvmem_pages
+                        : (budgeted_pool ? options.max_concurrency
+                                         : std::max(logical_pages, options.max_concurrency));
     switch (options.kv_capacity.mode) {
     case KvCapacityMode::Explicit: {
         if (options.kv_capacity.explicit_tokens < options.max_context) {
             throw std::invalid_argument("kv_capacity must be at least max_context");
         }
         const std::uint32_t requested_pages = page_count(options.kv_capacity.explicit_tokens);
-        if (requested_pages < minimum_pages || requested_pages > maximum_pages64) {
+        if (requested_pages < minimum_pages || requested_pages > maximum_pages) {
             throw std::invalid_argument(
                 "kv_capacity is outside the usable range for max_context and max_concurrency");
         }
@@ -715,7 +757,7 @@ void validate_target_options(DeviceContext& device, const EngineOptions& options
     }
     case KvCapacityMode::DeviceBudget: {
         const std::uint32_t requested_pages = page_count(options.kv_capacity.explicit_tokens);
-        if (requested_pages < minimum_pages || requested_pages > maximum_pages64) {
+        if (requested_pages < minimum_pages || requested_pages > maximum_pages) {
             throw std::invalid_argument(
                 "the KV device budget is outside the usable range for max_context and "
                 "max_concurrency");
@@ -856,23 +898,34 @@ make_sequence_planner_impl(DeviceContext& device, const EngineOptions& options,
         .use_cuda_graph      = options.use_cuda_graph,
         .causal_scoring      = options.purpose == EnginePurpose::CausalScoring,
         .device              = options.device,
-        .host_backed_kv      = options.kv_capacity.mode == KvCapacityMode::DeviceBudget,
+        .host_backed_kv      = options.kv_capacity.mode == KvCapacityMode::DeviceBudget ||
+                               (options.kvmem.enabled &&
+                                options.kv_capacity.mode == KvCapacityMode::Automatic),
         .kvmem               = options.kvmem,
         .context_cache       = options.context_cache,
     };
     const std::uint32_t logical_pages = page_count(inputs.capacity);
-    // Mirrors validate_target_options: a device budget lets the pool sit below
-    // the context, so the floor is only the per-lane minimum.
-    const std::uint32_t minimum_pages =
-        options.kv_capacity.mode == KvCapacityMode::DeviceBudget
-            ? inputs.max_concurrency
-            : std::max(logical_pages, inputs.max_concurrency);
     const std::uint64_t maximum_pages64 =
         static_cast<std::uint64_t>(inputs.max_concurrency) * logical_pages;
     if (maximum_pages64 > std::numeric_limits<std::uint32_t>::max()) {
         throw std::overflow_error("maximum Main KV page count exceeds uint32");
     }
     const auto maximum_pages = static_cast<std::uint32_t>(maximum_pages64);
+    // Mirrors validate_target_options: a device budget lets the pool sit below the context, and
+    // an automatic pool under KVMem is pinned to the working set the runtime asks for -- so both
+    // use the per-lane floor instead of the whole logical address space.
+    const bool kvmem_automatic =
+        inputs.kvmem.enabled && options.kv_capacity.mode == KvCapacityMode::Automatic;
+    const std::uint32_t kvmem_pages =
+        kvmem_automatic ? kvmem_resident_pages(inputs.kvmem, inputs.capacity, inputs.prefill_chunk,
+                                               inputs.max_concurrency, maximum_pages)
+                        : 0U;
+    const std::uint32_t minimum_pages =
+        kvmem_automatic ? kvmem_pages
+                        : (options.kv_capacity.mode == KvCapacityMode::DeviceBudget
+                               ? inputs.max_concurrency
+                               : std::max(logical_pages, inputs.max_concurrency));
+    const std::uint32_t curve_maximum_pages = kvmem_automatic ? kvmem_pages : maximum_pages;
 
     auto planner     = std::make_unique<qwen3_6::detail::SequencePlannerImpl<Variant>>();
     planner->inputs  = inputs;
@@ -880,11 +933,11 @@ make_sequence_planner_impl(DeviceContext& device, const EngineOptions& options,
     planner->curve   = runtime::SequenceCapacityCurve{
           .main_page_tokens                     = static_cast<std::uint32_t>(kPagedKVPageSize),
           .minimum_main_page_groups             = minimum_pages,
-          .maximum_main_page_groups             = maximum_pages,
+          .maximum_main_page_groups             = curve_maximum_pages,
           .minimum_device_reservation_bytes     = planner->minimum->device_reservation_bytes,
           .bytes_per_additional_main_page_group = 0,
     };
-    if (minimum_pages < maximum_pages) {
+    if (minimum_pages < curve_maximum_pages) {
         auto adjacent = build_sequence_candidate(inputs, minimum_pages + 1U);
         if (adjacent->device_reservation_bytes <= planner->minimum->device_reservation_bytes) {
             throw std::logic_error("Qwen3.6 sequence layout has a nonpositive KV capacity stride");
