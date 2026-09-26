@@ -660,14 +660,42 @@ int launch_pq2_mma_s8_tile(const Weight& w, Tensor& out, std::int32_t out_row_st
     return slices;
 }
 
+// One block per token. The absmax over the whole K row is reduced first, so the scale is already
+// known when the codes are written (that is why this is two passes and not one atomic pass).
+static void launch_s8_quantize(const Tensor& x, TernaryS8Scratch& scratch, std::int32_t k,
+                               std::int32_t tokens, cudaStream_t stream) {
+    ternary_s8_quantize_kernel<<<tokens, 256, 0, stream>>>(
+        static_cast<const __nv_bfloat16*>(x.data), scratch.codes, scratch.scales, k);
+    CUDA_CHECK(cudaGetLastError());
+    scratch.quantized_x      = x.data;
+    scratch.quantized_k      = k;
+    scratch.quantized_tokens = tokens;
+}
+
+void quantize_ternary_s8_activation(const Tensor& x, TernaryS8Scratch& scratch,
+                                    cudaStream_t stream) {
+    if (scratch.codes == nullptr || scratch.scales == nullptr) { return; }
+    if (x.ne[0] <= 0 || x.ne[1] <= 0) { return; }
+    launch_s8_quantize(x, scratch, x.ne[0], x.ne[1], stream);
+}
+
 void launch_pq2_mma_s8(const Tensor& x, const Weight& w, Tensor& out,
                        std::int32_t out_row_stride, std::int32_t tokens, TernaryS8Scratch scratch,
                        cudaStream_t stream) {
-    // One block per token. The absmax over the whole K row is reduced first, so the scale is already
-    // known when the codes are written (that is why this is two passes and not one atomic pass).
-    ternary_s8_quantize_kernel<<<tokens, 256, 0, stream>>>(
-        static_cast<const __nv_bfloat16*>(x.data), scratch.codes, scratch.scales, w.k);
-    CUDA_CHECK(cudaGetLastError());
+    // SKIPPED WHEN THE SCRATCH ALREADY HOLDS THIS SHAPE. The fused parents feed one folded
+    // activation to several projections (four in attn_input_proj, three in gdn_input_proj), and
+    // without this each of them redid the absmax pass and the code pass over the same k x T bytes.
+    // Measured: 144 of the 400 quantize launches in one prefill were redundant, 36% of a kernel
+    // that is itself 2.2% of prefill.
+    //
+    // Keyed on the SHAPE, not on a bare "already done" flag: a scratch that is handed to a weight
+    // with a different k or a different token count still quantizes, so a caller that reuses a
+    // scratch across two different activations gets correct codes rather than stale ones. The
+    // quantization itself is unchanged, so this is bit-identical to the redundant version.
+    if (scratch.quantized_x != x.data || scratch.quantized_k != w.k ||
+        scratch.quantized_tokens != tokens) {
+        launch_s8_quantize(x, scratch, w.k, tokens, stream);
+    }
 
     // 4 warps at every tile: the instantiation the reference port measured as the winner of this
     // shape. Even at 64 columns its shared footprint is 25856 B, well under this card's 48 KiB

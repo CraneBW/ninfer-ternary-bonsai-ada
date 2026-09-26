@@ -110,6 +110,19 @@ struct TernaryS8Scratch {
     // make the result depend on scheduling order and take the numeric gate with it.
     float*       partial        = nullptr;
     std::int32_t partial_floats = 0;   // its capacity, so the launcher can bound the slice count
+    // WHAT `codes` CURRENTLY HOLDS, or null for "nothing quantized yet". Several projections read
+    // ONE folded activation -- the fused attention parent runs four (q/gate/k/v) and the GDN parent
+    // three (qk/value/z) -- and each used to re-run the whole absmax + quantize pass over the same
+    // k x T bytes. Recording the source lets the later readers skip it.
+    //
+    // All three fields, not a bare "already done" flag: a caller that hands the scratch to a
+    // different weight (different k) or a different activation must still get correct codes, and
+    // comparing the source pointer as well as the shape is what makes a stale hit impossible rather
+    // than merely unlikely. The pointer is the only one of the three that a same-shaped, different
+    // activation could not also satisfy.
+    const void*  quantized_x      = nullptr;
+    std::int32_t quantized_k      = 0;
+    std::int32_t quantized_tokens = 0;
 };
 
 inline constexpr std::size_t ternary_s8_codes_bytes(std::int32_t k, std::int32_t tokens) {

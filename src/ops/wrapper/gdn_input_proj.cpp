@@ -771,6 +771,9 @@ void launch_ternary_split(const Tensor& activation, const Weight& qk_weight,
                           const Weight& value_z_weight, Tensor& qkv, Tensor& z,
                           std::int32_t qk_rows, std::int32_t value_rows, std::int32_t z_rows,
                           detail::TernaryS8Scratch scratch, cudaStream_t stream) {
+    // THREE projections, ONE activation: quantize it once here and let the three dispatches below
+    // skip their own pass (they compare the shape the scratch records).
+    detail::quantize_ternary_s8_activation(activation, scratch, stream);
     const Weight value_head = detail::ternary_row_view(value_z_weight, 0, value_rows);
     const Weight value_tail = detail::ternary_row_view(value_z_weight, value_rows, z_rows);
     // Under ninfer's ne[0]-contiguous layout the token stride of the fused qkv output is its ROW
