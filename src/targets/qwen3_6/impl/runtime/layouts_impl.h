@@ -664,6 +664,21 @@ void validate_target_options(DeviceContext& device, const EngineOptions& options
             "KVMem requires an int8-group64 KV cache: it re-phases and scores the KV planes "
             "through the int8-group64 codec, so start with --kv-dtype int8");
     }
+    // The KVMem window is the resident working set, so it cannot exceed the device page
+    // pool: a request would have to keep more pages on the device than the pool holds. A
+    // window of zero means the whole context, which a device budget below the context always
+    // violates -- ask for an explicit window in that case.
+    if (options.kvmem.enabled && options.kv_capacity.mode == KvCapacityMode::DeviceBudget) {
+        const std::uint32_t window =
+            options.kvmem.budget_tokens == 0 ? options.max_context : options.kvmem.budget_tokens;
+        if (window > options.kv_capacity.explicit_tokens) {
+            throw std::invalid_argument(
+                "the KVMem window cannot exceed the KV device pool: keep --kvmem-budget at or "
+                "below --kv-device-tokens and leave room for one prefill; a window of 0 means "
+                "the whole --max-context, which a device pool below the context always exceeds, "
+                "so pass --kvmem-budget explicitly");
+        }
+    }
     if (options.max_context == 0 || options.max_context > Variant::maximum_context) {
         throw std::invalid_argument("max_context exceeds the variant native context capacity");
     }

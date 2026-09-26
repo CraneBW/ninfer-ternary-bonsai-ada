@@ -748,7 +748,8 @@ void instantiate_graph_family(DecodeGraphFamily& family, const char* label, Devi
 ProgramImplCore::ProgramImplCore(const LoadedModelData& model_in, const SequencePlanImpl& plan,
                                  DeviceContext& device_in, const StartupObserver& startup_observer)
     : model(model_in), device(device_in), capacity(plan.capacity), kv_capacity(plan.kv_capacity),
-      max_concurrency(plan.max_concurrency), context_cache(plan.context_cache),
+      host_backed_kv(plan.host_backed_kv), max_concurrency(plan.max_concurrency),
+      context_cache(plan.context_cache),
       continuation_capacity(normalized_private_capacity(plan.context_cache)),
       shared_prefix_capacity(plan.context_cache.max_shared_prefixes.value_or(0)),
       prefill_chunk(plan.prefill_chunk), draft_window(plan.draft_window),

@@ -107,6 +107,7 @@ public:
     KVActivationReservation(KVActivationReservation&& other) noexcept
         : owner_(std::exchange(other.owner_, nullptr)), address_(other.address_),
           requested_entitlement_(other.requested_entitlement_),
+          device_claim_pages_(other.device_claim_pages_),
           activation_frontier_(other.activation_frontier_),
           page_reservation_(std::move(other.page_reservation_)), row_(std::move(other.row_)) {}
 
@@ -116,17 +117,21 @@ public:
 
 private:
     KVActivationReservation(KVAddressSpaceStore& owner, KVAddressSpaceHandle address,
-                            std::uint32_t requested_entitlement,
+                            std::uint32_t requested_entitlement, std::uint32_t device_claim_pages,
                             std::optional<std::uint32_t> activation_frontier,
                             DeviceKVPageReservation&& page_reservation,
                             KVExecutionRowLease&& row) noexcept
         : owner_(&owner), address_(address), requested_entitlement_(requested_entitlement),
-          activation_frontier_(activation_frontier), page_reservation_(std::move(page_reservation)),
-          row_(std::move(row)) {}
+          device_claim_pages_(device_claim_pages), activation_frontier_(activation_frontier),
+          page_reservation_(std::move(page_reservation)), row_(std::move(row)) {}
 
     KVAddressSpaceStore* owner_ = nullptr;
     KVAddressSpaceHandle address_;
     std::uint32_t requested_entitlement_ = 0;
+    // Device pages this activation may reserve from the physical pool. Equal to the
+    // requested entitlement unless the pool sits below it, where the host tier carries
+    // the difference.
+    std::uint32_t device_claim_pages_ = 0;
     std::optional<std::uint32_t> activation_frontier_;
     DeviceKVPageReservation page_reservation_;
     std::optional<KVExecutionRowLease> row_;
@@ -939,13 +944,16 @@ public:
         }
         const std::uint32_t required_pages =
             activation_frontier ? pages_for_tokens(*activation_frontier) : address.page_count;
+        // Only the device claim is reserved. A host-backed address space may name more
+        // logical pages than the pool holds, and the excess lives in the host tier.
+        const std::uint32_t device_claim = device_claim_pages(entitlement);
         DeviceKVPageReservation reservation = pages_->physical_pool().make_empty_reservation();
         std::uint32_t missing_replicas      = 0;
         for (std::uint32_t page = 0; page < required_pages; ++page) {
             if (!pages_->device_resident(membership(address, page))) { ++missing_replicas; }
         }
         const std::uint32_t growth =
-            entitlement > required_pages ? entitlement - required_pages : 0U;
+            device_claim > required_pages ? device_claim - required_pages : 0U;
         const std::uint64_t required = static_cast<std::uint64_t>(missing_replicas) + growth;
         if (required > std::numeric_limits<std::uint32_t>::max()) {
             throw std::overflow_error("KV activation reservation overflow");
@@ -953,8 +961,8 @@ public:
         pages_->physical_pool().resize_reservation(reservation,
                                                    static_cast<std::uint32_t>(required));
         KVExecutionRowLease row = tables_->acquire(execution_row);
-        return KVActivationReservation(*this, handle, entitlement, activation_frontier,
-                                       std::move(reservation), std::move(row));
+        return KVActivationReservation(*this, handle, entitlement, device_claim,
+                                       activation_frontier, std::move(reservation), std::move(row));
     }
 
     // Logical page handles of the mapped window, in slot order. Orthogonal to
@@ -1007,8 +1015,8 @@ public:
              address.committed_frontier != *activation.activation_frontier_)) {
             throw std::logic_error("KV activation destination changed after reservation");
         }
-        const std::uint32_t expected = activation.requested_entitlement_ > address.page_count
-                                           ? activation.requested_entitlement_ - address.page_count
+        const std::uint32_t expected = activation.device_claim_pages_ > address.page_count
+                                           ? activation.device_claim_pages_ - address.page_count
                                            : 0U;
         if (!activation.page_reservation_.belongs_to(pages_->physical_pool()) ||
             activation.page_reservation_.pages() != expected) {
@@ -1026,6 +1034,12 @@ public:
         activation.row_.reset();
         address.active              = true;
         address.checkpoint_frontier = 0;
+        // Keep the logical bound above the device claim where the host tier carries the
+        // difference; everywhere else the derived value already is the entitlement.
+        address.logical_entitlement =
+            activation.requested_entitlement_ > activation.device_claim_pages_
+                ? activation.requested_entitlement_
+                : 0U;
         activation.owner_           = nullptr;
         for (std::uint32_t page = 0; page < address.page_count; ++page) {
             const LogicalKVPageHandle logical = membership(address, page);
@@ -1464,8 +1478,11 @@ public:
         if (entitlement < address.page_count || entitlement > page_capacity_) {
             throw std::invalid_argument("KV entitlement is smaller than mapped pages");
         }
-        pages_->physical_pool().resize_reservation(address.reservation,
-                                                   entitlement - address.page_count);
+        const std::uint32_t device_claim = device_claim_pages(entitlement);
+        address.logical_entitlement = entitlement > device_claim ? entitlement : 0U;
+        pages_->physical_pool().resize_reservation(
+            address.reservation,
+            device_claim > address.page_count ? device_claim - address.page_count : 0U);
     }
 
     void release_growth_entitlement(KVAddressSpaceHandle handle) {
@@ -1479,13 +1496,17 @@ public:
                                  cudaStream_t stream = nullptr) {
         Address& address           = require_active(handle);
         const std::uint32_t target = pages_for_tokens(tokens);
-        if (target > entitlement(address)) {
+        // Coverage is bounded by the logical entitlement, never by the device claim: a
+        // host-backed address space still maps every logical page even where the pool is
+        // smaller.
+        const std::uint32_t limit = std::max(entitlement(address), address.logical_entitlement);
+        if (target > limit) {
             throw std::invalid_argument(
                 "KV coverage exceeds active entitlement: tokens=" + std::to_string(tokens) +
                 " required_pages=" + std::to_string(target) +
                 " mapped_pages=" + std::to_string(address.page_count) +
                 " reserved_pages=" + std::to_string(address.reservation.pages()) +
-                " entitlement=" + std::to_string(entitlement(address)));
+                " entitlement=" + std::to_string(limit));
         }
         if (target <= address.page_count) { return; }
         const std::uint32_t begin       = address.page_count;
@@ -1846,6 +1867,10 @@ private:
         std::uint32_t page_count          = 0;
         std::uint32_t committed_frontier  = 0;
         std::uint32_t checkpoint_frontier = 0;
+        // Logical mapping bound. Zero means "derive it from the reservation". A device
+        // pool below the context records it above the device claim, so coverage may
+        // still name every logical page the host tier backs.
+        std::uint32_t logical_entitlement = 0;
         DeviceKVPageReservation reservation;
         std::optional<KVExecutionRowLease> row;
         bool occupied = false;
@@ -1935,6 +1960,14 @@ private:
     [[nodiscard]] std::uint32_t entitlement(const Address& address) const noexcept {
         return address.page_count +
                (address.reservation.valid() ? address.reservation.pages() : 0U);
+    }
+
+    // Device pages an activation may claim from the physical pool. The pool can sit below
+    // the logical entitlement when the host tier backs the rest of the address space, and
+    // only the claim is reserved; wherever the pool already covers the context the clamp is
+    // inert and the claim is the entitlement itself.
+    [[nodiscard]] std::uint32_t device_claim_pages(std::uint32_t entitlement) const noexcept {
+        return std::min(entitlement, pages_->physical_pool().capacity_pages());
     }
 
     [[nodiscard]] LogicalKVPageHandle& membership(Address& address, std::uint32_t page) noexcept {

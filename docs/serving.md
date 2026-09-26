@@ -816,7 +816,11 @@ sides at once and cannot be combined with the per-side flags.
 
 `--kvmem` and `--kvmem-budget` mirror the `NINFER_KVMEM` and `NINFER_KVMEM_BUDGET` environment
 variables, which remain the spelling for front ends that do not expose the flags. KVMem currently
-requires `--kv-dtype int8`, and `--kvmem-budget` requires the mechanism to be enabled.
+requires `--kv-dtype int8`, and `--kvmem-budget` requires the mechanism to be enabled. When both
+KVMem and `--kv-device-tokens` are given, the window must not exceed the device pool: keep
+`--kvmem-budget` at or below `--kv-device-tokens`, leaving room for one prefill. A window of zero
+means the whole context, which a device pool below the context always exceeds, so pass
+`--kvmem-budget` explicitly.
 
 Context-cost coefficients resolve once at startup from generic defaults, matching compiled values,
 and optional transfer or artifact-prefill entries from `--context-cost-presets FILE`. A malformed

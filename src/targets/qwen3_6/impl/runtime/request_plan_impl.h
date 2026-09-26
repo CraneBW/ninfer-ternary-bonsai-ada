@@ -275,10 +275,24 @@ RequestBasePlan ProgramImplCore::plan_request(const PreparedPromptData& prompt,
     } else if (speculative_backend == SpeculativeBackend::DFlash) {
         base->backend_kv_page_entitlement = pages_for_tokens(reserved_context_tokens);
     }
+    // The device claim and the logical entitlement are separate quantities. A host-backed
+    // address space may sit on a page pool smaller than the context, so the request only
+    // claims the pool and accounts the difference as Host KV bytes; the entitlement itself
+    // stays the logical mapping bound.
+    std::uint32_t root_device_kv_pages = base->text_kv_page_entitlement;
+    std::size_t root_host_kv_bytes     = 0;
+    if (host_backed_kv) {
+        const std::uint32_t device_budget_pages =
+            text_kv_pages->physical_pool().capacity_pages();
+        root_device_kv_pages = std::min(base->text_kv_page_entitlement, device_budget_pages);
+        root_host_kv_bytes =
+            static_cast<std::size_t>(base->text_kv_page_entitlement - root_device_kv_pages) *
+            text_host_kv_page_stride;
+    }
     detail::PhysicalDeviceResources root_active{
         .active_lanes     = 1,
         .state_slots      = 1U,
-        .main_kv_pages    = base->text_kv_page_entitlement,
+        .main_kv_pages    = root_device_kv_pages,
         .backend_kv_pages = base->backend_kv_page_entitlement,
     };
     if (prompt.has_media()) {
@@ -422,7 +436,10 @@ RequestBasePlan ProgramImplCore::plan_request(const PreparedPromptData& prompt,
         }
     }
     root_active.state_slots = 1U;
-    const detail::PhysicalResources root_vector{.device = root_active};
+    const detail::PhysicalResources root_vector{
+        .device = root_active,
+        .host   = {.state_slots = 0U, .kv_bytes = root_host_kv_bytes},
+    };
     base->root_demand = detail::PhysicalDemand{
         .active_entitlement       = root_vector,
         .reservation_added        = root_vector,

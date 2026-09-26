@@ -646,6 +646,9 @@ public:
     DeviceContext& device;
     const std::uint32_t capacity;
     const std::uint32_t kv_capacity;
+    // True when the physical page pool may sit below the logical context and host
+    // memory backs the rest of the address space (the device-budget capacity policy).
+    const bool host_backed_kv;
     const std::uint32_t max_concurrency;
     const ContextCacheOptions context_cache;
     const std::uint32_t continuation_capacity;
