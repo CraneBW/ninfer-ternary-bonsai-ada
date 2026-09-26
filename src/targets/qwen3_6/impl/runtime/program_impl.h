@@ -10070,6 +10070,10 @@ runtime::ExecutionTiming ProgramImplCore::resolve_pending_raw(
     std::array<ops::GdnReplayFoldRow, kMaximumConcurrency> fold_rows{};
     std::array<std::int32_t, kMaximumConcurrency> hidden_selectors{};
     bool needs_hidden_correction = false;
+    // Whether any row ENDS here, either by the model reaching a stop condition (terminal) or by the
+    // caller withdrawing it (cancelled). Only those rows need the drain further down; the reason is
+    // written where the drain is taken.
+    bool any_terminal_or_cancelled = false;
     for (std::size_t row = 0; row < lanes.size(); ++row) {
         const std::uint32_t lane = lanes[row];
         if (lane >= max_concurrency || requests[lane].lifecycle != Lifecycle::Pending ||
@@ -10106,6 +10110,8 @@ runtime::ExecutionTiming ProgramImplCore::resolve_pending_raw(
         hidden_selectors[row] =
             static_cast<std::int32_t>(partial_terminal ? committed - 1U : pending.produced - 1U);
         needs_hidden_correction = needs_hidden_correction || partial_terminal;
+        any_terminal_or_cancelled =
+            any_terminal_or_cancelled || terminal[row] != 0 || cancelled[row] != 0;
     }
 
     const auto tail_started = Clock::now();
@@ -10182,9 +10188,31 @@ runtime::ExecutionTiming ProgramImplCore::resolve_pending_raw(
             }
         }
 
-        timing.begin_wait();
-        device.synchronize();
-        timing.end_wait();
+        // The stream already provides the ordering a reader of the fold needs: its destination
+        // state slot is read by the NEXT round's verify, and both are queued on device.stream in
+        // that order. What the wait is actually needed for is a row that ENDS this round --
+        // finish() can hand that lane's state image to the host for a continuation, through
+        // StateImageDevicePool::copy_to_host on transfer_stream, which is not ordered against
+        // device.stream. So drain on those rounds and let the ordinary one proceed.
+        //
+        // That is worth the fold's 448 us of GPU time per round (2.13% of a 21.0 ms cycle), which
+        // cannot be made cheaper -- it already sits at memory bandwidth -- only overlapped. Nothing
+        // on the host reads its output, so this wait was buying ordering the stream already
+        // guaranteed, while blocking the host out of the ~0.8 ms it needs to build the next round's
+        // ingress and submit its 1307-node graph. work.reset() stays where it is on purpose: the
+        // fold touches only the persistent replay records and state images, never the workspace.
+        //
+        // The other host-side reader of a state image is the pressure path (begin_device_to_host
+        // at :5639), which also runs on transfer_stream without event ordering. It is safe for a
+        // different reason, and worth writing down because nothing in the code says it: that path
+        // requires the slot to be CheckpointImmutable, and a slot becomes that only when the NEXT
+        // round's fork executes -- on device.stream, after this fold. A slot whose fold has not
+        // landed is ReservedDestination, which the pressure path rejects outright.
+        if (any_terminal_or_cancelled) {
+            timing.begin_wait();
+            device.synchronize();
+            timing.end_wait();
+        }
         work.reset();
     } catch (...) {
         try {
