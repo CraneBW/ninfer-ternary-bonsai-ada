@@ -308,7 +308,7 @@ int8 档的偏移是 **+0.0015%**，量级正是 int8 激活量化误差本身�
 | 想要 | 怎么做 |
 |---|---|
 | 思考的档位可控 | 请求里显式传 `reasoning_effort`，别依赖默认值 |
-| 思考有终点 | **走 agent 循环**——每一步以工具调用收尾，思考因此有终点。这是实测有效的那条，见下。`--default-thinking-budget` 是另一条路，但**它会在越界时报错，别把它当"自动收尾"用** |
+| 思考有终点 | **走 agent 循环**——每一步以工具调用收尾，思考因此有终点（可直接跑的例子见 §2.4）。`--default-thinking-budget` 是另一条路，但**它会在越界时报错，别把它当"自动收尾"用** |
 | 只要速度 | `--no-thinking`（取舍见 §2.5） |
 
 **"思考有终点"实测**（同一份二进制、同一台机器，服务端 `--max-context 200000 --kv-dtype fp8
@@ -398,6 +398,30 @@ curl -s http://127.0.0.1:8084/v1/chat/completions \
 
 > **多轮对话优先用 `ninfer-serve` 而不是 `ninfer`。** CLI 侧的前缀缓存是**硬编码关闭**的，
 > 而 serve 默认开启——同一段历史在 CLI 上每轮都会从头 prefill 一遍。
+
+**接 agent harness：一个能验的例子**
+
+上面两条只证明"服务起来了"。**工具调用 + 多轮**这条链路要单独验，用 agent harness 跑一个具体任务：
+
+```bash
+# 终端 1：把服务起起来（§2.5 的推荐配置）
+# 终端 2：
+BONSAI_API_KEY=local dsh --profile headless \
+  "Draw a 2D animation of a pelican riding a bicycle as ONE self-contained HTML \
+   file, inline SVG only, under 120 lines. Output only the code."
+```
+
+harness 侧的模型配置（`~/.dsh/settings.yaml`）指向 `http://127.0.0.1:8080/v1`、model id
+`Ternary-Bonsai-2-27B`，**`contextWindow` 要和 `--max-context` 对齐**——给大了客户端会发超长请求，
+服务器直接拒掉。
+
+**实测**：**3 分 22 秒**结束，过程中发出 **8 次请求**——agent 的工具循环：自己写文件、
+自己 `wc -l` 数行数、自己解析 SVG 验证结构。产出是一个 **58 行、零外部引用、能渲染的单文件 HTML**。
+
+> **为什么用 agent 循环而不是一次性生成**：每一步都以一个工具调用收尾，**思考因此有终点**。
+> 另跑一次对照，把客户端输出上限从 32,768 放开到 199,000：**3 分 27 秒 / 8 步**，
+> 它**并没有想得更多**（思考量反而少 19%），照样收尾并给出成品。
+> **终端条件是"每一步有个必须落地的动作"，不是上限。**
 
 ### 2.5 推荐配置与每一项的代价
 
