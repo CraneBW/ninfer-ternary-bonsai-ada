@@ -132,7 +132,39 @@ sink/recent/检索命中块。
 - 关闭 KVMem 的默认路径冒烟（确认无回归）
 - 大 CTX 冒烟（`--max-context 8192 --kv-capacity 2048`）
 
-## 6. 已确认的决策
+## 7. host 预算：实测口径与更正
+
+早前把「256K 需要 33 GiB」当作 host 的硬性要求。**这个数字是错的**：那是把
+device 页池要装下整个 context 时的显存需求，误当成了 host 侧开销。
+
+参考实现在本机（RTX 3060 Ti 8 GB + **31.8 GB RAM**，见其 `perf-tests`）跑通 256K 的配置：
+
+| 模型 | 参数 | 显存峰值 |
+|---|---|---|
+| 27B | `-c 262144 -ctk q8_0 -ctv turbo4 --kvmem --kvmem-budget 8192 --kvmem-gen-reserve 2048` | 6956 MiB |
+| 35B | `-c 262144 --kvmem --kvmem-budget 32768 --kvmem-gen-reserve 16384` | 6101–6207 MiB |
+
+它做得到，靠三件事：
+
+1. **KV 激进量化**：K 用 `q8_0`（≈1.06 B/权重），V 用 `turbo4`（4 bit）。zatfung 目前的
+   int8 把 V 也存 int8，V 这一半的开销约是它的两倍。
+2. **淘汰写的是打包后的量化 K/V**，不是 raw fp16/bf16（参考实现的设计记录：stage-out
+   D2H 的是 packed K 与 V）。所以 host 副本与设备副本**同尺寸**，不会膨胀。
+3. **host 只需装下整个 context 的量化 KV**，对这些模型是数 GB 级，31.8 GB 内存绰绰有余。
+
+按 zatfung 现在的表示（27B：16 层 full attention、4 个 KV head、head_dim 256、K/V 均 int8
+＋每 64 维一个 fp16 scale）解析估算：每 token 每层约 2112 B，16 层约 33.8 KiB/token，
+**256K ≈ 8.6 GiB host**——仍然可行。注意 zatfung 现有的「127 KiB/token」实测值包含了
+KV 平面之外的分配，不宜直接外推；落实 host 预算前应当先量出纯平面的边际字节数。
+
+**配额口径**：参考实现的 KVMem 溢出盘**独立于前缀缓存**，有自己的开关
+（`--kvmem-cpu-gb` → `cpu_bytes`、`--kvmem-nvme-gb` → `nvme_bytes`、
+`--kvmem-raw-k-nvme`）。所以本设计第 8 节第 3 条「单独配额」与参考实现一致。
+
+注意本机 RAM 是共享的：参考实现的 27B/35B 测试同时把 MoE 专家放在 CPU
+（`--n-cpu-moe`），所以 host 预算必须在「CPU 常驻权重」与「KV 溢出盘」之间分。
+
+## 8. 已确认的决策
 
 1. **CLI 形态**：新增独立选项表达上屏预算（`--kv-capacity` 语义与既有约束保持不变），
    既有配置不需要迁移。
