@@ -150,8 +150,6 @@ int main() {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     std::srand(4242);
     try {
-        _putenv("NINFER_KVMEM=1");
-
         KVPageGeometry geometry;
         geometry.page_tokens        = kTokens;
         geometry.device_plane_order = PagedKVPlaneOrder::PageMajor;
@@ -177,7 +175,10 @@ int main() {
         DeviceKVPagePool pool(DeviceSpan{backing, backing_bytes}, pool_layout);
         KVExecutionTablePool tables(DeviceSpan{backing, backing_bytes}, tables_layout, pool);
         LogicalKVPageStore pages(pool, kPages);
-        KVAddressSpaceStore store(pages, tables, 2, kPages);
+        // The store takes its window explicitly. The process-wide switch is resolved by the
+        // front ends, so a direct construction has to ask for KVMem itself.
+        KVAddressSpaceStore store(pages, tables, 2, kPages,
+                                  ninfer::KvMemOptions{.enabled = true});
         std::printf("stores ok\n");
 
         // ---- activate + map 6 pages ----
