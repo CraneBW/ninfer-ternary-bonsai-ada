@@ -305,7 +305,11 @@ void ternary_pq2_mma_s8_kernel(const std::int8_t* __restrict__ act_codes,
                                std::int32_t out_row_stride,
                                // PTQ1_0 high plane; unused (and unread) when kPtq1 == false, hence
                                // the default so the PQ2_0 call site does not have to name it.
-                               const std::uint8_t* __restrict__ w_high = nullptr) {
+                               const std::uint8_t* __restrict__ w_high = nullptr,
+                               // Split-K reduction buffer. Null means "one slice, write `out`"; see
+                               // the slice block below for why the split exists at all and why it is
+                               // a plain fp32 buffer rather than an atomicAdd into the output.
+                               float* __restrict__ partial            = nullptr) {
     using Storage = TernaryS8Storage<Tokens_, Warps_, kPtq1>;
     static_assert(Tokens_ % 8 == 0, "token tile must be whole 8-token mma column groups");
     static_assert(Tokens_ <= 64, "the activation tile is sized for one wide token tile");
@@ -545,6 +549,21 @@ void ternary_pq2_mma_s8_kernel(const std::int8_t* __restrict__ act_codes,
     // had; the shipped schedule already pays ceil(T/kTokens) reads. Measured confirmation that
     // weights are not reused: forcing the 32-wide tile at T=38 -- which doubles the tile count and
     // therefore the weight traffic -- cost 19%, and nothing else changed.)
+    // SPLIT-K SLICE (gridDim.z > 1). The row-block grid is div_up(n, 64), a function of n alone, so
+    // a layer narrow enough to under-fill the card stays under-filled no matter how long the prompt
+    // is. The token axis is the cheaper way to add blocks -- see the tile loop below -- but it only
+    // exists when there is more than one token tile, which is exactly the T > 64 case. For T <= 64
+    // (one tile) the row axis is the only axis left, so K is cut instead and each slice accumulates
+    // its own chunk range into a private fp32 buffer, summed afterwards by ternary_s8_reduce_kernel.
+    //
+    // gridDim.z == 1 leaves chunk_begin == 0 and chunk_end == chunks and `split == false`, i.e. the
+    // shipped single-slice path bit for bit -- the slice machinery costs an unsplit launch nothing.
+    const int slice       = static_cast<int>(blockIdx.z);
+    const int slices      = static_cast<int>(gridDim.z);
+    const bool split      = slices > 1;
+    const int chunk_begin = (chunks * slice) / slices;
+    const int chunk_end   = (chunks * (slice + 1)) / slices;
+
     const int tiles_total = (tokens + kTokens - 1) / kTokens;
     const int tile_step   = static_cast<int>(gridDim.y);
     for (int tile = static_cast<int>(blockIdx.y); tile < tiles_total; tile += tile_step) {
@@ -556,15 +575,16 @@ void ternary_pq2_mma_s8_kernel(const std::int8_t* __restrict__ act_codes,
             for (int i = 0; i < 4; ++i) { acc[sub][i] = 0.0f; }
         }
 
-        stage_weights(0, 0);
-        stage_act(0, 0, tok_base);
+        stage_weights(0, chunk_begin);
+        stage_act(0, chunk_begin, tok_base);
         cp_commit();
         cp_wait<0>();
         __syncthreads();
 
-        for (int chunk = 0; chunk < chunks; ++chunk) {
-            const int buf = chunk & 1;
-            if (chunk + 1 < chunks) {
+        // `buf` rolls 0,1,0,1 independently of `chunk`'s parity: a slice can start on an odd chunk,
+        // and the prologue above always stages into buffer 0.
+        for (int chunk = chunk_begin, buf = 0; chunk < chunk_end; ++chunk, buf ^= 1) {
+            if (chunk + 1 < chunk_end) {
                 stage_weights(buf ^ 1, chunk + 1);
                 stage_act(buf ^ 1, chunk + 1, tok_base);
                 cp_commit();
@@ -651,7 +671,7 @@ void ternary_pq2_mma_s8_kernel(const std::int8_t* __restrict__ act_codes,
             }
 
             __syncthreads();   // every read of the single-buffered tiles is done
-            if (chunk + 1 < chunks) {
+            if (chunk + 1 < chunk_end) {
                 cp_wait<0>();
                 __syncthreads();
             }
@@ -663,28 +683,52 @@ void ternary_pq2_mma_s8_kernel(const std::int8_t* __restrict__ act_codes,
             const int token_b = token_a + 1;
             const float a_left  = (token_a < tokens) ? act_scales[token_a] : 0.0f;
             const float a_right = (token_b < tokens) ? act_scales[token_b] : 0.0f;
+            // The token scale is applied PER SLICE, so a slice's partial is already a complete
+            // scaled summand and the reduction is a plain sum. Folding it in afterwards instead
+            // would be one multiply on the critical path of every store.
+            const auto store = [&](int token, int row, float value) {
+                if (split) {
+                    partial[(static_cast<std::int64_t>(slice) * tokens + token) * rows + row] =
+                        value;
+                } else {
+                    out[static_cast<std::int64_t>(token) * out_row_stride + row] =
+                        __float2bfloat16_rn(value);
+                }
+            };
             if (row_lo < rows) {
-                if (token_a < tokens) {
-                    out[static_cast<std::int64_t>(token_a) * out_row_stride + row_lo] =
-                        __float2bfloat16_rn(acc[sub][0] * a_left);
-                }
-                if (token_b < tokens) {
-                    out[static_cast<std::int64_t>(token_b) * out_row_stride + row_lo] =
-                        __float2bfloat16_rn(acc[sub][1] * a_right);
-                }
+                if (token_a < tokens) { store(token_a, row_lo, acc[sub][0] * a_left); }
+                if (token_b < tokens) { store(token_b, row_lo, acc[sub][1] * a_right); }
             }
             if (row_hi < rows) {
-                if (token_a < tokens) {
-                    out[static_cast<std::int64_t>(token_a) * out_row_stride + row_hi] =
-                        __float2bfloat16_rn(acc[sub][2] * a_left);
-                }
-                if (token_b < tokens) {
-                    out[static_cast<std::int64_t>(token_b) * out_row_stride + row_hi] =
-                        __float2bfloat16_rn(acc[sub][3] * a_right);
-                }
+                if (token_a < tokens) { store(token_a, row_hi, acc[sub][2] * a_left); }
+                if (token_b < tokens) { store(token_b, row_hi, acc[sub][3] * a_right); }
             }
         }
     }
+}
+
+// Sums the split-K partials and writes the bf16 output; one thread per (token, row).
+//
+// Deliberately NOT an atomicAdd into `out`. The sum would then depend on which slice finished last,
+// the rung would stop being reproducible run to run, and the numeric gate -- which is a comparison
+// against a recorded PPL -- could no longer tell a real change from a scheduling accident. A
+// fixed-order sum over a private buffer is deterministic, and it costs one extra pass over
+// tokens*rows*4 bytes, which for the shapes that actually split (n <= 12608, tokens <= 64) is at
+// most 3.2 MB.
+__global__ void ternary_s8_reduce_kernel(const float* __restrict__ partial,
+                                         __nv_bfloat16* __restrict__ out,
+                                         std::int32_t out_row_stride, std::int32_t rows,
+                                         std::int32_t tokens, std::int32_t slices) {
+    const std::int64_t total = static_cast<std::int64_t>(tokens) * rows;
+    const std::int64_t i     = static_cast<std::int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i >= total) { return; }
+    const std::int32_t token = static_cast<std::int32_t>(i / rows);
+    const std::int32_t row   = static_cast<std::int32_t>(i - static_cast<std::int64_t>(token) * rows);
+    float sum = 0.0f;
+    for (std::int32_t s = 0; s < slices; ++s) {
+        sum += partial[static_cast<std::int64_t>(s) * total + i];
+    }
+    out[static_cast<std::int64_t>(token) * out_row_stride + row] = __float2bfloat16_rn(sum);
 }
 
 } // namespace ninfer::ops::detail

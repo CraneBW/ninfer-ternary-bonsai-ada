@@ -55,8 +55,17 @@ std::size_t ternary_rotation_workspace_bytes(std::int32_t k, std::int32_t tokens
     // the max over token counts the plan allows, which is what the planner asks for.
     const std::size_t rotated = static_cast<std::size_t>(k) * static_cast<std::size_t>(tokens) *
                                 kActivationBytesPerElement;
-    const std::size_t s8_scratch =
-        ternary_s8_codes_bytes(k, tokens) + ternary_s8_scales_bytes(tokens) + 512u;
+    const std::size_t s8_scratch = ternary_s8_codes_bytes(k, tokens) +
+                                   ternary_s8_scales_bytes(tokens) +
+                                   // The split-K reduction buffer. Declared as its provable upper
+                                   // bound rather than its actual size because this function is
+                                   // handed k and tokens but not n, and the real size depends on n
+                                   // through the slice count. The bound is derived at
+                                   // kTernaryS8PartialMaxRows: splitting only happens while
+                                   // gridX < 198, so n <= 12608, and slices * n <= 12672 + n. The
+                                   // allocation asserts it, so a future shape that violates the
+                                   // derivation fails loudly instead of overrunning the arena.
+                                   ternary_s8_partial_budget_bytes(tokens) + 512u;
     return rotated + s8_scratch;
 }
 

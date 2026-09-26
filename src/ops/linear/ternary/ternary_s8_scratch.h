@@ -104,6 +104,12 @@ inline constexpr int kTernaryS8ResidentCtas = 198;
 struct TernaryS8Scratch {
     std::int8_t* codes  = nullptr;
     float*       scales = nullptr;
+    // Split-K reduction buffer, present only when the launcher decided to slice K. Element
+    // [slice][token][row] is an fp32 partial the epilogue has already scaled by the token's
+    // activation scale, so the reduce is a plain deterministic sum -- NOT an atomicAdd, which would
+    // make the result depend on scheduling order and take the numeric gate with it.
+    float*       partial        = nullptr;
+    std::int32_t partial_floats = 0;   // its capacity, so the launcher can bound the slice count
 };
 
 inline constexpr std::size_t ternary_s8_codes_bytes(std::int32_t k, std::int32_t tokens) {
@@ -112,6 +118,56 @@ inline constexpr std::size_t ternary_s8_codes_bytes(std::int32_t k, std::int32_t
 
 inline constexpr std::size_t ternary_s8_scales_bytes(std::int32_t tokens) {
     return static_cast<std::size_t>(tokens) * sizeof(float);
+}
+
+// Split-K is only taken when the token axis cannot supply blocks (one tile, i.e. T <= 64) AND the row
+// axis under-fills the card (gridX < 198), so the slice count is ceil(198 / gridX) with gridX =
+// ceil(n / 64). Both facts bound the partial buffer without needing n in the capacity query:
+//
+//   gridX < 198  =>  n <= 197 * 64 = 12608
+//   slices <= 198 / gridX + 1  =>  slices * n <= 12672 + n <= 25280
+//
+// and the buffer is slices * n * min(tokens, 64) floats. 25280 * 64 * 4 = 6.47 MB, so the budget
+// below is a real upper bound on anything the launcher can ask for -- it is declared as a constant in
+// ternary_rotation_workspace_bytes() (which only receives k and tokens) and asserted at allocation.
+inline constexpr std::size_t kTernaryS8PartialMaxRows = 25280;
+inline constexpr std::size_t ternary_s8_partial_budget_bytes(std::int32_t tokens) {
+    const std::int32_t tile = tokens < 64 ? tokens : 64;
+    return kTernaryS8PartialMaxRows * static_cast<std::size_t>(tile) * sizeof(float);
+}
+
+inline constexpr std::size_t ternary_s8_partial_bytes(std::int32_t n, std::int32_t tokens,
+                                                      std::int32_t slices) {
+    const std::int32_t tile = tokens < 64 ? tokens : 64;
+    return static_cast<std::size_t>(slices) * static_cast<std::size_t>(n) *
+           static_cast<std::size_t>(tile) * sizeof(float);
+}
+
+// How many K-slices the s8 rung should take for this shape. One means "do not split", and that is
+// the answer for every shape the token grid already fills, so the split path only ever runs where
+// it is the only way to add blocks.
+//
+// The cap of 8 is not derived, it is chosen: each slice pays one pipeline prologue and one round of
+// partial traffic, and a slice shorter than a few chunks spends more time filling its pipeline than
+// doing mma. Overridable so the value can be swept rather than argued about.
+inline int ternary_s8_slices(std::int32_t n, std::int32_t tokens, std::int32_t k) {
+    static const int cap = [] {
+        const char* value = std::getenv("NINFER_TERNARY_S8_KSPLIT");
+        if (value == nullptr) { return 8; }
+        const int parsed = std::atoi(value);
+        return parsed < 0 ? 0 : parsed;   // 0 disables the split entirely
+    }();
+    if (cap <= 1) { return 1; }
+    if (tokens > 64) { return 1; }        // more than one tile: the token grid is the cheaper lever
+    if (n <= 0 || k <= 0) { return 1; }
+    const std::int32_t grid_x = (n + 63) / 64;
+    if (grid_x >= kTernaryS8ResidentCtas) { return 1; }
+    std::int32_t slices = (kTernaryS8ResidentCtas + grid_x - 1) / grid_x;
+    const std::int32_t chunks       = k / 128;          // one chunk == one ternary group
+    const std::int32_t by_chunks    = chunks / 4;       // keep at least 4 chunks per slice
+    if (by_chunks < slices) { slices = by_chunks; }
+    if (slices > cap) { slices = cap; }
+    return slices < 2 ? 1 : slices;
 }
 
 } // namespace ninfer::ops::detail

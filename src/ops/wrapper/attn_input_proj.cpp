@@ -344,7 +344,7 @@ void attn_input_proj(const Tensor& x, const Weight& query_key_weight,
     const Tensor activation =
         detail::folded_activation(x, query_key_weight, workspace, stream);
     const detail::TernaryS8Scratch s8_scratch =
-        detail::allocate_ternary_s8_scratch(workspace, kHidden, cols);
+        detail::allocate_ternary_s8_scratch(workspace, query_key_weight.n, kHidden, cols);
     launch_ternary_attn(activation, query_key_weight, gate_value_weight, q, gate, k, v, kQRows,
                         kKvRows, s8_scratch, stream);
 }
