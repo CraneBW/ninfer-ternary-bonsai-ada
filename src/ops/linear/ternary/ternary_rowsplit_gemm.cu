@@ -147,7 +147,7 @@ bool gemv_admits(const Tensor& x, const Weight& w, std::int32_t max_tokens) {
 }
 
 void launch_small_t(const Tensor& x, const Weight& w, Tensor& out, std::int32_t out_row_stride,
-                    cudaStream_t stream);
+                    cudaStream_t stream, std::int32_t rows_override);
 
 // A warp takes one whole 128-wide quant group, so K has to hold whole K groups. Declared here
 // rather than next to the verify route that first needed it, so both entry points name it.
@@ -187,7 +187,9 @@ void launch_ternary_gemm_t1(const Tensor& x, const Weight& w, Tensor& out,
                             TernaryS8Scratch /*scratch*/) {
     if (gemv_admits(x, w, 1)) {
         if (decode_uses_small_t() && (w.k % kSmallTGroupK) == 0) {
-            launch_small_t(x, w, out, out_row_stride, stream);
+            // One token wide, so the activation each CTA re-stages is a quarter of the verify
+            // path's: 32, and not the per-shape table -- that table was measured at T = 4 only.
+            launch_small_t(x, w, out, out_row_stride, stream, 32);
             return;
         }
         launch_pq2_gemv_tile(x, w, out, out_row_stride, x.ne[1], stream);
@@ -295,17 +297,47 @@ int verify_token_cap() {
 // It is NOT the free win the load-mix argument predicts: dropping activation traffic by a third
 // only moved the effective rate from 453 to 480 GB/s against a 637 GB/s ceiling, so the kernel is
 // not L2-bandwidth-bound after all. Kept env-selectable rather than hardcoded for that reason.
-int small_t_rows_per_cta() {
-    static const int rows = [] {
-        const char* value = std::getenv("NINFER_TERNARY_SMALL_T_ROWS");
-        const int parsed  = value == nullptr ? 0 : std::atoi(value);
-        return (parsed == 16 || parsed == 32 || parsed == 48) ? parsed : 32;
+//
+// WHICH row block, asked PER SHAPE on the verify path rather than once globally. The response is
+// shape-dependent and not monotone, so no single value can be right -- and that, not the size of the
+// effect, is why P4's global sweep came out flat and kept 32. Re-measured by bucketing the decode
+// window of three nsys traces (T = 4, 73 rounds, sm_89), microseconds per round by output rows:
+//
+//     n        rows=16   rows=32   rows=48
+//     248320      2243      2173      2193
+//      34816      5668      5228      5466
+//       6144      2273      2195         -
+//       5120      4293      4573      4604
+//       4096       629       613       767
+//       1024       180       237       296
+//      total     15286     15019     15681
+//
+// 16 wins at or below 5120 and 32 wins above it, worth 337 us a round over all-32 (1.6%). The
+// 5120 bucket is not a mixture artifact: it improves at BOTH of its k values (k=17408 50.1 -> 46.7
+// us, k=6144 19.5 -> 17.7 us). WHY is not pinned down -- ncu puts the family at 56 registers with
+// DRAM the top utilizer (87.6% on the 34816 head, 63.9% on the 5120 one) and L2 at only 22-27%, so
+// it is neither L2-bound nor short of occupancy in the usual sense. The threshold is measured, not
+// derived, and it is scoped to the verify path because that is the only place it was measured.
+inline constexpr std::int32_t kSmallTNarrowRowMax = 5120;
+
+// 0 = no override. Read once: this is on the path of every small_t launch.
+int small_t_rows_env() {
+    static const int value = [] {
+        const char* raw  = std::getenv("NINFER_TERNARY_SMALL_T_ROWS");
+        const int parsed = raw == nullptr ? 0 : std::atoi(raw);
+        return (parsed == 16 || parsed == 32 || parsed == 48) ? parsed : 0;
     }();
-    return rows;
+    return value;
+}
+
+int small_t_rows_for(std::int32_t output_rows, std::int32_t rows_override) {
+    if (const int forced = small_t_rows_env(); forced != 0) { return forced; }
+    if (rows_override != 0) { return rows_override; }
+    return output_rows <= kSmallTNarrowRowMax ? 16 : 32;
 }
 
 void launch_small_t(const Tensor& x, const Weight& w, Tensor& out, std::int32_t out_row_stride,
-                    cudaStream_t stream) {
+                    cudaStream_t stream, std::int32_t rows_override) {
     const std::int32_t rows = w.n;
     const auto* x_ptr       = static_cast<const __nv_bfloat16*>(x.data);
     const auto* codes       = static_cast<const std::uint8_t*>(w.qdata);
@@ -327,7 +359,7 @@ void launch_small_t(const Tensor& x, const Weight& w, Tensor& out, std::int32_t 
                 TernaryIdentityEpilogue{});
     };
     using std::integral_constant;
-    switch (small_t_rows_per_cta()) {
+    switch (small_t_rows_for(rows, rows_override)) {
     case 16: args(integral_constant<int, 16>{}); break;
     case 48: args(integral_constant<int, 48>{}); break;
     default: args(integral_constant<int, 32>{}); break;
@@ -363,7 +395,9 @@ void launch_small_t_tiled(const Tensor& x, const Weight& w, Tensor& out,
         // Named, not inline: launch_small_t takes `Tensor& out` and a temporary cannot bind to it.
         Tensor x_tile   = x.slice(1, t0, tile);
         Tensor out_tile = out.slice(1, t0, tile);
-        launch_small_t(x_tile, w, out_tile, out_row_stride, stream);
+        // 32, not the per-shape table: P4 swept the prefill work points and 32 won, and a tile is
+        // eight tokens wide, which is twice the width the table was measured at.
+        launch_small_t(x_tile, w, out_tile, out_row_stride, stream, 32);
     }
 }
 
@@ -796,7 +830,8 @@ void launch_ternary_gemm_t8(const Tensor& x, const Weight& w, Tensor& out,
     if (gemv_admits(x, w, verify_token_cap())) {
         if (verify_uses_small_t() && (w.k % kSmallTGroupK) == 0) {
             note_rung("small_t", x, w, out_row_stride);
-            launch_small_t(x, w, out, out_row_stride, stream);
+            // 0 = pick the row block per shape: this is the path the table above was measured on.
+            launch_small_t(x, w, out, out_row_stride, stream, 0);
             return;
         }
         // The A/B arm below is NOT interchangeable with the small-T kernel over the whole cap.
