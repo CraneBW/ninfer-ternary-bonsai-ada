@@ -38,8 +38,12 @@ inline void validate_speculative_cli_options(const SpeculativeOptions& options) 
         }
         return;
     case SpeculativeBackend::Mtp:
-        if (options.draft_tokens == 0 || options.draft_tokens > 5) {
-            throw std::invalid_argument("--spec mtp requires --draft-tokens in [1,5]");
+        // 7, kept in step with the engine's other three limits on this number by hand rather than
+        // by a shared constant: this one is a CLI range check, those are the captured graph's width
+        // and the runtime invariant behind it, and a single constant would couple a validation
+        // message to the shape of a CUDA graph. Listed in round_state.h's comment.
+        if (options.draft_tokens == 0 || options.draft_tokens > 7) {
+            throw std::invalid_argument("--spec mtp requires --draft-tokens in [1,7]");
         }
         return;
     case SpeculativeBackend::DFlash:

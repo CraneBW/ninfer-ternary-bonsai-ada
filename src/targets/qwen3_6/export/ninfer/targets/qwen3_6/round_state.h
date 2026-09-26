@@ -12,7 +12,31 @@
 
 namespace ninfer::targets::qwen3_6 {
 
-inline constexpr std::uint32_t kMtpDecodeMaximumDrafts    = 5;
+// 7, not the 5 the reference port shipped, and the ceiling is structural rather than tuned: one
+// round verifies K+1 tokens and the verify path runs on the 8-wide small-t tile, so 7 is the last K
+// whose width (8) still fits it. K=8 would make T=9, which falls off that tile -- measured 13.3 ms
+// per verify round at T=8 against 40 ms at T=9, i.e. the extra draft costs more than it can return.
+//
+// Why raising it at all: the per-position survival rate is a property of the TASK, not of the
+// model, and it varies far more than the 5 assumed. Measured over three fixtures at K=5 (survival
+// per position, fitted T0~15.83 ms and c~1.94 ms per draft):
+//   en-code (code editing)   ~0.76  -> optimum is K=4
+//   mtp-count   (counting)   ~0.95  -> optimum is K=7
+//   mtp-template (repetitive) ~0.995 -> optimum is beyond 7; its histogram reads 43,43,42,42,42,
+//                                       essentially no decay
+// The cost of a draft is fixed (~1.94 ms) and the return is the survival probability, so the
+// crossover sits at s ~= 0.75: below it more K loses, above it more K wins. A single deployment-wide
+// K cannot serve all three, which is why this is a CEILING and --draft-tokens picks within it.
+// Adaptive K would need a captured graph per K (this constant is part of the graph shape) and is a
+// separate change.
+//
+// This number is written in four places and they are kept in step by hand, because each is a
+// different kind of thing rather than four copies of one: this one is the captured graph's width,
+// kMaximumMtpDraftTokens in the 27b config is the model's own ceiling, the range check in
+// product/speculative_options.h is CLI validation, and the T bound in ops/wrapper/mtp_round.cpp is
+// a runtime invariant. Raise all four together; raising fewer fails loudly at one of those checks
+// rather than producing a wrong answer.
+inline constexpr std::uint32_t kMtpDecodeMaximumDrafts    = 7;
 inline constexpr std::uint32_t kMtpDecodeMaximumWidth     = kMtpDecodeMaximumDrafts + 1;
 inline constexpr std::uint32_t kDFlashDecodeMaximumDrafts = 15;
 inline constexpr std::uint32_t kDFlashDecodeMaximumWidth  = kDFlashDecodeMaximumDrafts + 1;
