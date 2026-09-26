@@ -364,6 +364,24 @@ CausalAttentionRoute causal_attention_resolve_route(std::int32_t q_heads, std::i
             case KvCacheStorage::Fp8KeyNvfp4Value:
                 prompt_limit = width <= 4 ? 0 : width <= 8 ? 128 : 320;
                 break;
+            // THESE TWO WERE MISSING, and with no `default` an rk4v4 or rk4v4-e8 cache fell through
+            // with prompt_limit still 0. Stated here as 0 because that is what the fall-through was
+            // already doing: this commit fixes the omission, NOT the routing.
+            //
+            // What it deliberately does not decide is whether 0 is the right value. small_t.cu:50-52
+            // groups exactly these three storages as `int8_family` because they share
+            // launch_tc_partial_i8, and Int8Group64 asks for 256 at width 9..16 (line 348 admits up
+            // to kMaximumVerifyTokens = 16, so that arm IS reachable) -- so rk4v4 currently routes
+            // differently from its own family, and differently from bf16, which asks for 640 there.
+            // Adopting the family's 256 is a plausible fix but it is a change to which kernel the
+            // decode graph runs, and Int8Group64's threshold is itself unexplained while rk4v4's KV
+            // math (H64 rotation plus an E8 projection) is not int8's. So it is left as measured
+            // behaviour with the divergence recorded, rather than changed under a bugfix label.
+            // Follow-up: measure route Prompt vs ChunkedSmallT for rk4v4 at width 9..16.
+            case KvCacheStorage::RotatedInt4KeyInt4ValueGroup64:
+            case KvCacheStorage::RK4V4E8:
+                prompt_limit = 0;
+                break;
             }
             if (envelope.max_visible_keys <= prompt_limit) return CausalAttentionRoute::Prompt;
         }
