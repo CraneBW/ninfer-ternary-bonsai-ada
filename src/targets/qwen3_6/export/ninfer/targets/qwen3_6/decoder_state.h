@@ -23,6 +23,9 @@ struct DecoderStateSpec {
     std::int32_t kv_table_rows              = 1;
     std::uint32_t text_physical_page_groups = 0;
     std::uint32_t mtp_physical_page_groups  = 0;
+    // The text pool may hold fewer pages than the logical context: host KV backs
+    // the remainder, so the physical floor is not the logical page count.
+    bool host_backed_kv = false;
 };
 
 struct PagedKVCacheLayout {

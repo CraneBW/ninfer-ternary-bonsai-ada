@@ -126,6 +126,7 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
                      .kv_table_rows             = static_cast<std::int32_t>(plan.max_concurrency),
                      .text_physical_page_groups = physical_pages,
                      .mtp_physical_page_groups  = mtp_physical_pages,
+                     .host_backed_kv            = plan.host_backed_kv,
                  });
     qwen3_6::StateImageSpec state_image_spec{
         .linear =
@@ -665,7 +666,13 @@ void validate_target_options(DeviceContext& device, const EngineOptions& options
         throw std::invalid_argument("max_concurrency must be in [1,8]");
     }
     const std::uint32_t logical_pages = page_count(options.max_context);
-    const std::uint32_t minimum_pages = std::max(logical_pages, options.max_concurrency);
+    // A device budget may sit below the context: the pool then only backs the
+    // resident working set, and host memory carries the rest of the address
+    // space. Every other policy keeps the pool covering the whole context.
+    const bool budgeted_pool = options.kv_capacity.mode == KvCapacityMode::DeviceBudget;
+    const std::uint32_t minimum_pages =
+        budgeted_pool ? options.max_concurrency
+                      : std::max(logical_pages, options.max_concurrency);
     const std::uint64_t maximum_pages64 =
         static_cast<std::uint64_t>(options.max_concurrency) * logical_pages;
     if (maximum_pages64 > std::numeric_limits<std::uint32_t>::max()) {
@@ -680,6 +687,15 @@ void validate_target_options(DeviceContext& device, const EngineOptions& options
         if (requested_pages < minimum_pages || requested_pages > maximum_pages64) {
             throw std::invalid_argument(
                 "kv_capacity is outside the usable range for max_context and max_concurrency");
+        }
+        break;
+    }
+    case KvCapacityMode::DeviceBudget: {
+        const std::uint32_t requested_pages = page_count(options.kv_capacity.explicit_tokens);
+        if (requested_pages < minimum_pages || requested_pages > maximum_pages64) {
+            throw std::invalid_argument(
+                "the KV device budget is outside the usable range for max_context and "
+                "max_concurrency");
         }
         break;
     }
@@ -732,6 +748,7 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
     impl->weights_profile     = inputs.weights_profile;
     impl->capacity            = inputs.capacity;
     impl->main_page_groups    = main_page_groups;
+    impl->host_backed_kv      = inputs.host_backed_kv;
     impl->kv_capacity         = static_cast<std::uint32_t>(checked_i32(
         static_cast<std::uint64_t>(main_page_groups) * static_cast<std::uint32_t>(kPagedKVPageSize),
         "resolved Paged KV capacity exceeds int32"));
@@ -815,10 +832,16 @@ make_sequence_planner_impl(DeviceContext& device, const EngineOptions& options,
         .use_cuda_graph      = options.use_cuda_graph,
         .causal_scoring      = options.purpose == EnginePurpose::CausalScoring,
         .device              = options.device,
+        .host_backed_kv      = options.kv_capacity.mode == KvCapacityMode::DeviceBudget,
         .context_cache       = options.context_cache,
     };
     const std::uint32_t logical_pages = page_count(inputs.capacity);
-    const std::uint32_t minimum_pages = std::max(logical_pages, inputs.max_concurrency);
+    // Mirrors validate_target_options: a device budget lets the pool sit below
+    // the context, so the floor is only the per-lane minimum.
+    const std::uint32_t minimum_pages =
+        options.kv_capacity.mode == KvCapacityMode::DeviceBudget
+            ? inputs.max_concurrency
+            : std::max(logical_pages, inputs.max_concurrency);
     const std::uint64_t maximum_pages64 =
         static_cast<std::uint64_t>(inputs.max_concurrency) * logical_pages;
     if (maximum_pages64 > std::numeric_limits<std::uint32_t>::max()) {

@@ -83,6 +83,7 @@ KvCapacityResolution resolve_kv_capacity(const KvCapacityPolicy& policy,
     std::size_t capacity_budget = available_runtime_bytes;
     switch (policy.mode) {
     case KvCapacityMode::Explicit:
+    case KvCapacityMode::DeviceBudget:
         if (policy.automatic_headroom_bytes != 0) {
             throw std::invalid_argument("explicit KV capacity must not carry automatic headroom");
         }

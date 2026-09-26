@@ -65,19 +65,32 @@ runtime 520.8 MiB，约 8.1 MiB/页 ≈ 127 KiB/token），CTX 256K 需要约 40
 
 ## 4. 要改的契约（按步拆分）
 
-### 第一步：容量校验与预算解耦
+### 第一步：容量校验与预算解耦（已实现，仅到启动与单轮）
 
 - 物理页下限改为「**每个并发序列的工作集 + 生成余量**」，不再是 `logical_pages`。
-  新增显式配额（沿用 `--kv-capacity` 作为物理预算，`--max-context` 作为逻辑上限）。
-- 去掉 `kv_capacity >= max_context` 两处校验，改为 `kv_capacity >= <新下限>` 且
-  `max_context >= <某最小值>`。
-- `kvmem_host_arena_` 容量从 `page_capacity_` 改为独立配额（host 侧，不受显存约束）。
+  新增 `--kv-device-tokens N` 表达上屏预算，`--kv-capacity` 语义与既有约束不变。
+- 去掉 `kv_capacity >= max_context` 校验，改为 `--kv-device-tokens` 走独立分支。
 - 逻辑容量 `capacity`／`page_capacity_` 保持 `max_context` 不变。
+- 新增启动期校验：页面存储的描述符数（设备页 + host 页）必须覆盖逻辑地址空间，
+  否则报出「需要多少 host 页」而不是在深层物化时才失败。
 
-**验收**：`--max-context 8192 --kv-capacity 2048`（逻辑 4 倍于物理）能启动；单轮短对话
-跑通且答案与全物理配置一致；显存占用按 `kv_capacity` 计算。
+**实测**（`--max-context 8192 --kv-device-tokens 2048`）：
 
-**风险**：低。这一步只改校验与尺寸决策，不改运行语义。
+- 启动成功，容量行显示 `KV 2,048 tokens | pages 32/128` —— **逻辑 128 页、物理 32 页，
+  解耦成立**。
+- 单轮问答正常。
+- 默认路径零回归：不加新选项时仍是 `pages 64/64`、cache 97.2%、TTFT 1.2s、答案一致；
+  5 个 KVMem 单测全过。
+
+**仍未通过：第二轮。** 报错是准入层的
+`isolated-feasible request is blocked in an idle Engine`
+（`engine_core.h:1710`）：资源巡检认为该请求在**空闲**引擎中仍不可行。原因是计划层仍然按
+「池要装得下整个 prompt」计算物理需求——`text_kv_page_entitlement =
+pages_for_tokens(prompt_tokens + effective_output - 1)` 与 `prepare_activation` 的
+一次性 `growth = entitlement - required_pages`（见第二步）。所以第一步是**使能改动**，
+真正的可用性要等第二步把「按需预留 + 耗尽时换出」落地。
+
+**风险**：低。新选项独立，默认路径逐位不变。
 
 ### 第二步：物理页耗尽时换出，而非抛错
 
@@ -119,9 +132,13 @@ sink/recent/检索命中块。
 - 关闭 KVMem 的默认路径冒烟（确认无回归）
 - 大 CTX 冒烟（`--max-context 8192 --kv-capacity 2048`）
 
-## 6. 待用户确认的决策
+## 6. 已确认的决策
 
-1. **CLI 形态**：沿用 `--kv-capacity` 表示物理预算，还是新增一个语义更清晰的选项名？
-2. **第三步的质量权衡**：同一轮内中段不可见，是否可以接受？如果不接受，本设计到此为止
-   （只能拿到「跨轮」的显存收益，拿不到「单轮长上下文」）。
-3. **host arena 配额**：复用现有 `--host-kv-mib`，还是新增独立配额？
+1. **CLI 形态**：新增独立选项表达上屏预算（`--kv-capacity` 语义与既有约束保持不变），
+   既有配置不需要迁移。
+2. **质量权衡**：分期做。先落地跨轮收益（池只需装「压缩后的窗口 + 本轮新增 + 生成余量」），
+   实测后再决定是否加「单轮内也换出中段」，后者作为独立提交。
+3. **host arena 配额**：给 KVMem 淘汰块单独一个配额，不与已缓存前缀共用 `--host-kv-mib`。
+
+因此本设计的落地顺序调整为：第一步（容量校验与预算解耦）→ 第二步（物理页耗尽时换出）→
+第三步（工作集固定，服务跨轮收益）→ 若实测需要，再加「单轮内换出」与「生成期回收」。

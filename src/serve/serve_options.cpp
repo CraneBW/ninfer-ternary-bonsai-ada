@@ -71,7 +71,8 @@ KvCapacityPolicy parse_kv_capacity(const char* text) {
 std::string serve_usage_text(const char* argv0) {
     return std::string("usage: ") + argv0 +
            " <model.ninfer> [--host H] [--port N] [--api-key KEY] "
-           "[--model-id ID] [--max-context N] [--kv-capacity N|auto] [--max-concurrency N] "
+           "[--model-id ID] [--max-context N] [--kv-capacity N|auto] "
+           "[--kv-device-tokens N] [--max-concurrency N] "
            "[--max-pending-requests N] [--pending-timeout-ms N] "
            "[--prefill-chunk N] [--log-stats-interval-ms N] [--device N] "
            "[--context-cost-presets FILE] "
@@ -108,6 +109,8 @@ std::string serve_usage_text(const char* argv0) {
            "       --kv-capacity auto leaves " +
            std::to_string(kDefaultKvCapacityHeadroomBytes / (1024ULL * 1024ULL)) +
            " MiB of sizing headroom\n"
+           "       --kv-device-tokens caps the KV page pool below --max-context; the rest of the "
+           "context is backed by host memory, so it needs the host KV tier\n"
            "       --no-prefix-reuse disables compatible-prefix caching (enabled by default)\n"
            "       context cache defaults: device-state=max-concurrency, private=2x concurrency, "
            "shared=max(max-concurrency,4), anchors=2; Host state=8 slots, Host KV=8192 MiB\n"
@@ -141,6 +144,7 @@ ServeOptions parse_serve_options(int argc, char** argv) {
     }
     bool default_max_tokens_explicit = false;
     bool kv_capacity_explicit        = false;
+    bool kv_device_tokens_explicit   = false;
     bool context_capacity_explicit   = false;
     if (argc >= 2 && (std::string(argv[1]) == "--help" || std::string(argv[1]) == "-h")) {
         options.help_requested = true;
@@ -171,6 +175,15 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         } else if (arg == "--kv-capacity") {
             options.kv_capacity  = parse_kv_capacity(require_value("--kv-capacity"));
             kv_capacity_explicit = true;
+        } else if (arg == "--kv-device-tokens") {
+            const int value =
+                parse_nonnegative_int(require_value("--kv-device-tokens"), "kv-device-tokens");
+            if (value == 0) {
+                throw std::invalid_argument("--kv-device-tokens must be positive");
+            }
+            options.kv_capacity        = KvCapacityPolicy::device_budget(
+                static_cast<std::uint32_t>(value));
+            kv_device_tokens_explicit = true;
         } else if (arg == "--max-concurrency") {
             options.max_concurrency = static_cast<std::uint32_t>(
                 parse_nonnegative_int(require_value("--max-concurrency"), "max-concurrency"));
@@ -344,7 +357,10 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             throw std::invalid_argument("unknown argument: " + arg);
         }
     }
-    if (!kv_capacity_explicit) {
+    if (kv_capacity_explicit && kv_device_tokens_explicit) {
+        throw std::invalid_argument("--kv-capacity and --kv-device-tokens cannot be combined");
+    }
+    if (!kv_capacity_explicit && !kv_device_tokens_explicit) {
         options.kv_capacity = KvCapacityPolicy::explicit_capacity(options.max_context);
     }
     if (!options.allow_prefix_reuse) {
@@ -355,6 +371,11 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         options.context_cache.enabled                = false;
         options.context_cache.host_state_slots       = 0;
         options.context_cache.host_kv_capacity_bytes = 0;
+    }
+    if (kv_device_tokens_explicit && !options.allow_prefix_reuse) {
+        throw std::invalid_argument(
+            "--kv-device-tokens needs the host KV tier to back the context, so it cannot be "
+            "combined with --no-prefix-reuse");
     }
     if (options.port <= 0 || options.port > 65535) {
         throw std::invalid_argument("--port must be in [1,65535]");

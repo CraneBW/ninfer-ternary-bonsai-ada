@@ -835,8 +835,23 @@ ProgramImplCore::ProgramImplCore(const LoadedModelData& model_in, const Sequence
     decoder = std::make_unique<qwen3_6::DecoderState>(backing, plan.persistent.decoder);
     text_host_kv_page_stride =
         plan_host_kv_page_layout(decoder->text_kv.page_pool().geometry()).page_stride;
+    // The address space can name every logical page of the configured context, so the page
+    // store needs a descriptor for each one. A device budget below the context is only valid
+    // when the host tier makes up the difference.
+    const std::uint32_t text_page_descriptors = logical_page_capacity(decoder->text_kv.page_pool());
+    const std::uint32_t text_addressable_pages =
+        decoder->text_kv.execution_tables().logical_page_capacity();
+    if (text_page_descriptors < text_addressable_pages) {
+        const std::uint32_t device_pages = decoder->text_kv.page_pool().capacity_pages();
+        throw std::invalid_argument(
+            "KV page store cannot describe the configured context: " +
+            std::to_string(device_pages) + " device + " +
+            std::to_string(text_page_descriptors - device_pages) + " host pages, but the context "
+            "needs " + std::to_string(text_addressable_pages) +
+            " logical pages; raise --host-kv-mib or the KV device budget");
+    }
     text_kv_pages = std::make_unique<LogicalKVPageStore>(
-        decoder->text_kv.page_pool(), logical_page_capacity(decoder->text_kv.page_pool()));
+        decoder->text_kv.page_pool(), text_page_descriptors);
     text_kv_addresses = std::make_unique<KVAddressSpaceStore>(
         *text_kv_pages, decoder->text_kv.execution_tables(), address_capacity,
         decoder->text_kv.execution_tables().logical_page_capacity());

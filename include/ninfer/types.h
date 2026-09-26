@@ -48,6 +48,11 @@ enum class EnginePurpose : std::uint8_t {
 enum class KvCapacityMode : std::uint8_t {
     Explicit,
     Automatic,
+    // The device page pool is a budget that may sit below `max_context`: the
+    // context stays the logical upper bound, and the KV beyond the budget is
+    // backed by host memory instead of device pages. Only meaningful with a
+    // mechanism that parks resident pages and restores them on demand.
+    DeviceBudget,
 };
 
 inline constexpr std::size_t kDefaultKvCapacityHeadroomBytes = 1024ULL * 1024ULL * 1024ULL;
@@ -65,6 +70,11 @@ struct KvCapacityPolicy {
     [[nodiscard]] static constexpr KvCapacityPolicy
     automatic(std::size_t headroom_bytes = kDefaultKvCapacityHeadroomBytes) noexcept {
         return KvCapacityPolicy{KvCapacityMode::Automatic, 0, headroom_bytes};
+    }
+
+    [[nodiscard]] static constexpr KvCapacityPolicy
+    device_budget(std::uint32_t tokens) noexcept {
+        return KvCapacityPolicy{KvCapacityMode::DeviceBudget, tokens, 0};
     }
 };
 

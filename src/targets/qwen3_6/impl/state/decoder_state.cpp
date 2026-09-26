@@ -14,7 +14,8 @@ std::uint32_t page_count(std::uint32_t capacity) {
 
 PagedKVCacheLayout plan_cache(LayoutBuilder& builder, std::uint32_t layers, std::uint32_t capacity,
                               std::int32_t kv_heads, std::int32_t head_dim, KvCacheStorage storage,
-                              std::int32_t table_rows, std::uint32_t physical_page_groups) {
+                              std::int32_t table_rows, std::uint32_t physical_page_groups,
+                              bool host_backed_kv) {
     if (layers == 0 ||
         layers > static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max()) ||
         kv_heads <= 0 || head_dim <= 0 || table_rows <= 0) {
@@ -23,7 +24,9 @@ PagedKVCacheLayout plan_cache(LayoutBuilder& builder, std::uint32_t layers, std:
     const PagedKVStorageLayout layer_storage = paged_kv_storage_layout(storage, head_dim);
 
     const std::uint32_t logical_pages = page_count(capacity);
-    if (physical_page_groups < logical_pages) {
+    // A host-backed pool only has to hold the resident working set, so the
+    // logical address space may outgrow the device page count.
+    if (!host_backed_kv && physical_page_groups < logical_pages) {
         throw std::invalid_argument("Paged KV physical pages are below logical capacity");
     }
 
@@ -63,11 +66,11 @@ DecoderStateLayout plan_decoder_state(LayoutBuilder& builder, const DecoderState
     DecoderStateLayout layout;
     layout.text_kv = plan_cache(builder, spec.full_attention_layers, spec.capacity, spec.kv_heads,
                                 spec.attention_head_dim, spec.kv_storage, spec.kv_table_rows,
-                                spec.text_physical_page_groups);
+                                spec.text_physical_page_groups, spec.host_backed_kv);
     if (spec.enable_mtp) {
         layout.mtp_kv = plan_cache(builder, spec.mtp_layers, spec.capacity, spec.kv_heads,
                                    spec.attention_head_dim, spec.kv_storage, spec.kv_table_rows,
-                                   spec.mtp_physical_page_groups);
+                                   spec.mtp_physical_page_groups, false);
     }
     return layout;
 }
