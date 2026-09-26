@@ -80,7 +80,10 @@ std::string usage_text(const char* argv0) {
            " <model.ninfer> (--prompt <text>|--messages <messages.json>)\n"
            "       [--max-context N] [--kv-capacity N|auto] [--prefill-chunk N] [--max-new N]\n"
            "       [--device N]\n"
-           "       [--kv-dtype bf16|int8|fp8|nvfp4|k8v4] [--spec mtp|dflash|dflash2 --draft-tokens "
+           "       [--kv-dtype bf16|int8|fp8|nvfp4|k8v4] "
+           "[--cache-type-k bf16|int8|fp8|nvfp4|int4|int4-e8 "
+           "--cache-type-v bf16|int8|fp8|nvfp4|int4]\n"
+           "       [--spec mtp|dflash|dflash2 --draft-tokens "
            "N]\n"
            "       [--lm-head-draft]\n"
            "       [--temperature F] [--top-p F] [--top-k N] [--min-p F]\n"
@@ -115,6 +118,9 @@ Options parse_options(int argc, char** argv) {
     if (argc < 2) { throw std::invalid_argument(".ninfer model path is required"); }
     options.artifact_path     = argv[1];
     bool kv_capacity_explicit = false;
+    bool kv_dtype_explicit    = false;
+    std::optional<KvKeyStorage> kv_key_storage;
+    std::optional<KvValueStorage> kv_value_storage;
 
     for (int i = 2; i < argc; ++i) {
         const std::string_view arg(argv[i]);
@@ -140,6 +146,23 @@ Options parse_options(int argc, char** argv) {
             options.device = parse_device(value(arg));
         } else if (arg == "--kv-dtype") {
             options.kv_cache = parse_kv_cache(value(arg));
+            kv_dtype_explicit = true;
+        } else if (arg == "--cache-type-k") {
+            const std::string_view text = value(arg);
+            const auto parsed           = parse_kv_key_storage(text);
+            if (!parsed) {
+                throw std::invalid_argument(
+                    "--cache-type-k must be bf16, int8, fp8, nvfp4, int4, or int4-e8");
+            }
+            kv_key_storage = *parsed;
+        } else if (arg == "--cache-type-v") {
+            const std::string_view text = value(arg);
+            const auto parsed           = parse_kv_value_storage(text);
+            if (!parsed) {
+                throw std::invalid_argument(
+                    "--cache-type-v must be bf16, int8, fp8, nvfp4, or int4");
+            }
+            kv_value_storage = *parsed;
         } else if (arg == "--spec") {
             options.speculative.backend = product::parse_speculative_backend(value(arg));
         } else if (arg == "--draft-tokens") {
@@ -206,6 +229,24 @@ Options parse_options(int argc, char** argv) {
 
     if (!kv_capacity_explicit) {
         options.kv_capacity = KvCapacityPolicy::explicit_capacity(options.max_context);
+    }
+
+    if (kv_dtype_explicit && (kv_key_storage || kv_value_storage)) {
+        throw std::invalid_argument(
+            "--kv-dtype sets both sides of the KV cache, so it cannot be combined with "
+            "--cache-type-k or --cache-type-v");
+    }
+    if (!kv_dtype_explicit && (kv_key_storage || kv_value_storage)) {
+        const auto resolved = resolve_kv_cache_storage(
+            kv_key_storage.value_or(KvKeyStorage::BFloat16),
+            kv_value_storage.value_or(KvValueStorage::BFloat16));
+        if (!resolved) {
+            throw std::invalid_argument(
+                "--cache-type-k/--cache-type-v select a pair without a kernel; supported "
+                "pairs: " +
+                std::string(kSupportedKvCachePairList));
+        }
+        options.kv_cache = *resolved;
     }
 
     const bool has_prompt   = !options.prompt.empty();

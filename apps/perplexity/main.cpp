@@ -56,7 +56,9 @@ std::string usage_text() {
     return "usage: ninfer-perplexity <model.ninfer> "
            "(--corpus <manifest.json> [--quick] | --text <utf8-file>)\n"
            "       [--context N] [--stride N] [--device N]\n"
-           "       [--kv-dtype bf16|int8|fp8|nvfp4|k8v4] [--output <directory>]\n"
+           "       [--kv-dtype bf16|int8|fp8|nvfp4|k8v4] "
+           "[--cache-type-k bf16|int8|fp8|nvfp4|int4|int4-e8 "
+           "--cache-type-v bf16|int8|fp8|nvfp4|int4] [--output <directory>]\n"
            "       [--log-level trace|debug|info|warning|error|critical|off]\n";
 }
 
@@ -83,6 +85,9 @@ Options parse_options(int argc, char** argv) {
     }
     Options out;
     out.artifact = argv[1];
+    bool kv_dtype_explicit = false;
+    std::optional<ninfer::KvKeyStorage> kv_key_storage;
+    std::optional<ninfer::KvValueStorage> kv_value_storage;
     for (int i = 2; i < argc; ++i) {
         const std::string_view option = argv[i];
         const auto value              = [&](const char* label) -> std::string_view {
@@ -116,6 +121,19 @@ Options parse_options(int argc, char** argv) {
             } else {
                 usage_error("--kv-dtype must be bf16, int8, fp8, nvfp4, or k8v4");
             }
+            kv_dtype_explicit = true;
+        } else if (option == "--cache-type-k") {
+            const auto parsed = ninfer::parse_kv_key_storage(value("--cache-type-k"));
+            if (!parsed) {
+                usage_error("--cache-type-k must be bf16, int8, fp8, nvfp4, int4, or int4-e8");
+            }
+            kv_key_storage = *parsed;
+        } else if (option == "--cache-type-v") {
+            const auto parsed = ninfer::parse_kv_value_storage(value("--cache-type-v"));
+            if (!parsed) {
+                usage_error("--cache-type-v must be bf16, int8, fp8, nvfp4, or int4");
+            }
+            kv_value_storage = *parsed;
         } else if (option == "--output") {
             out.output = std::filesystem::path(value("--output"));
         } else if (option == "--log-level") {
@@ -126,6 +144,22 @@ Options parse_options(int argc, char** argv) {
     }
     if (out.corpus.has_value() == out.text.has_value()) {
         usage_error("exactly one of --corpus and --text is required");
+    }
+    if (kv_dtype_explicit && (kv_key_storage || kv_value_storage)) {
+        usage_error(
+            "--kv-dtype sets both sides of the KV cache, so it cannot be combined with "
+            "--cache-type-k or --cache-type-v");
+    }
+    if (!kv_dtype_explicit && (kv_key_storage || kv_value_storage)) {
+        const auto resolved = ninfer::resolve_kv_cache_storage(
+            kv_key_storage.value_or(ninfer::KvKeyStorage::BFloat16),
+            kv_value_storage.value_or(ninfer::KvValueStorage::BFloat16));
+        if (!resolved) {
+            usage_error(std::string("--cache-type-k/--cache-type-v select a pair without a "
+                                    "kernel; supported pairs: ") +
+                        ninfer::kSupportedKvCachePairList);
+        }
+        out.kv = *resolved;
     }
     if (out.quick && !out.corpus) { usage_error("--quick requires --corpus"); }
     if (out.context < 2 || out.stride == 0 || out.stride >= out.context) {

@@ -83,7 +83,9 @@ std::string serve_usage_text(const char* argv0) {
            "[--max-long-anchors-per-continuation N] "
            "[--request-log-jsonl FILE] "
            "[--response-store-max-records N] [--response-store-max-mib N] "
-           "[--kv-dtype bf16|int8|fp8|nvfp4|k8v4|rk4v4|rk4v4-e8] [--spec mtp|dflash|dflash2 --draft-tokens N] "
+           "[--kv-dtype bf16|int8|fp8|nvfp4|k8v4|rk4v4|rk4v4-e8 | "
+           "--cache-type-k <bf16|int8|fp8|nvfp4|int4|int4-e8> "
+           "--cache-type-v <bf16|int8|fp8|nvfp4|int4>] [--spec mtp|dflash|dflash2 --draft-tokens N] "
            "[--default-max-tokens N] [--default-thinking-budget N] "
            "[--vision] [--vision-max-tokens N] [--no-cuda-graph] [--no-prefix-reuse] "
            "[--lm-head-draft] [--no-thinking] [--preserve-thinking] "
@@ -111,6 +113,9 @@ std::string serve_usage_text(const char* argv0) {
            " MiB of sizing headroom\n"
            "       --kv-device-tokens caps the KV page pool below --max-context; the rest of the "
            "context is backed by host memory, so it needs the host KV tier\n"
+           "       --cache-type-k/--cache-type-v choose each side of the KV cache; an omitted "
+           "side stays at bf16, and the pair must have a kernel (see the server error for the "
+           "supported list)\n"
            "       --no-prefix-reuse disables compatible-prefix caching (enabled by default)\n"
            "       context cache defaults: device-state=max-concurrency, private=2x concurrency, "
            "shared=max(max-concurrency,4), anchors=2; Host state=8 slots, Host KV=8192 MiB\n"
@@ -146,6 +151,9 @@ ServeOptions parse_serve_options(int argc, char** argv) {
     bool kv_capacity_explicit        = false;
     bool kv_device_tokens_explicit   = false;
     bool context_capacity_explicit   = false;
+    bool kv_dtype_explicit           = false;
+    std::optional<KvKeyStorage> kv_key_storage;
+    std::optional<KvValueStorage> kv_value_storage;
     if (argc >= 2 && (std::string(argv[1]) == "--help" || std::string(argv[1]) == "-h")) {
         options.help_requested = true;
         return options;
@@ -285,6 +293,23 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             options.device = parse_nonnegative_int(require_value("--device"), "device");
         } else if (arg == "--kv-dtype") {
             options.kv_cache = parse_kv_dtype(require_value("--kv-dtype"));
+            kv_dtype_explicit = true;
+        } else if (arg == "--cache-type-k") {
+            const std::string_view text = require_value("--cache-type-k");
+            const auto parsed           = parse_kv_key_storage(text);
+            if (!parsed) {
+                throw std::invalid_argument(
+                    "--cache-type-k must be bf16, int8, fp8, nvfp4, int4, or int4-e8");
+            }
+            kv_key_storage = *parsed;
+        } else if (arg == "--cache-type-v") {
+            const std::string_view text = require_value("--cache-type-v");
+            const auto parsed           = parse_kv_value_storage(text);
+            if (!parsed) {
+                throw std::invalid_argument(
+                    "--cache-type-v must be bf16, int8, fp8, nvfp4, or int4");
+            }
+            kv_value_storage = *parsed;
         } else if (arg == "--spec") {
             options.speculative.backend =
                 product::parse_speculative_backend(require_value("--spec"));
@@ -362,6 +387,25 @@ ServeOptions parse_serve_options(int argc, char** argv) {
     }
     if (!kv_capacity_explicit && !kv_device_tokens_explicit) {
         options.kv_capacity = KvCapacityPolicy::explicit_capacity(options.max_context);
+    }
+    if (kv_dtype_explicit && (kv_key_storage || kv_value_storage)) {
+        throw std::invalid_argument(
+            "--kv-dtype sets both sides of the KV cache, so it cannot be combined with "
+            "--cache-type-k or --cache-type-v");
+    }
+    if (!kv_dtype_explicit && (kv_key_storage || kv_value_storage)) {
+        // An omitted side stays at bf16, so a single-sided request that has no kernel
+        // fails here with the supported-pair list instead of running the wrong decode.
+        const auto resolved = resolve_kv_cache_storage(
+            kv_key_storage.value_or(KvKeyStorage::BFloat16),
+            kv_value_storage.value_or(KvValueStorage::BFloat16));
+        if (!resolved) {
+            throw std::invalid_argument(
+                "--cache-type-k/--cache-type-v select a pair without a kernel; supported "
+                "pairs: " +
+                std::string(kSupportedKvCachePairList));
+        }
+        options.kv_cache = *resolved;
     }
     if (!options.allow_prefix_reuse) {
         if (context_capacity_explicit) {

@@ -80,6 +80,31 @@ int main() {
     failures += check(kv_help.find("nvfp4") != std::string::npos &&
                           kv_help.find("k8v4") != std::string::npos,
                       "serve help omits a production KV storage mode");
+    failures += check(kv_help.find("--cache-type-k") != std::string::npos,
+                      "serve help omits the per-side KV cache knobs");
+
+    const ServeOptions split_k8v4 = parse({"ninfer-serve", "model.ninfer", "--cache-type-k",
+                                           "fp8", "--cache-type-v", "nvfp4"});
+    failures += check(split_k8v4.kv_cache == ninfer::KvCacheStorage::Fp8KeyNvfp4Value,
+                      "per-side fp8/nvfp4 did not select asymmetric K8V4 KV");
+    const ServeOptions split_int4e8 = parse({"ninfer-serve", "model.ninfer", "--cache-type-k",
+                                             "int4-e8", "--cache-type-v", "int4"});
+    failures += check(split_int4e8.kv_cache == ninfer::KvCacheStorage::RK4V4E8,
+                      "per-side int4-e8/int4 did not select rk4v4-e8 KV");
+    bool unsupported_pair_rejected = false;
+    try {
+        (void)parse({"ninfer-serve", "model.ninfer", "--cache-type-k", "int8", "--cache-type-v",
+                     "nvfp4"});
+    } catch (const std::invalid_argument&) { unsupported_pair_rejected = true; }
+    failures += check(unsupported_pair_rejected,
+                      "a key/value pair without a kernel was accepted");
+    bool mixed_kv_flags_rejected = false;
+    try {
+        (void)parse({"ninfer-serve", "model.ninfer", "--kv-dtype", "fp8", "--cache-type-v",
+                     "nvfp4"});
+    } catch (const std::invalid_argument&) { mixed_kv_flags_rejected = true; }
+    failures += check(mixed_kv_flags_rejected,
+                      "--kv-dtype was accepted together with a per-side cache type");
 
     const ServeOptions model_alias =
         parse({"ninfer-serve", "model.ninfer", "--model-id", "deployment-alias"});

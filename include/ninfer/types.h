@@ -40,6 +40,105 @@ enum class KvCacheStorage : std::uint8_t {
     RK4V4E8,
 };
 
+// One side of the KV cache's element encoding, as selected by --cache-type-k /
+// --cache-type-v. The engine and its kernels are specialized per (key, value)
+// pair rather than per side, so the two knobs are resolved into a single
+// KvCacheStorage before the engine is built; see resolve_kv_cache_storage().
+enum class KvKeyStorage : std::uint8_t {
+    BFloat16,             // bf16
+    Int8Group64,          // int8
+    Fp8E4M3Row256,        // fp8
+    Nvfp4Group16,         // nvfp4
+    RotatedInt4Group64,   // int4
+    RotatedInt4E8Group64, // int4-e8
+};
+
+enum class KvValueStorage : std::uint8_t {
+    BFloat16,           // bf16
+    Int8Group64,        // int8
+    Fp8E4M3Row256,      // fp8
+    Nvfp4Group16,       // nvfp4
+    RotatedInt4Group64, // int4
+};
+
+// Option spelling of each side, shared by every front end's diagnostics.
+[[nodiscard]] inline constexpr const char* kv_key_storage_name(KvKeyStorage storage) noexcept {
+    switch (storage) {
+    case KvKeyStorage::BFloat16: return "bf16";
+    case KvKeyStorage::Int8Group64: return "int8";
+    case KvKeyStorage::Fp8E4M3Row256: return "fp8";
+    case KvKeyStorage::Nvfp4Group16: return "nvfp4";
+    case KvKeyStorage::RotatedInt4Group64: return "int4";
+    case KvKeyStorage::RotatedInt4E8Group64: return "int4-e8";
+    }
+    return "unknown";
+}
+
+[[nodiscard]] inline constexpr const char* kv_value_storage_name(KvValueStorage storage) noexcept {
+    switch (storage) {
+    case KvValueStorage::BFloat16: return "bf16";
+    case KvValueStorage::Int8Group64: return "int8";
+    case KvValueStorage::Fp8E4M3Row256: return "fp8";
+    case KvValueStorage::Nvfp4Group16: return "nvfp4";
+    case KvValueStorage::RotatedInt4Group64: return "int4";
+    }
+    return "unknown";
+}
+
+[[nodiscard]] inline std::optional<KvKeyStorage> parse_kv_key_storage(
+    std::string_view text) noexcept {
+    if (text == "bf16") { return KvKeyStorage::BFloat16; }
+    if (text == "int8") { return KvKeyStorage::Int8Group64; }
+    if (text == "fp8") { return KvKeyStorage::Fp8E4M3Row256; }
+    if (text == "nvfp4") { return KvKeyStorage::Nvfp4Group16; }
+    if (text == "int4") { return KvKeyStorage::RotatedInt4Group64; }
+    if (text == "int4-e8") { return KvKeyStorage::RotatedInt4E8Group64; }
+    return std::nullopt;
+}
+
+[[nodiscard]] inline std::optional<KvValueStorage> parse_kv_value_storage(
+    std::string_view text) noexcept {
+    if (text == "bf16") { return KvValueStorage::BFloat16; }
+    if (text == "int8") { return KvValueStorage::Int8Group64; }
+    if (text == "fp8") { return KvValueStorage::Fp8E4M3Row256; }
+    if (text == "nvfp4") { return KvValueStorage::Nvfp4Group16; }
+    if (text == "int4") { return KvValueStorage::RotatedInt4Group64; }
+    return std::nullopt;
+}
+
+// Every (key, value) pair the paged-KV kernels are compiled for. A combination
+// outside this list is rejected rather than silently running the wrong decode.
+inline constexpr const char* kSupportedKvCachePairList =
+    "bf16/bf16, int8/int8, fp8/fp8, nvfp4/nvfp4, fp8/nvfp4, int4/int4, int4-e8/int4";
+
+[[nodiscard]] inline std::optional<KvCacheStorage> resolve_kv_cache_storage(
+    KvKeyStorage key, KvValueStorage value) noexcept {
+    switch (key) {
+    case KvKeyStorage::BFloat16:
+        if (value == KvValueStorage::BFloat16) { return KvCacheStorage::BFloat16; }
+        break;
+    case KvKeyStorage::Int8Group64:
+        if (value == KvValueStorage::Int8Group64) { return KvCacheStorage::Int8Group64; }
+        break;
+    case KvKeyStorage::Fp8E4M3Row256:
+        if (value == KvValueStorage::Fp8E4M3Row256) { return KvCacheStorage::Fp8E4M3Row256; }
+        if (value == KvValueStorage::Nvfp4Group16) { return KvCacheStorage::Fp8KeyNvfp4Value; }
+        break;
+    case KvKeyStorage::Nvfp4Group16:
+        if (value == KvValueStorage::Nvfp4Group16) { return KvCacheStorage::Nvfp4Group16; }
+        break;
+    case KvKeyStorage::RotatedInt4Group64:
+        if (value == KvValueStorage::RotatedInt4Group64) {
+            return KvCacheStorage::RotatedInt4KeyInt4ValueGroup64;
+        }
+        break;
+    case KvKeyStorage::RotatedInt4E8Group64:
+        if (value == KvValueStorage::RotatedInt4Group64) { return KvCacheStorage::RK4V4E8; }
+        break;
+    }
+    return std::nullopt;
+}
+
 enum class EnginePurpose : std::uint8_t {
     Generation,
     CausalScoring,
