@@ -24,8 +24,8 @@ TernaryLaunch select_ternary_launch(std::int32_t n, std::int32_t k, std::int32_t
 // wide-t rung at 56.94 ms per forward instead of the s8 rung's 36.90 ms.
 // The arena capacity already counts these bytes: ternary_rotation_workspace_bytes() is the capacity
 // statement for every ternary linear call (see linear.cpp), and it includes the s8 scratch.
-TernaryS8Scratch allocate_ternary_s8_scratch(WorkspaceArena& workspace, std::int32_t k,
-                                             std::int32_t tokens);
+TernaryS8Scratch allocate_ternary_s8_scratch(WorkspaceArena& workspace, std::int32_t n,
+                                             std::int32_t k, std::int32_t tokens);
 
 // Rotate the activation into the folded basis when the weight needs it, then run the GEMM.
 void ternary_dispatch(const Tensor& x, const Weight& w, Tensor& out, LinearPolicy policy,

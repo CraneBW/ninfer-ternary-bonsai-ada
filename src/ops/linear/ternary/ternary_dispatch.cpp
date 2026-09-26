@@ -34,8 +34,8 @@ TernaryLaunch select_ternary_launch(std::int32_t n, std::int32_t k, std::int32_t
     return t == 1 ? launch_ternary_gemm_t1 : launch_ternary_gemm_t8;
 }
 
-TernaryS8Scratch allocate_ternary_s8_scratch(WorkspaceArena& workspace, std::int32_t k,
-                                             std::int32_t tokens) {
+TernaryS8Scratch allocate_ternary_s8_scratch(WorkspaceArena& workspace, std::int32_t n,
+                                             std::int32_t k, std::int32_t tokens) {
     TernaryS8Scratch scratch{};
     if (tokens < kTernaryS8ScratchMinTokens) {
         // Below the lowest count the rung can be ASKED for, not below the count it is chosen at --
@@ -47,6 +47,28 @@ TernaryS8Scratch allocate_ternary_s8_scratch(WorkspaceArena& workspace, std::int
     const DeviceSpan scales = workspace.alloc_bytes(ternary_s8_scales_bytes(tokens));
     scratch.codes           = static_cast<std::int8_t*>(codes.data);
     scratch.scales          = static_cast<float*>(scales.data);
+    // Split-K reduction buffer, taken only for the shapes that will really slice. The launcher caps
+    // its own slice count against partial_floats, so an arena that under-delivers degrades to a
+    // single slice rather than overrunning; and the size here is bounded by
+    // ternary_s8_partial_budget_bytes(), which is the term ternary_rotation_workspace_bytes()
+    // declares for it (SKILL trap 8: any new scratch has to be counted where the arena is sized).
+    const int slices = ternary_s8_slices(n, tokens, k);
+    if (slices > 1) {
+        const std::size_t bytes = ternary_s8_partial_bytes(n, tokens, slices);
+        // The capacity statement declares the BOUND (ternary_s8_partial_budget_bytes), not this
+        // size, because it cannot see n. Assert the derivation instead of trusting it: a shape that
+        // broke it would overrun the arena rather than fail.
+        if (bytes > ternary_s8_partial_budget_bytes(tokens)) {
+            throw std::invalid_argument(
+                "ternary s8 split-K: the reduction buffer exceeds the capacity declared for it "
+                "[N=" + std::to_string(n) + ", K=" + std::to_string(k) + ", T=" +
+                std::to_string(tokens) + ", slices=" + std::to_string(slices) + ", bytes=" +
+                std::to_string(bytes) + "]");
+        }
+        const DeviceSpan  partial = workspace.alloc_bytes(bytes);
+        scratch.partial           = static_cast<float*>(partial.data);
+        scratch.partial_floats    = static_cast<std::int32_t>(bytes / sizeof(float));
+    }
     return scratch;
 }
 
@@ -97,7 +119,7 @@ void ternary_dispatch(const Tensor& x, const Weight& w, Tensor& out, LinearPolic
     // same arena the rotation just used, and counted by ternary_rotation_workspace_bytes() so the
     // planner sizes the arena for it -- allocating it lazily inside the launch would be illegal,
     // because this op runs inside captured CUDA graphs.
-    const TernaryS8Scratch scratch = allocate_ternary_s8_scratch(*workspace, w.k, x.ne[1]);
+    const TernaryS8Scratch scratch = allocate_ternary_s8_scratch(*workspace, w.n, w.k, x.ne[1]);
     launch(activation, w, out, w.n, stream, scratch);
 }
 

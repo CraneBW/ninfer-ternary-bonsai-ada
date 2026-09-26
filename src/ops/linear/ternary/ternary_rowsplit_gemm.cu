@@ -632,18 +632,32 @@ inline int s8_token_grid(int grid_x, std::int32_t tokens, int tile_tokens) {
 }
 
 // kRowsPerCta does not depend on the token tile (it is rows-per-warp times warps), so all three
-// instantiations launch the same row grid.
+// instantiations launch the same row grid. Returns the number of K-slices actually used, so the
+// caller can run the reduction.
 template <int Tokens, int MinBlocks>
-void launch_pq2_mma_s8_tile(const Weight& w, Tensor& out, std::int32_t out_row_stride,
-                            std::int32_t tokens, TernaryS8Scratch scratch, cudaStream_t stream) {
+int launch_pq2_mma_s8_tile(const Weight& w, Tensor& out, std::int32_t out_row_stride,
+                           std::int32_t tokens, TernaryS8Scratch scratch, cudaStream_t stream) {
     constexpr int kWarps = 4;
     const int grid_x = div_up(w.n, TernaryS8Storage<Tokens, kWarps>::kRowsPerCta);
+    // K is cut only where the token axis cannot add blocks (ternary_s8_slices decides), and only as
+    // far as the caller's reduction buffer actually reaches -- the launcher never assumes the arena
+    // granted what it asked for.
+    int slices = ternary_s8_slices(w.n, tokens, w.k);
+    if (slices > 1) {
+        const std::int64_t per_slice =
+            static_cast<std::int64_t>(w.n) * (tokens < 64 ? tokens : 64);
+        const std::int64_t fits = per_slice > 0 ? scratch.partial_floats / per_slice : 0;
+        if (slices > fits) { slices = static_cast<int>(fits); }
+        if (slices < 2 || scratch.partial == nullptr) { slices = 1; }
+    }
     const dim3 grid(static_cast<unsigned>(grid_x),
-                    static_cast<unsigned>(s8_token_grid(grid_x, tokens, Tokens)));
+                    static_cast<unsigned>(s8_token_grid(grid_x, tokens, Tokens)),
+                    static_cast<unsigned>(slices));
     ternary_pq2_mma_s8_kernel<Tokens, kWarps, MinBlocks><<<grid, kWarps * 32, 0, stream>>>(
         scratch.codes, scratch.scales, static_cast<const std::uint8_t*>(w.qdata),
         static_cast<const std::uint8_t*>(w.scales), static_cast<__nv_bfloat16*>(out.data), w.n,
-        w.k, tokens, out_row_stride);
+        w.k, tokens, out_row_stride, nullptr, slices > 1 ? scratch.partial : nullptr);
+    return slices;
 }
 
 void launch_pq2_mma_s8(const Tensor& x, const Weight& w, Tensor& out,
@@ -663,22 +677,34 @@ void launch_pq2_mma_s8(const Tensor& x, const Weight& w, Tensor& out,
     // and gets all three MinBlocks arms, the two narrower tiles keep one each.
     const int tile = s8_tile_tokens(tokens);
     const int mb   = s8_min_blocks();
+    int slices     = 1;
     if (tile == 16) {
-        launch_pq2_mma_s8_tile<16, 3>(w, out, out_row_stride, tokens, scratch, stream);
+        slices = launch_pq2_mma_s8_tile<16, 3>(w, out, out_row_stride, tokens, scratch, stream);
     } else if (tile == 32) {
         if (mb == 4) {
-            launch_pq2_mma_s8_tile<32, 4>(w, out, out_row_stride, tokens, scratch, stream);
+            slices = launch_pq2_mma_s8_tile<32, 4>(w, out, out_row_stride, tokens, scratch, stream);
         } else {
-            launch_pq2_mma_s8_tile<32, 3>(w, out, out_row_stride, tokens, scratch, stream);
+            slices = launch_pq2_mma_s8_tile<32, 3>(w, out, out_row_stride, tokens, scratch, stream);
         }
     } else if (mb == 2) {
-        launch_pq2_mma_s8_tile<64, 2>(w, out, out_row_stride, tokens, scratch, stream);
+        slices = launch_pq2_mma_s8_tile<64, 2>(w, out, out_row_stride, tokens, scratch, stream);
     } else if (mb == 4) {
-        launch_pq2_mma_s8_tile<64, 4>(w, out, out_row_stride, tokens, scratch, stream);
+        slices = launch_pq2_mma_s8_tile<64, 4>(w, out, out_row_stride, tokens, scratch, stream);
     } else {
-        launch_pq2_mma_s8_tile<64, 3>(w, out, out_row_stride, tokens, scratch, stream);
+        slices = launch_pq2_mma_s8_tile<64, 3>(w, out, out_row_stride, tokens, scratch, stream);
     }
     CUDA_CHECK(cudaGetLastError());
+
+    if (slices > 1) {
+        // Same stream, so this is ordered after every slice. Deterministic by construction: the
+        // slices are summed in a fixed order, which is what keeps the PPL gate meaningful.
+        const std::int64_t total  = static_cast<std::int64_t>(tokens) * w.n;
+        const unsigned     blocks = static_cast<unsigned>((total + 255) / 256);
+        ternary_s8_reduce_kernel<<<blocks, 256, 0, stream>>>(
+            scratch.partial, static_cast<__nv_bfloat16*>(out.data), out_row_stride, w.n, tokens,
+            slices);
+        CUDA_CHECK(cudaGetLastError());
+    }
 }
 
 // Diagnostic for the rung dispatch: names the path each call ACTUALLY takes, so a dispatch change can

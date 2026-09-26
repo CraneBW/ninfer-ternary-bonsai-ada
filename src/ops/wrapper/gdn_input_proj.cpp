@@ -848,7 +848,7 @@ void gdn_input_proj(const Tensor& x, const Weight& qk_weight, const Weight& valu
     auto scope             = workspace.scope();
     const Tensor activation = detail::folded_activation(x, qk_weight, workspace, stream);
     const detail::TernaryS8Scratch s8_scratch =
-        detail::allocate_ternary_s8_scratch(workspace, kHidden, cols);
+        detail::allocate_ternary_s8_scratch(workspace, qk_weight.n, kHidden, cols);
     launch_ternary_split(activation, qk_weight, value_z_weight, qkv, z, kQkRows, kValueRows,
                          kZRows, s8_scratch, stream);
 }
@@ -1086,7 +1086,7 @@ void gdn_input_proj_conv_snapshot(const Tensor& x, const Weight& qk_weight,
         ProjectedWorkspace scratch = allocate_projected_workspace(ws, kChannels, geometry.width);
         const Tensor activation = detail::folded_activation(x, qk_weight, ws, stream);
         const detail::TernaryS8Scratch s8_scratch =
-            detail::allocate_ternary_s8_scratch(ws, qk_weight.k, x.ne[1]);
+            detail::allocate_ternary_s8_scratch(ws, qk_weight.n, qk_weight.k, x.ne[1]);
         launch_ternary_split(activation, qk_weight, value_z_weight, scratch.projected, z,
                              kQueryRows + kKeyRows, kValueRows, kZRows, s8_scratch, stream);
         detail::gdn_projected_conv_snapshot_launch(scratch.projected, conv_weight, conv_states,
@@ -1171,8 +1171,8 @@ void gdn_input_proj_conv_record(const Tensor& x, const Weight& qk_weight,
                            const Tensor activation =
                                detail::folded_activation(x_flat, qk_weight, workspace, stream);
                            const detail::TernaryS8Scratch s8_scratch =
-                               detail::allocate_ternary_s8_scratch(workspace, qk_weight.k,
-                                                                   x_flat.ne[1]);
+                               detail::allocate_ternary_s8_scratch(workspace, qk_weight.n,
+                                                                   qk_weight.k, x_flat.ne[1]);
                            launch_ternary_split(activation, qk_weight, value_z_weight, record_flat,
                                                 z_flat, kQueryRows + kKeyRows, kValueRows, kZRows,
                                                 s8_scratch, stream);
