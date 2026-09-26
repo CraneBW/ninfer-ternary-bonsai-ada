@@ -527,7 +527,28 @@ void ternary_pq2_mma_s8_kernel(const std::int8_t* __restrict__ act_codes,
     const int b_row  = lane & 7;                 // activation row (token) for ldmatrix matrix 0
     const int b_col  = ((lane >> 3) & 1) * 16;
 
-    for (int tok_base = 0; tok_base < tokens; tok_base += kTokens) {
+    // TOKEN TILES CAN BE SPLIT ACROSS blockIdx.y. gridDim.y == 1 is the shipped schedule and is
+    // bit-identical to it; gridDim.y == tiles gives each CTA exactly one token tile.
+    //
+    // This is free because the weights are NOT reused across token tiles: stage_weights sits inside
+    // the chunk loop, which is inside this loop, so a CTA re-stages all of its rows for every tile
+    // whether it processes them in sequence or hands them to another CTA. Splitting the tile loop
+    // across blocks therefore moves exactly the same bytes and simply multiplies the number of CTAs
+    // -- which is the thing that is short. The row-block grid is div_up(n, 64), so for n = 5120 it is
+    // 80 CTAs on 66 SMs (1.2 waves, sm__warps_active 10-12%) while the same kernel on a large-n
+    // layer runs 544 CTAs at 44.7% DRAM. More CTAs is the whole lever; this buys them without a
+    // K-split's partial-reduction buffer and without moving a single bit of the arithmetic, because
+    // each output element is still accumulated over the same chunks in the same order by one CTA.
+    //
+    // (The optimization list filed "put T in the grid" under do-not-do with "the floor is multiplied
+    // by ceil(T/8)". That reasoning compares against a one-weight-read floor this kernel has never
+    // had; the shipped schedule already pays ceil(T/kTokens) reads. Measured confirmation that
+    // weights are not reused: forcing the 32-wide tile at T=38 -- which doubles the tile count and
+    // therefore the weight traffic -- cost 19%, and nothing else changed.)
+    const int tiles_total = (tokens + kTokens - 1) / kTokens;
+    const int tile_step   = static_cast<int>(gridDim.y);
+    for (int tile = static_cast<int>(blockIdx.y); tile < tiles_total; tile += tile_step) {
+        const int tok_base = tile * kTokens;
         float acc[kSubTiles][4];
 #pragma unroll
         for (int sub = 0; sub < kSubTiles; ++sub) {
