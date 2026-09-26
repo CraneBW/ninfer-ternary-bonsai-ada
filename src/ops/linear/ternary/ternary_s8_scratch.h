@@ -84,6 +84,17 @@ inline constexpr int kTernaryS8ScratchMinTokens = 9;
     return threshold;
 }
 
+// How many s8 CTAs this card can hold at once: 66 SMs x 3 resident CTAs/SM. The 3 is not a guess --
+// it is where the kernel's own shared footprint lands it (25856 B x 3 = 77568 B of the 100 KB an
+// sm_89 SM offers; a fourth would need 103424 B). It is a CARD constant: re-derive it before quoting
+// any of the grid arithmetic below on different hardware.
+//
+// It is used to decide when a layer's row-block grid (`div_up(n, 64)`, a function of n alone) leaves
+// the card empty, which is the case for every shape in this artifact with n <= 12288 -- 16, 64, 80,
+// 96 and 192 CTAs against these 198 slots -- and those shapes are 48% of the ternary weight bytes
+// and 65% of the measured s8 time.
+inline constexpr int kTernaryS8ResidentCtas = 198;
+
 // Activation-quantization scratch for the int8 rung: one int8 code row per token (token-major, the
 // same layout as the activation it is built from) plus one fp32 scale per token.
 //

@@ -595,14 +595,51 @@ inline int s8_min_blocks() {
     return (forced == 2 || forced == 3 || forced == 4) ? forced : 3;
 }
 
+// blockIdx.y width for the s8 kernel: how many token tiles to spread across blocks.
+//
+// 1 is the shipped schedule -- every CTA walks all ceil(T/kTokens) tiles in sequence. Anything above
+// 1 hands each CTA one tile instead, which multiplies the CTA count by the tile count at NO cost in
+// weight traffic: the weights are re-staged per tile either way (stage_weights is inside the chunk
+// loop, which is inside the tile loop), so splitting the loop across blocks moves the same bytes and
+// simply gives the card more blocks to hide latency with. The arithmetic is untouched -- each output
+// element is still summed over the same chunks in the same order by one CTA -- so this arm is
+// bit-identical to the one it replaces and needs no numeric gate.
+//
+//   unset / auto / -1 -> split where the row-block grid alone under-fills the card (the default)
+//   0                 -> the pre-gridDim.y schedule, kept as the rollback and A/B arm
+//   N > 0             -> gridDim.y = min(tiles, N)
+//
+// MEASURED (2026-09-26, `~/ninfer-work/tokgrid-ab.py`, one binary, true alternation, 6 reps,
+// ninfer-perplexity at --context 512 so every forward sees T=508 and 8 token tiles):
+//   prefill throughput  1190.3 vs 943.5 tok/s  = +26.2%
+//   wall clock            25.0 vs 31.2 s       = -19.9%
+//   PPL                   9.693396 both arms, identical over repeated runs (the arm is bit-inert)
+// Per-launch s8 time from the paired nsys traces: gridX 16 -> 5.4x, 64 -> 1.67x, 80 -> 1.80x,
+// 96 -> 1.44x, and gridX 544 unchanged at 1.01x, which is the gate holding exactly where it should.
+inline int s8_token_grid(int grid_x, std::int32_t tokens, int tile_tokens) {
+    const int tiles = div_up(static_cast<int>(tokens), tile_tokens);
+    if (tiles <= 1) { return 1; }
+    static const int forced = [] {
+        const char* value = std::getenv("NINFER_TERNARY_S8_TOKGRID");
+        if (value == nullptr) { return -1; }
+        const std::string text(value);
+        if (text == "auto" || text == "-1") { return -1; }
+        return std::atoi(value);
+    }();
+    if (forced == 0) { return 1; }
+    if (forced > 0) { return tiles < forced ? tiles : forced; }
+    return grid_x < kTernaryS8ResidentCtas ? tiles : 1;
+}
+
 // kRowsPerCta does not depend on the token tile (it is rows-per-warp times warps), so all three
-// instantiations launch the same grid.
+// instantiations launch the same row grid.
 template <int Tokens, int MinBlocks>
 void launch_pq2_mma_s8_tile(const Weight& w, Tensor& out, std::int32_t out_row_stride,
                             std::int32_t tokens, TernaryS8Scratch scratch, cudaStream_t stream) {
     constexpr int kWarps = 4;
-    const unsigned grid =
-        static_cast<unsigned>(div_up(w.n, TernaryS8Storage<Tokens, kWarps>::kRowsPerCta));
+    const int grid_x = div_up(w.n, TernaryS8Storage<Tokens, kWarps>::kRowsPerCta);
+    const dim3 grid(static_cast<unsigned>(grid_x),
+                    static_cast<unsigned>(s8_token_grid(grid_x, tokens, Tokens)));
     ternary_pq2_mma_s8_kernel<Tokens, kWarps, MinBlocks><<<grid, kWarps * 32, 0, stream>>>(
         scratch.codes, scratch.scales, static_cast<const std::uint8_t*>(w.qdata),
         static_cast<const std::uint8_t*>(w.scales), static_cast<__nv_bfloat16*>(out.data), w.n,
