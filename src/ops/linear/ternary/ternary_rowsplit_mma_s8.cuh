@@ -422,18 +422,35 @@ void ternary_pq2_mma_s8_kernel(const std::int8_t* __restrict__ act_codes,
         }
         if (lane < kTernaryS8RowsPerWarp) {
             const std::int64_t global_row = warp_row_base + lane;
-            // SYNCHRONOUS, and that is a known cost -- see the note at the top of this function.
-            // Making it async the obvious way (cp.async into the shared slot) is ILLEGAL here: a
-            // chunk is exactly one ternary group (kTernaryS8ChunkK == kGroupK == 128), the scale
-            // plane is group-strided, so the address is
+            // SYNCHRONOUS, and that stays deliberate -- the cost is real but it does not pay to
+            // close it. This is the one bare LDG in the function; everything else is cp.async.
+            // ptxas emits it as an LDG.E.U16/STS.U16 pair ahead of the __syncwarp and the IMMA
+            // block, so the warp waits on a global round trip once per chunk, 40-136 times per CTA,
+            // on the mma's critical path -- the exact ordering this file's own PTQ1_0 note names as
+            // the thing the wide-t rung was rewritten to remove.
+            //
+            // MEASURED NEUTRAL (2026-09-26): software-pipelining the load one iteration ahead into
+            // a register (storing at the top of the next iteration so iteration c's mma covers the
+            // latency) changed nothing. gap-sm 111.0 vs 111.0 ms, gap-t32 111.0 vs 111.0, en-code
+            // 113.0 vs 112.0 (inside a 5 ms spread), needle at T=1024 1000.0 vs 1000.0 -- seven
+            // true-alternating reps, ONE binary, NINFER_TERNARY_S8_SCALE_PIPE=0 restoring the
+            // store-next-to-load placement. The control arm reproduced the earlier baseline
+            // exactly, so this is a real null and not a harness fault. The live range cost no
+            // registers (REG stayed 159, LOCAL 0).
+            //
+            // Why neutral: the stall is real but the other resident warps cover it. That also
+            // retires the theory that this load caps memory-level parallelism here, which was the
+            // reason for expecting more than the original 5-15% estimate.
+            //
+            // If anyone tries again: cp.async CANNOT replace this load. A chunk is exactly one
+            // ternary group (kTernaryS8ChunkK == kGroupK == 128) and the scale plane is
+            // group-strided, so the address is
             //     w_scales + row * groups_per_row * 2 + chunk * 2
             // Every shape this kernel serves has groups_per_row even (5120->40, 17408->136,
-            // 6144->48, 4096->32, ...), which makes the row term 4-byte aligned -- but chunk * 2 is
-            // 2 mod 4 on every ODD chunk, and cp.async requires both operands 4-byte aligned.
-            // Fixing it properly means either staging two chunks at a time (read the aligned pair,
-            // each chunk takes its half) or software-pipelining the load into a register and
-            // storing after the mma. Both are larger than a one-line change, and the payoff is only
-            // an estimate (5-15%), so it is not done here.
+            // 6144->48, 4096->32), making the row term 4-byte aligned -- but chunk * 2 is 2 mod 4 on
+            // every ODD chunk, and cp.async requires 4-byte alignment on BOTH operands. Only staging
+            // two chunks at a time from the aligned pair would work, and the null above does not
+            // justify it.
             std::uint16_t value = 0u;
             if (global_row < rows) {
                 value = load_vec<std::uint16_t>(
