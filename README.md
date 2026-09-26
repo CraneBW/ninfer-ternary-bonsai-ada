@@ -3,8 +3,8 @@
 
 # zatfung — 疾风 (zat6 fung1)
 
-> **zatfung**（粤语 *zat6 fung1*，疾风）是一个 Windows 优先的 C++20/CUDA 推理引擎，
-> 面向**三元（PQ2_0）Bonsai 2 27B**，派生自 NINFER 家族。
+> **zatfung**（粤语 *zat6 fung1*，疾风）是一个 CUDA 优先的 C++ 推理引擎，
+> 面向**真假三元（Q1 / Q2）Bonsai 2 27B**，派生自 NINFER 家族。
 > 一个源码树同时覆盖四档 NVIDIA 架构：
 
 | `CMAKE_CUDA_ARCHITECTURES` | 架构 | 代表显卡 | 说明 |

@@ -20,3 +20,4 @@ __pycache__/
 profiles/
 _bench/
 _probe/
+.github/
