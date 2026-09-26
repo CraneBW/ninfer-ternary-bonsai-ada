@@ -422,6 +422,18 @@ void ternary_pq2_mma_s8_kernel(const std::int8_t* __restrict__ act_codes,
         }
         if (lane < kTernaryS8RowsPerWarp) {
             const std::int64_t global_row = warp_row_base + lane;
+            // SYNCHRONOUS, and that is a known cost -- see the note at the top of this function.
+            // Making it async the obvious way (cp.async into the shared slot) is ILLEGAL here: a
+            // chunk is exactly one ternary group (kTernaryS8ChunkK == kGroupK == 128), the scale
+            // plane is group-strided, so the address is
+            //     w_scales + row * groups_per_row * 2 + chunk * 2
+            // Every shape this kernel serves has groups_per_row even (5120->40, 17408->136,
+            // 6144->48, 4096->32, ...), which makes the row term 4-byte aligned -- but chunk * 2 is
+            // 2 mod 4 on every ODD chunk, and cp.async requires both operands 4-byte aligned.
+            // Fixing it properly means either staging two chunks at a time (read the aligned pair,
+            // each chunk takes its half) or software-pipelining the load into a register and
+            // storing after the mma. Both are larger than a one-line change, and the payoff is only
+            // an estimate (5-15%), so it is not done here.
             std::uint16_t value = 0u;
             if (global_row < rows) {
                 value = load_vec<std::uint16_t>(

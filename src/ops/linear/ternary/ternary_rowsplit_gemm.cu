@@ -533,6 +533,82 @@ void launch_ternary_mma(const Tensor& x, const Weight& w, Tensor& out,
 // Only PQ2_0 is admitted. The reference port also runs its PTQ1_0 format through this same kernel
 // with a shared-memory repack of the raw base-3 rows; this artifact is PQ2_0 throughout, so that
 // instantiation would be carried unexercised and is left out deliberately.
+// MEASURED NEGATIVE RESULT -- do not "fix" the tile to follow T without re-measuring.
+//
+// The waste is real: everything downstream of the tile is sized for the TILE rather than for the
+// token count, so kSubTiles = kTokens/8 mma sub-tiles are walked unconditionally (dead columns are
+// zero-filled into the activation plane, only the store is guarded) and a T=27 launch spends 37 of
+// its 64 columns on padding. The token count IS known here -- prefill is eager, so this rung is
+// never inside a captured graph -- so narrowing the tile to follow T looked free.
+//
+// It is not. Instantiating 16/32/64 and picking by T made every fixture in 27..32 SLOWER by ~1%:
+//
+//   fixture (T)      auto   tile 64   tile 32     7 reps, true alternating, median model elapsed
+//   gap-sm   27      112      110       112
+//   gap-mid  28      112      111       112
+//   prose    28      112      111       113
+//   zh-code  29      112      111       112
+//   bash     31      113      111       113
+//   gap-t32  32      113      111       113
+//   en-code  38      112      112       133   <- negative control: T>32, auto already picks 64
+//
+// The control matters: en-code's two arms are IDENTICAL (112 = 112), so the ~1% is the change and
+// not the harness. (Forcing 32 at T=38 costs 19%, because 38 > 32 makes the outer tok_base loop
+// run twice and read every weight twice -- so a mis-set override is far worse than no override.)
+//
+// Why narrowing loses, from ncu on this kernel at T=32: it is NOT mma-bound. The tensor pipe is
+// only 17-35% active and the small-n layers are grid-limited (grid = div_up(n,64); [5120,17408] is
+// 80 CTAs on 66 SMs = 1.2 waves, sm__warps_active 10-12%). Halving the tile halves the useful work
+// per CTA while the per-CTA fixed costs -- prologue, per-chunk weight staging, and the synchronous
+// scale read that sits on the mma's critical path -- are untouched. The 16-column instantiation is
+// also unreachable at kTernaryS8MinTokens = 17, so it could only ever have been dead code.
+//
+// Kept as an env-selectable arm (the repo's convention for measured-and-rejected variants) so the
+// measurement can be repeated; 64 is the default.
+inline int s8_tile_tokens(std::int32_t tokens) {
+    (void)tokens; // kept in the signature because a future re-fit would key on it
+    static const int forced = [] {
+        const char* value = std::getenv("NINFER_TERNARY_S8_TILE_TOKENS");
+        const int parsed  = value == nullptr ? 0 : std::atoi(value);
+        return parsed;
+    }();
+    return (forced == 16 || forced == 32 || forced == 64) ? forced : 64;
+}
+
+// MinBlocks_ is the second half of __launch_bounds__(128, N) and therefore a REGISTER CAP: N=3
+// lets ptxas keep the 159 registers it currently wants (65536 / (3*128) = 170 available), N=4 forces
+// it down to 128. ncu says that is the difference between 3 and 4 resident CTAs per SM --
+// sm__warps_active reads 24% against a sm__maximum_warps_per_active_cycle of 25%, i.e. the machine
+// is held at three quarters of the occupancy it is configured to allow, and the kernel is
+// latency-bound (long_scoreboard 22% + barrier 19.5% on the large layer, DRAM only reaching 44.7%).
+//
+// This is the cheap test of the occupancy hypothesis, and the one SKILL rejects for three OTHER
+// kernels (wide_t, GDN record, blocked GEMV -- all measured monotonically worse). It has never been
+// tried on this one, so it gets its own env arm rather than a verdict inherited from its neighbours:
+// if 159 registers were being spent on nothing, 4 CTAs should win.
+inline int s8_min_blocks() {
+    static const int forced = [] {
+        const char* value = std::getenv("NINFER_TERNARY_S8_MIN_BLOCKS");
+        const int parsed  = value == nullptr ? 0 : std::atoi(value);
+        return parsed;
+    }();
+    return (forced == 2 || forced == 3 || forced == 4) ? forced : 3;
+}
+
+// kRowsPerCta does not depend on the token tile (it is rows-per-warp times warps), so all three
+// instantiations launch the same grid.
+template <int Tokens, int MinBlocks>
+void launch_pq2_mma_s8_tile(const Weight& w, Tensor& out, std::int32_t out_row_stride,
+                            std::int32_t tokens, TernaryS8Scratch scratch, cudaStream_t stream) {
+    constexpr int kWarps = 4;
+    const unsigned grid =
+        static_cast<unsigned>(div_up(w.n, TernaryS8Storage<Tokens, kWarps>::kRowsPerCta));
+    ternary_pq2_mma_s8_kernel<Tokens, kWarps, MinBlocks><<<grid, kWarps * 32, 0, stream>>>(
+        scratch.codes, scratch.scales, static_cast<const std::uint8_t*>(w.qdata),
+        static_cast<const std::uint8_t*>(w.scales), static_cast<__nv_bfloat16*>(out.data), w.n,
+        w.k, tokens, out_row_stride);
+}
+
 void launch_pq2_mma_s8(const Tensor& x, const Weight& w, Tensor& out,
                        std::int32_t out_row_stride, std::int32_t tokens, TernaryS8Scratch scratch,
                        cudaStream_t stream) {
@@ -542,18 +618,29 @@ void launch_pq2_mma_s8(const Tensor& x, const Weight& w, Tensor& out,
         static_cast<const __nv_bfloat16*>(x.data), scratch.codes, scratch.scales, w.k);
     CUDA_CHECK(cudaGetLastError());
 
-    // 64 tokens x 4 warps: the instantiation the reference port measured as the winner of this
-    // shape. Its shared footprint is 25856 B, well under this card's 48 KiB static limit, so it
-    // needs no cudaFuncSetAttribute opt-in and still fits three CTAs per SM (3 x 25856 = 77568 B
-    // against 100 KiB of shared per SM).
-    constexpr int kTokens = 64;
-    constexpr int kWarps  = 4;
-    const unsigned grid =
-        static_cast<unsigned>(div_up(w.n, TernaryS8Storage<kTokens, kWarps>::kRowsPerCta));
-    ternary_pq2_mma_s8_kernel<kTokens, kWarps, 3><<<grid, kWarps * 32, 0, stream>>>(
-        scratch.codes, scratch.scales, static_cast<const std::uint8_t*>(w.qdata),
-        static_cast<const std::uint8_t*>(w.scales), static_cast<__nv_bfloat16*>(out.data), w.n,
-        w.k, tokens, out_row_stride);
+    // 4 warps at every tile: the instantiation the reference port measured as the winner of this
+    // shape. Even at 64 columns its shared footprint is 25856 B, well under this card's 48 KiB
+    // static limit, so none of the three needs a cudaFuncSetAttribute opt-in.
+    //
+    // Only the combinations that can actually be reached are instantiated: tile 64 is the default
+    // and gets all three MinBlocks arms, the two narrower tiles keep one each.
+    const int tile = s8_tile_tokens(tokens);
+    const int mb   = s8_min_blocks();
+    if (tile == 16) {
+        launch_pq2_mma_s8_tile<16, 3>(w, out, out_row_stride, tokens, scratch, stream);
+    } else if (tile == 32) {
+        if (mb == 4) {
+            launch_pq2_mma_s8_tile<32, 4>(w, out, out_row_stride, tokens, scratch, stream);
+        } else {
+            launch_pq2_mma_s8_tile<32, 3>(w, out, out_row_stride, tokens, scratch, stream);
+        }
+    } else if (mb == 2) {
+        launch_pq2_mma_s8_tile<64, 2>(w, out, out_row_stride, tokens, scratch, stream);
+    } else if (mb == 4) {
+        launch_pq2_mma_s8_tile<64, 4>(w, out, out_row_stride, tokens, scratch, stream);
+    } else {
+        launch_pq2_mma_s8_tile<64, 3>(w, out, out_row_stride, tokens, scratch, stream);
+    }
     CUDA_CHECK(cudaGetLastError());
 }
 
