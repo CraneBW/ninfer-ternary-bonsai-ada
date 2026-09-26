@@ -21,7 +21,19 @@
 namespace ninfer {
 namespace {
 
+// Freezes the caller's KV-storage request into an explicit format here, at the one point every
+// front-end passes through and where max_context is already final. An Explicit request is left
+// untouched: the perplexity harness naming fp8 for its historical tables, or a bf16 arm serving as
+// a gate anchor, is never overridden. The arithmetic itself lives in KvStoragePolicy::resolve so
+// that the planner, the kernels and MemorySummary cannot disagree about what it yields.
+void resolve_kv_storage(EngineOptions& options) {
+    if (options.kv_storage.mode != KvStorageMode::Automatic) { return; }
+    options.kv_storage =
+        KvStoragePolicy::explicit_storage(options.kv_storage.resolve(options.max_context));
+}
+
 EngineOptions normalize_engine_options(EngineOptions options) {
+    resolve_kv_storage(options);
     switch (options.purpose) {
     case EnginePurpose::Generation:
         break;

@@ -42,7 +42,11 @@ struct ServeOptions {
     std::size_t response_store_max_records = kDefaultResponseStoreRecords;
     std::size_t response_store_max_bytes   = kDefaultResponseStoreBytes;
     int device                             = 0;
-    KvCacheStorage kv_cache                = KvCacheStorage::BFloat16;
+    // Left explicit on purpose while the CLI takes `automatic()`: the server adds the context
+    // cache, host KV spill and multi-request paging on top of this format, and none of those paths
+    // has been measured under fp8. Naming bf16 here keeps the server's behaviour unchanged; a
+    // deployment that wants fp8 asks for it with --kv-dtype fp8 and owns that measurement.
+    KvStoragePolicy kv_storage = KvStoragePolicy::explicit_storage(KvCacheStorage::BFloat16);
     SpeculativeOptions speculative;
     ContextCacheOptions context_cache;
     bool enable_vision              = false;

@@ -478,7 +478,9 @@ std::string format_server_start_json(
              {"pending_timeout_ms", engine_options.pending_timeout_ms},
              {"prefill_chunk", engine_options.prefill_chunk},
              {"log_stats_interval_ms", options.log_stats_interval_ms},
-             {"kv_cache", kv_cache_name(engine_options.kv_cache)},
+             // From MemorySummary, not from engine_options: this is the format the engine actually
+             // built against, which is what an operator reading the log needs to see.
+             {"kv_cache", kv_cache_name(memory.kv_cache)},
              {"vision", engine_options.enable_vision},
              {"cuda_graph", engine_options.use_cuda_graph},
              {"prefix_reuse", options.allow_prefix_reuse},

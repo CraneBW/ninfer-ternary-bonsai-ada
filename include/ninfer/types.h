@@ -68,6 +68,53 @@ struct KvCapacityPolicy {
     }
 };
 
+enum class KvStorageMode : std::uint8_t {
+    Explicit,
+    Automatic,
+};
+
+// Automatic moves to Fp8E4M3Row256 once the logical ceiling clears this many tokens. Measured on
+// the 4070 Ti SUPER with ~/ninfer-work/kv-decode-ab.py (true alternation, 3 reps, explicit
+// --kv-dtype per arm, MTP draft 3), decode tok/s against the bf16 anchor:
+//
+//   context 30k: bf16 141.1 | int8 +7.7% | fp8 +7.9% | rk4v4 +6.8%
+//   context 64k: bf16  95.7 | int8 +13.7% | fp8 +15.7% | rk4v4 +13.7%
+//
+// The gain runs near-linear at roughly one point per 4.4k tokens, so below ~16k it is inside the
+// run-to-run spread of a single decode measurement. On the long-protocol perplexity gate (bf16
+// 2.099109 anchor, criterion 0.30%) fp8 costs +0.143%, int8 +0.077%, rk4v4 +0.213%: int8 is the
+// accuracy pick, fp8 the speed pick. rk4v4 carries half of fp8's KV bytes and is still slower,
+// because its decode path adds a kv_cache_inverse_rotate_output_kernel per layer per attention --
+// its only remaining edge is capacity (262,144 tokens against ~217k).
+inline constexpr std::uint32_t kAutomaticKvStorageMinContext = 16384;
+
+// What the caller asks the KV cache to be. Separate from KvCacheStorage because the answer for
+// `Automatic` depends on max_context, which only the engine layer sees, and because the two
+// long-context front-ends want different answers from the same engine.
+struct KvStoragePolicy {
+    KvStorageMode mode            = KvStorageMode::Explicit;
+    KvCacheStorage explicit_value = KvCacheStorage::BFloat16;
+
+    [[nodiscard]] static constexpr KvStoragePolicy
+    explicit_storage(KvCacheStorage storage) noexcept {
+        return KvStoragePolicy{KvStorageMode::Explicit, storage};
+    }
+
+    [[nodiscard]] static constexpr KvStoragePolicy automatic() noexcept {
+        return KvStoragePolicy{KvStorageMode::Automatic, KvCacheStorage::BFloat16};
+    }
+
+    // The single implementation of mode -> format, so the format the planner builds against and the
+    // format MemorySummary reports cannot drift apart. Pure and total: any caller holding the
+    // options can call it, and there is deliberately no cached resolved field on EngineOptions for
+    // a writer and a reader to disagree about.
+    [[nodiscard]] constexpr KvCacheStorage resolve(std::uint32_t max_context) const noexcept {
+        if (mode == KvStorageMode::Explicit) { return explicit_value; }
+        return max_context >= kAutomaticKvStorageMinContext ? KvCacheStorage::Fp8E4M3Row256
+                                                            : KvCacheStorage::BFloat16;
+    }
+};
+
 enum class ProposalHead : std::uint8_t {
     Full,
     Optimized,
@@ -163,7 +210,11 @@ struct EngineOptions {
     std::uint32_t max_pending_requests = 16;
     std::uint32_t pending_timeout_ms   = 30000;
     std::uint32_t prefill_chunk        = 1024;
-    KvCacheStorage kv_cache            = KvCacheStorage::BFloat16;
+    // What the caller asks the KV cache to be. The format actually used is
+    // kv_storage.resolve(max_context); call that rather than caching a copy. Defaults to an
+    // explicit bf16 rather than to `automatic()` on purpose, so a direct EngineOptions
+    // construction (tests, benches) keeps today's behaviour unless it opts in.
+    KvStoragePolicy kv_storage = KvStoragePolicy::explicit_storage(KvCacheStorage::BFloat16);
     SpeculativeOptions speculative;
     std::size_t media_cache_bytes = kDefaultMediaCacheBytes;
     std::size_t media_live_bytes  = kDefaultMediaLiveBytes;

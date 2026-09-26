@@ -24,7 +24,10 @@ struct Options {
     std::uint32_t prefill_chunk  = 1024;
     int device                   = 0;
 
-    KvCacheStorage kv_cache = KvCacheStorage::BFloat16;
+    // Automatic, not bf16: the CLI is the front-end that actually runs long contexts, and fp8's
+    // decode win only starts to pay past ~16k tokens while the short-context default stays bf16.
+    // See kAutomaticKvStorageMinContext for the measurement behind the threshold.
+    KvStoragePolicy kv_storage = KvStoragePolicy::automatic();
     SpeculativeOptions speculative;
     bool enable_vision  = false;
     bool use_cuda_graph = true;

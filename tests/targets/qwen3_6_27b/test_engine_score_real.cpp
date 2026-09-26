@@ -18,7 +18,8 @@ int main() {
     options.artifact_path = artifact;
     options.purpose       = ninfer::EnginePurpose::CausalScoring;
     options.max_context   = 2048;
-    options.kv_cache      = ninfer::KvCacheStorage::Fp8E4M3Row256;
+    options.kv_storage =
+        ninfer::KvStoragePolicy::explicit_storage(ninfer::KvCacheStorage::Fp8E4M3Row256);
     ninfer::Engine engine(options);
     const auto& effective = engine.options();
     if (effective.max_concurrency != 1 || effective.prefill_chunk != 1024 ||
@@ -26,7 +27,8 @@ int main() {
         effective.kv_capacity.explicit_tokens != effective.max_context ||
         effective.context_cache.enabled ||
         effective.speculative.backend != ninfer::SpeculativeBackend::None ||
-        effective.kv_cache != ninfer::KvCacheStorage::Fp8E4M3Row256) {
+        effective.kv_storage.resolve(effective.max_context) !=
+            ninfer::KvCacheStorage::Fp8E4M3Row256) {
         std::cerr << "causal scoring options were not normalized correctly\n";
         return 1;
     }

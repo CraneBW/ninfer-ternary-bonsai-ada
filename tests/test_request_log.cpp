@@ -49,7 +49,8 @@ int main() {
     options.kv_capacity                    = ninfer::KvCapacityPolicy::explicit_capacity(524288);
     options.prefill_chunk                  = 1024;
     options.log_stats_interval_ms          = 2500;
-    options.kv_cache                       = ninfer::KvCacheStorage::Fp8E4M3Row256;
+    options.kv_storage =
+        ninfer::KvStoragePolicy::explicit_storage(ninfer::KvCacheStorage::Fp8E4M3Row256);
     options.speculative.backend            = ninfer::SpeculativeBackend::Mtp;
     options.speculative.draft_tokens       = 3;
     options.speculative.proposal_head      = ninfer::ProposalHead::Optimized;
@@ -68,7 +69,7 @@ int main() {
     engine_options.max_pending_requests                            = options.max_pending_requests;
     engine_options.pending_timeout_ms                              = options.pending_timeout_ms;
     engine_options.prefill_chunk                                   = options.prefill_chunk;
-    engine_options.kv_cache                                        = options.kv_cache;
+    engine_options.kv_storage                                      = options.kv_storage;
     engine_options.speculative                                     = options.speculative;
     engine_options.enable_vision                                   = options.enable_vision;
     engine_options.use_cuda_graph                                  = options.use_cuda_graph;
@@ -175,17 +176,19 @@ int main() {
     failures += check(server.at("server").at("default_thinking_budget") == 512,
                       "server thinking budget missing");
     failures += check(server.at("engine").at("kv_cache") == "fp8-e4m3-row256", "KV type missing");
-    options.kv_cache        = ninfer::KvCacheStorage::Nvfp4Group16;
-    engine_options.kv_cache = options.kv_cache;
-    memory.kv_cache         = options.kv_cache;
+    options.kv_storage        = ninfer::KvStoragePolicy::explicit_storage(
+        ninfer::KvCacheStorage::Nvfp4Group16);
+    engine_options.kv_storage = options.kv_storage;
+    memory.kv_cache           = ninfer::KvCacheStorage::Nvfp4Group16;
     const Json nvfp4_server = Json::parse(format_server_start_json(
         "serve-test", 1000, options, engine_options, sampling_defaults, "deployment-alias", load,
         memory, environment, std::uint64_t{123456}));
     failures +=
         check(nvfp4_server.at("engine").at("kv_cache") == "nvfp4", "NVFP4 KV report name missing");
-    options.kv_cache        = ninfer::KvCacheStorage::Fp8KeyNvfp4Value;
-    engine_options.kv_cache = options.kv_cache;
-    memory.kv_cache         = options.kv_cache;
+    options.kv_storage        = ninfer::KvStoragePolicy::explicit_storage(
+        ninfer::KvCacheStorage::Fp8KeyNvfp4Value);
+    engine_options.kv_storage = options.kv_storage;
+    memory.kv_cache           = ninfer::KvCacheStorage::Fp8KeyNvfp4Value;
     const Json k8v4_server  = Json::parse(format_server_start_json(
         "serve-test", 1000, options, engine_options, sampling_defaults, "deployment-alias", load,
         memory, environment, std::uint64_t{123456}));
