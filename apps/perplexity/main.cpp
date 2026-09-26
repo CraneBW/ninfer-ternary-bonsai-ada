@@ -56,7 +56,7 @@ std::string usage_text() {
     return "usage: ninfer-perplexity <model.ninfer> "
            "(--corpus <manifest.json> [--quick] | --text <utf8-file>)\n"
            "       [--context N] [--stride N] [--device N]\n"
-           "       [--kv-dtype bf16|int8|fp8|nvfp4|k8v4] [--output <directory>]\n"
+           "       [--kv-dtype bf16|int8|fp8|nvfp4|k8v4|rk4v4|rk4v4-e8] [--output <directory>]\n"
            "       [--log-level trace|debug|info|warning|error|critical|off]\n";
 }
 
@@ -113,8 +113,18 @@ Options parse_options(int argc, char** argv) {
                 out.kv = ninfer::KvCacheStorage::Nvfp4Group16;
             } else if (dtype == "k8v4") {
                 out.kv = ninfer::KvCacheStorage::Fp8KeyNvfp4Value;
+            } else if (dtype == "rk4v4") {
+                // The engine-side codecs live in the shared attention / kv-append kernels, not in a
+                // serve-only path, so accepting the names here needs no kernel work -- this parser
+                // was just the last of the three front ends to learn them (apps/cli and src/serve
+                // already had). Leaving them out left the whole KV axis unmeasurable: the default
+                // above is fp8, so a comparison script that forgot --kv-dtype would have measured
+                // fp8 five times and reported five identical numbers.
+                out.kv = ninfer::KvCacheStorage::RotatedInt4KeyInt4ValueGroup64;
+            } else if (dtype == "rk4v4-e8") {
+                out.kv = ninfer::KvCacheStorage::RK4V4E8;
             } else {
-                usage_error("--kv-dtype must be bf16, int8, fp8, nvfp4, or k8v4");
+                usage_error("--kv-dtype must be bf16, int8, fp8, nvfp4, k8v4, rk4v4, or rk4v4-e8");
             }
         } else if (option == "--output") {
             out.output = std::filesystem::path(value("--output"));
@@ -146,6 +156,10 @@ std::string kv_name(ninfer::KvCacheStorage value) {
         return "nvfp4";
     case ninfer::KvCacheStorage::Fp8KeyNvfp4Value:
         return "k8v4";
+    case ninfer::KvCacheStorage::RotatedInt4KeyInt4ValueGroup64:
+        return "rk4v4";
+    case ninfer::KvCacheStorage::RK4V4E8:
+        return "rk4v4-e8";
     }
     throw std::logic_error("unknown KV dtype");
 }
