@@ -138,7 +138,13 @@ void ternary_small_t_mma_kernel(const __nv_bfloat16* __restrict__ x,
                                 const std::uint8_t* __restrict__ scales,
                                 __nv_bfloat16* __restrict__ out, std::int32_t rows,
                                 std::int32_t k, std::int32_t tokens,
-                                std::int32_t out_row_stride, Epilogue epilogue = {}) {
+                                std::int32_t out_row_stride, Epilogue epilogue = {},
+                                // Split-K output, or null for the single-slice path. Laid out
+                                // [slice][token][row] with `rows` -- NOT out_row_stride -- as the row
+                                // stride, because that is the layout ternary_s8_reduce_kernel reads
+                                // back. fp32 and unscaled by the epilogue: the value only lands in
+                                // `out` once, in the reduce, which is where the epilogue belongs.
+                                float* __restrict__ split_partial = nullptr) {
     using Schedule = TernarySmallTSchedule;
     static_assert(TileCols >= 8 && TileCols <= 32 && (TileCols % 8) == 0);
     static_assert(kRowsPerCta % TernarySmallTSchedule::kKWarps == 0,
@@ -183,6 +189,17 @@ void ternary_small_t_mma_kernel(const __nv_bfloat16* __restrict__ x,
     const int row0  = static_cast<int>(blockIdx.x) * kRowsPerCta;
     const int k_groups = k / kGroupK;
     const int groups_per_row = k / 128;
+
+    // Split-K: blockIdx.z slices hand each CTA a sub-range of the K steps and a private fp32
+    // accumulator slot. gridDim.z == 1 leaves gi_begin == 0 and gi_end == k_groups, i.e. the shipped
+    // single-slice path bit for bit -- the slice machinery costs an unsplit launch nothing. The
+    // boundaries land on whole kGroupK steps because all eight warps of a CTA consume the same gi;
+    // slicing inside a step would leave part of the CTA with nothing to do for that step.
+    const int slice    = static_cast<int>(blockIdx.z);
+    const int slices   = static_cast<int>(gridDim.z);
+    const bool split   = slices > 1;
+    const int gi_begin = (k_groups * slice) / slices;
+    const int gi_end   = (k_groups * (slice + 1)) / slices;
 
     // Columns at or past the real token count are never stored by the epilogue, so staging them
     // every group is pure waste -- and it is the larger half of the staging. A warp stages
@@ -262,14 +279,14 @@ void ternary_small_t_mma_kernel(const __nv_bfloat16* __restrict__ x,
     const int b_koff    = ((lane >> 3) & 1) << 3;
     float acc[kRowBlocks][kNt][4] = {};
 
-    stage_weight(0);
-    stage_x(0);
+    stage_weight(gi_begin * kGroupK);
+    stage_x(gi_begin * kGroupK);
     cp_commit();
     cp_wait<0>();
     __syncthreads();
 
 #pragma unroll 1
-    for (int gi = 0; gi < k_groups; ++gi) {
+    for (int gi = gi_begin; gi < gi_end; ++gi) {
         const int group_k0      = gi * kGroupK;
 
 #pragma unroll
@@ -329,7 +346,7 @@ void ternary_small_t_mma_kernel(const __nv_bfloat16* __restrict__ x,
         }
         } // row block
 
-        if (gi + 1 < k_groups) {
+        if (gi + 1 < gi_end) {
             __syncthreads();
             stage_weight(group_k0 + kGroupK);
             stage_x(group_k0 + kGroupK);
@@ -398,6 +415,23 @@ void ternary_small_t_mma_kernel(const __nv_bfloat16* __restrict__ x,
             const int col0 = nt * 8 + 2 * lid;
             const int row_lo = row0 + rb * kRowBlock + gid;
             const int row_hi = row0 + rb * kRowBlock + gid + 8;
+            if (split) {
+                // Raw fp32, and deliberately NOT through the epilogue: the value lands in `out`
+                // exactly once, in the reduce kernel, so that is where a fused epilogue belongs.
+                // The slot layout is [slice][token][row] with `rows` as the row stride, which is
+                // the layout ternary_s8_reduce_kernel sums over -- the same contract the int8
+                // rung's split keeps with the same buffer.
+                const std::int64_t base = static_cast<std::int64_t>(slice) * tokens * rows +
+                                          static_cast<std::int64_t>(col0) * rows;
+                if (col0 < tokens && row_lo < rows) { split_partial[base + row_lo] = sum.x; }
+                if (col0 < tokens && row_hi < rows) { split_partial[base + row_hi] = sum.z; }
+                if (col0 + 1 < tokens && row_lo < rows) {
+                    split_partial[base + rows + row_lo] = sum.y;
+                }
+                if (col0 + 1 < tokens && row_hi < rows) {
+                    split_partial[base + rows + row_hi] = sum.w;
+                }
+            } else {
             // Every store goes through the epilogue, and each call is INSIDE the store's own bounds
             // guard rather than hoisted above it: the identity ignores its arguments, but the
             // residual epilogue this parameter exists for dereferences the tensor it is about to
@@ -421,6 +455,7 @@ void ternary_small_t_mma_kernel(const __nv_bfloat16* __restrict__ x,
                 out[static_cast<std::int64_t>(col0 + 1) * out_row_stride + row_hi] =
                     __float2bfloat16_rn(epilogue.apply(row_hi, col0 + 1, sum.w));
             }
+            } // !split
         }
         } // row block
     }
