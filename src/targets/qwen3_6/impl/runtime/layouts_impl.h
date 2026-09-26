@@ -11,6 +11,7 @@
 #include "ninfer/ops/linear_topk.h"
 #include "ninfer/ops/gdn_gating_proj.h"
 #include "ninfer/ops/gdn_input_proj.h"
+#include "ninfer/ops/linear.h"
 #include "ninfer/ops/linear_add.h"
 #include "ninfer/ops/linear_swiglu.h"
 #include "ninfer/ops/sampling.h"
@@ -404,6 +405,20 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                static_cast<std::int32_t>(kCausalScoreTile));
         matrix(causal_score, DType::I32, 1, static_cast<std::int32_t>(kCausalScoreTile));
         matrix(causal_score, DType::FP32, 1, static_cast<std::int32_t>(kCausalScoreTile));
+        // ...AND THE OP THAT RUNS ON THAT BUFFER NEEDS ITS OWN SCRATCH. The flush runs
+        // ops::linear(hidden, output_head, logits, A16Only, work, ...) on the buffer above, and a
+        // FOLDED ternary output head rotates the activation into its basis first, which needs a
+        // [hidden, columns] buffer plus the int8 rung's codes and scales. This segment declared none
+        // of it: it was hand-sized to exactly logits + two 4 KB vectors = 508,567,552 B, zero
+        // margin, so the arena died as soon as those columns filled it -- measured as
+        // `bad_alloc bytes=22204928 aligned_offset=508567552 cap=508567552`. Ask the op's own
+        // capacity query rather than repeating the arithmetic; this is the same call the prefill
+        // stage's lm_head reserve makes, for the same reason.
+        scratch(causal_score,
+                ops::linear_workspace_capacity_bytes(QType::PQ2_0_G128, TextConfig::hidden,
+                                                     TextConfig::hidden,
+                                                     ops::LinearPolicy::A16Only, 1,
+                                                     static_cast<std::int32_t>(kCausalScoreTile)));
         out.causal_score = finish(causal_score);
     }
 
