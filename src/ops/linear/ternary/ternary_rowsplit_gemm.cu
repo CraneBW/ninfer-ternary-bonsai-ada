@@ -5,6 +5,7 @@
 
 #include "core/device.h"
 #include "ops/common/math.h"
+#include "ops/linear/ternary/ternary_epilogue.cuh"
 #include "ops/linear/ternary/ternary_launch.h"
 #include "ops/linear/ternary/ternary_rowsplit_gemv.cuh"
 #include "ops/linear/ternary/ternary_rowsplit_mma.cuh"
@@ -315,9 +316,15 @@ void launch_small_t(const Tensor& x, const Weight& w, Tensor& out, std::int32_t 
     };
     const auto args = [&](auto tag) {
         constexpr int kRows = decltype(tag)::value;
+        // The epilogue is named here rather than left to the kernel's default, even though the two
+        // are the same type today. The launcher is the only place that knows WHICH projection is
+        // being computed -- and therefore whether the consumer wants a residual, a silu, or nothing
+        // -- so it is the call site the fused epilogue is going to have to be named at. Naming the
+        // identity now keeps that change to this expression and leaves the kernel template alone.
         ternary_small_t_mma_kernel<8, (kRows == 16 ? 4 : (kRows == 32 ? 3 : 2)), kRows>
             <<<grid_for(kRows), TernarySmallTSchedule::kThreads, 0, stream>>>(
-                x_ptr, codes, scales, out_ptr, rows, w.k, x.ne[1], out_row_stride);
+                x_ptr, codes, scales, out_ptr, rows, w.k, x.ne[1], out_row_stride,
+                TernaryIdentityEpilogue{});
     };
     using std::integral_constant;
     switch (small_t_rows_per_cta()) {

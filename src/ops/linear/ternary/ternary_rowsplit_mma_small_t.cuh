@@ -28,6 +28,7 @@
 // all -- where the prefill path pays one mantissa bit for the same thing.
 
 #include "ops/common/mma.cuh"
+#include "ops/linear/ternary/ternary_epilogue.cuh"
 #include "ops/linear/ternary/ternary_rowsplit_mma.cuh"
 
 #include <cuda_bf16.h>
@@ -116,15 +117,28 @@ struct TernarySmallTSchedule {
 
 // TileCols is the token tile; mma n is 8, so 8 is the smallest useful value and is what the verify
 // pass (T <= 4) uses. A larger tile amortises the weight decode over more tokens.
+//
+// Epilogue is the value transform applied at each store. It is defaulted, and that default is
+// load-bearing: the three append-only row-block instantiations the launcher selects between
+// (rows 16 / 32 / 48) are spelled <8, kMinBlocks, kRows> and have to keep compiling AND keep
+// meaning exactly what they meant before the parameter existed. Same trick, same intent as the
+// trailing `bool kPtq1 = false` on TernaryS8Storage. The check that the default is really a no-op
+// and not merely a small change is the numeric gate the port already runs: ninfer-perplexity
+// --text <corpus> --context 512 --stride 256 must read 9.693396 to the digit, because the identity
+// is inlined to its own argument and ptxas is expected to see the pre-parameter program.
+//
+// The default is also why the parameter is the LAST one and the value argument is last in the
+// parameter list -- any earlier position changes what an existing <8, 4, 32> means.
 template <int TileCols, int LaunchBoundsMinBlocks,
-          int kRowsPerCta = TernarySmallTSchedule::kRowsPerCta>
+          int kRowsPerCta = TernarySmallTSchedule::kRowsPerCta,
+          class Epilogue  = TernaryIdentityEpilogue>
 __launch_bounds__(TernarySmallTSchedule::kThreads, LaunchBoundsMinBlocks) __global__
 void ternary_small_t_mma_kernel(const __nv_bfloat16* __restrict__ x,
                                 const std::uint8_t* __restrict__ codes,
                                 const std::uint8_t* __restrict__ scales,
                                 __nv_bfloat16* __restrict__ out, std::int32_t rows,
                                 std::int32_t k, std::int32_t tokens,
-                                std::int32_t out_row_stride) {
+                                std::int32_t out_row_stride, Epilogue epilogue = {}) {
     using Schedule = TernarySmallTSchedule;
     static_assert(TileCols >= 8 && TileCols <= 32 && (TileCols % 8) == 0);
     static_assert(kRowsPerCta % TernarySmallTSchedule::kKWarps == 0,
@@ -384,21 +398,28 @@ void ternary_small_t_mma_kernel(const __nv_bfloat16* __restrict__ x,
             const int col0 = nt * 8 + 2 * lid;
             const int row_lo = row0 + rb * kRowBlock + gid;
             const int row_hi = row0 + rb * kRowBlock + gid + 8;
+            // Every store goes through the epilogue, and each call is INSIDE the store's own bounds
+            // guard rather than hoisted above it: the identity ignores its arguments, but the
+            // residual epilogue this parameter exists for dereferences the tensor it is about to
+            // overwrite, so an unguarded call would touch a row or a token the store may not write.
+            // The (row, token) order and the fact that out_row_stride is the stride an epilogue
+            // would rebuild the same address from are the contract spelled out in
+            // ternary_epilogue.cuh.
             if (col0 < tokens && row_lo < rows) {
                 out[static_cast<std::int64_t>(col0) * out_row_stride + row_lo] =
-                    __float2bfloat16_rn(sum.x);
+                    __float2bfloat16_rn(epilogue.apply(row_lo, col0, sum.x));
             }
             if (col0 < tokens && row_hi < rows) {
                 out[static_cast<std::int64_t>(col0) * out_row_stride + row_hi] =
-                    __float2bfloat16_rn(sum.z);
+                    __float2bfloat16_rn(epilogue.apply(row_hi, col0, sum.z));
             }
             if (col0 + 1 < tokens && row_lo < rows) {
                 out[static_cast<std::int64_t>(col0 + 1) * out_row_stride + row_lo] =
-                    __float2bfloat16_rn(sum.y);
+                    __float2bfloat16_rn(epilogue.apply(row_lo, col0 + 1, sum.y));
             }
             if (col0 + 1 < tokens && row_hi < rows) {
                 out[static_cast<std::int64_t>(col0 + 1) * out_row_stride + row_hi] =
-                    __float2bfloat16_rn(sum.w);
+                    __float2bfloat16_rn(epilogue.apply(row_hi, col0 + 1, sum.w));
             }
         }
         } // row block
