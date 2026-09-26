@@ -19,6 +19,7 @@
 #include "ninfer/ops/speculative_round.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <initializer_list>
 #include <limits>
 #include <stdexcept>
@@ -655,6 +656,16 @@ void validate_target_options(DeviceContext& device, const EngineOptions& options
         device.compute_capability() != 89) {
         throw std::invalid_argument(
             "kv-dtype rk4v4/rk4v4-e8 requires compute capability 8.9 (RTX 4090 build)");
+    }
+    // KVMem re-phases K and scores the blocks through the int8-group64 codec, so its
+    // kernels address that plane layout directly. Any other storage would be decoded as
+    // int8 codes with fp16 group scales, producing nonsense scores instead of an error.
+    if (const char* env = std::getenv("NINFER_KVMEM"); env != nullptr && env[0] == '1') {
+        if (options.kv_cache != KvCacheStorage::Int8Group64) {
+            throw std::invalid_argument(
+                "NINFER_KVMEM=1 requires an int8-group64 KV cache: KVMem re-phases and scores "
+                "the KV planes through the int8-group64 codec, so start with --kv-dtype int8");
+        }
     }
     if (options.max_context == 0 || options.max_context > Variant::maximum_context) {
         throw std::invalid_argument("max_context exceeds the variant native context capacity");
