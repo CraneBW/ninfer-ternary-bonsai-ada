@@ -94,7 +94,8 @@ ninfer::EngineOptions shared_rewrite_materialization_engine_options(const char* 
     options.max_context                      = 100000;
     options.kv_capacity                      = ninfer::KvCapacityPolicy::explicit_capacity(100000);
     options.prefill_chunk                    = 1024;
-    options.kv_cache                         = ninfer::KvCacheStorage::Fp8E4M3Row256;
+    options.kv_storage                       = ninfer::KvStoragePolicy::explicit_storage(
+        ninfer::KvCacheStorage::Fp8E4M3Row256);
     options.speculative.backend              = ninfer::SpeculativeBackend::Mtp;
     options.speculative.draft_tokens         = 3;
     options.speculative.proposal_head        = ninfer::ProposalHead::Optimized;
@@ -173,7 +174,8 @@ ninfer::EngineOptions pressure_resume_engine_options(const char* artifact) {
     options.max_context                      = 8192;
     options.kv_capacity                      = ninfer::KvCapacityPolicy::explicit_capacity(8192);
     options.prefill_chunk                    = 1024;
-    options.kv_cache                         = ninfer::KvCacheStorage::Fp8E4M3Row256;
+    options.kv_storage                       = ninfer::KvStoragePolicy::explicit_storage(
+        ninfer::KvCacheStorage::Fp8E4M3Row256);
     options.speculative.backend              = ninfer::SpeculativeBackend::None;
     options.max_concurrency                  = 2;
     options.max_pending_requests             = 2;
@@ -192,7 +194,8 @@ ninfer::EngineOptions private_checkpoint_pressure_engine_options(const char* art
     options.max_context                      = 8192;
     options.kv_capacity                      = ninfer::KvCapacityPolicy::explicit_capacity(16384);
     options.prefill_chunk                    = 1024;
-    options.kv_cache                         = ninfer::KvCacheStorage::Fp8E4M3Row256;
+    options.kv_storage                       = ninfer::KvStoragePolicy::explicit_storage(
+        ninfer::KvCacheStorage::Fp8E4M3Row256);
     options.speculative.backend              = ninfer::SpeculativeBackend::None;
     options.max_concurrency                  = 2;
     options.max_pending_requests             = 2;

@@ -47,6 +47,10 @@ struct Options {
     std::uint32_t context               = 4096;
     std::uint32_t stride                = 2048;
     int device                          = 0;
+    // fp8, and passed to the engine as an Explicit policy rather than as Automatic: every
+    // perplexity number this project has recorded was taken at fp8, and the short-context gates run
+    // at --context 512, which Automatic would resolve to bf16 and silently move every historical
+    // table. A gate that wants another arm names it with --kv-dtype, which is what the gates do.
     ninfer::KvCacheStorage kv           = ninfer::KvCacheStorage::Fp8E4M3Row256;
     bool quick                          = false;
     ninfer::product::LogLevel log_level = ninfer::product::LogLevel::Info;
@@ -232,7 +236,7 @@ int run(const Options& options, const std::shared_ptr<spdlog::logger>& logger,
     engine_options.purpose          = ninfer::EnginePurpose::CausalScoring;
     engine_options.device           = options.device;
     engine_options.max_context      = options.context;
-    engine_options.kv_cache         = options.kv;
+    engine_options.kv_storage       = ninfer::KvStoragePolicy::explicit_storage(options.kv);
     engine_options.startup_observer = startup_log.observer();
     ninfer::Engine engine(std::move(engine_options));
     const ninfer::LoadSummary load = engine.load_summary();

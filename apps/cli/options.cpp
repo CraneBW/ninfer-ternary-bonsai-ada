@@ -100,6 +100,8 @@ std::string usage_text(const char* argv0) {
            "       [--no-cuda-graph] [--wddm-evictable-budget]\n"
            "       [--log-level trace|debug|info|warning|error|critical|off]\n"
            "\n"
+           "KV storage follows --max-context unless --kv-dtype names a format: bf16 through 16383\n"
+           "and fp8 from 16384 up, where the measured decode win outgrows the numerical cost.\n"
            "Streams answer content to stdout and reasoning plus diagnostics to stderr.\n"
            "Structured message content accepts text, image/image_url, and video/video_url parts;\n"
            "media sources may be local paths, HTTP(S) URLs, or base64 data URIs.\n"
@@ -148,7 +150,7 @@ Options parse_options(int argc, char** argv) {
         } else if (arg == "--device") {
             options.device = parse_device(value(arg));
         } else if (arg == "--kv-dtype") {
-            options.kv_cache = parse_kv_cache(value(arg));
+            options.kv_storage = KvStoragePolicy::explicit_storage(parse_kv_cache(value(arg)));
         } else if (arg == "--spec") {
             options.speculative.backend = product::parse_speculative_backend(value(arg));
         } else if (arg == "--draft-tokens") {

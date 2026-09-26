@@ -80,9 +80,9 @@ int main(int argc, char** argv) {
         options.context_cache.device_state_slots = argc > 7 ? std::stoul(argv[7]) : 3U;
         options.use_cuda_graph                   = graph;
         options.enable_vision                    = argc > 6 && std::stoi(argv[6]) != 0;
-        options.kv_cache                         = argc > 5 && std::string(argv[5]) == "int8"
-                                                       ? ninfer::KvCacheStorage::Int8Group64
-                                                       : ninfer::KvCacheStorage::BFloat16;
+        options.kv_storage = ninfer::KvStoragePolicy::explicit_storage(
+            argc > 5 && std::string(argv[5]) == "int8" ? ninfer::KvCacheStorage::Int8Group64
+                                                       : ninfer::KvCacheStorage::BFloat16);
         std::vector<ninfer::TokenId> prompt, reference, penalty_reference;
         auto penalty                                 = request(24);
         penalty.execution.sampling.presence_penalty  = 0.5F;

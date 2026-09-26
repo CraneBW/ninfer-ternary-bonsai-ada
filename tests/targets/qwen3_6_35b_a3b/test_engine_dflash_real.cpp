@@ -18,7 +18,7 @@ ninfer::EngineOptions base_engine_options(const char* artifact) {
     options.max_context    = 128;
     options.kv_capacity    = ninfer::KvCapacityPolicy::explicit_capacity(128);
     options.prefill_chunk  = 128;
-    options.kv_cache       = ninfer::KvCacheStorage::BFloat16;
+    options.kv_storage     = ninfer::KvStoragePolicy::explicit_storage(ninfer::KvCacheStorage::BFloat16);
     options.use_cuda_graph = false;
     options.enable_vision  = false;
     return options;

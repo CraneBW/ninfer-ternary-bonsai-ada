@@ -16,7 +16,8 @@ ninfer::EngineOptions engine_options(const char* artifact) {
     options.max_context               = 4096;
     options.kv_capacity               = ninfer::KvCapacityPolicy::explicit_capacity(4096);
     options.prefill_chunk             = 1024;
-    options.kv_cache                  = ninfer::KvCacheStorage::Int8Group64;
+    options.kv_storage =
+        ninfer::KvStoragePolicy::explicit_storage(ninfer::KvCacheStorage::Int8Group64);
     options.speculative.backend       = ninfer::SpeculativeBackend::Mtp;
     options.speculative.draft_tokens  = 3;
     options.speculative.proposal_head = ninfer::ProposalHead::Optimized;

@@ -271,7 +271,8 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         } else if (arg == "--device") {
             options.device = parse_nonnegative_int(require_value("--device"), "device");
         } else if (arg == "--kv-dtype") {
-            options.kv_cache = parse_kv_dtype(require_value("--kv-dtype"));
+            options.kv_storage =
+                KvStoragePolicy::explicit_storage(parse_kv_dtype(require_value("--kv-dtype")));
         } else if (arg == "--spec") {
             options.speculative.backend =
                 product::parse_speculative_backend(require_value("--spec"));
