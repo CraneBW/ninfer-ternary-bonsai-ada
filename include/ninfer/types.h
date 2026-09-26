@@ -3,8 +3,10 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -262,6 +264,46 @@ struct ContextCostOptions {
     std::filesystem::path preset_path;
 };
 
+// Sparse long-context memory. The device page pool stays a working set and the rest of the
+// address space is backed by host memory, so the pool may sit below `max_context` -- see
+// KvCapacityMode::DeviceBudget. `budget_tokens` is the selection window: how much history
+// stays in the resident working set. 0 keeps the whole context in the window, which is the
+// identity configuration the mechanism falls back to when nothing narrower is asked for.
+// Leaving this struct default lets Engine resolve it from NINFER_KVMEM / NINFER_KVMEM_BUDGET.
+struct KvMemOptions {
+    bool enabled           = false;
+    std::uint32_t budget_tokens = 0;
+};
+
+// Resolve the KVMem switch and window from the front end's flags, falling back to the
+// environment spellings for front ends that do not expose them (and for processes that
+// already set them). The flag wins over the environment; both spellings of the budget are
+// read as tokens, and a non-positive or malformed value leaves the window at 0.
+[[nodiscard]] inline KvMemOptions resolve_kvmem_options(bool switch_given, bool budget_given,
+                                                        std::uint32_t budget_tokens) noexcept {
+    KvMemOptions out;
+    out.enabled = switch_given;
+    if (!out.enabled) {
+        const char* env = std::getenv("NINFER_KVMEM");
+        out.enabled     = env != nullptr && env[0] == '1';
+    }
+    if (budget_given) {
+        out.budget_tokens = budget_tokens;
+    } else if (out.enabled) {
+        const char* env = std::getenv("NINFER_KVMEM_BUDGET");
+        if (env != nullptr && *env != '\0') {
+            const long long parsed = std::strtoll(env, nullptr, 10);
+            if (parsed > 0) {
+                constexpr long long kMaximumTokens =
+                    static_cast<long long>(std::numeric_limits<std::uint32_t>::max());
+                out.budget_tokens = static_cast<std::uint32_t>(
+                    parsed > kMaximumTokens ? kMaximumTokens : parsed);
+            }
+        }
+    }
+    return out;
+}
+
 struct EngineOptions {
     std::filesystem::path artifact_path;
     EnginePurpose purpose              = EnginePurpose::Generation;
@@ -288,6 +330,7 @@ struct EngineOptions {
     bool wddm_evictable_budget             = false;
     ContextCacheOptions context_cache;
     ContextCostOptions context_cost;
+    KvMemOptions kvmem;
     StartupObserver startup_observer;
 };
 

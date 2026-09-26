@@ -840,7 +840,8 @@ private:
 class KVAddressSpaceStore {
 public:
     KVAddressSpaceStore(LogicalKVPageStore& pages, KVExecutionTablePool& tables,
-                        std::uint32_t address_capacity, std::uint32_t page_capacity)
+                        std::uint32_t address_capacity, std::uint32_t page_capacity,
+                        KvMemOptions kvmem = {})
         : pages_(&pages), tables_(&tables), page_capacity_(page_capacity),
           addresses_(address_capacity), free_(address_capacity),
           memberships_(checked_membership_cells(address_capacity, page_capacity)),
@@ -849,22 +850,18 @@ public:
             page_capacity != tables.logical_page_capacity()) {
             throw std::invalid_argument("KV address-space geometry is invalid");
         }
-        // KVMem K1a: NINFER_KVMEM=1 mirrors the page lifecycle into a K0 block
+        // KVMem K1a: an enabled window mirrors the page lifecycle into a K0 block
         // repository per address and re-plans the (passthrough) window on every
         // frontier commit. Purely observational -- no engine state is redirected.
-        if (const char* env = std::getenv("NINFER_KVMEM"); env != nullptr && env[0] == '1') {
+        if (kvmem.enabled) {
             kvmem_enabled_ = true;
-            if (const char* budget = std::getenv("NINFER_KVMEM_BUDGET");
-                budget != nullptr && *budget != '\0') {
-                const long long parsed = std::atoll(budget);
-                if (parsed > 0) {
-                    kvmem_budget_ = static_cast<std::uint32_t>(
-                        std::min<long long>(parsed, static_cast<long long>(page_capacity) *
-                                                            kPagedKVPageSize));
-                    // Page-aligned once here so the completion-time window and the
-                    // window-edge anchor frontier are the same number.
-                    kvmem_budget_ -= kvmem_budget_ % kPagedKVPageSize;
-                }
+            if (kvmem.budget_tokens != 0) {
+                kvmem_budget_ = std::min<std::uint32_t>(
+                    kvmem.budget_tokens,
+                    static_cast<std::uint32_t>(page_capacity) * kPagedKVPageSize);
+                // Page-aligned once here so the completion-time window and the
+                // window-edge anchor frontier are the same number.
+                kvmem_budget_ -= kvmem_budget_ % kPagedKVPageSize;
             }
             kvmem_repos_.resize(address_capacity);
             kvmem_block_pages_.resize(address_capacity);

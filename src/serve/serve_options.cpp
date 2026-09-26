@@ -85,7 +85,8 @@ std::string serve_usage_text(const char* argv0) {
            "[--response-store-max-records N] [--response-store-max-mib N] "
            "[--kv-dtype bf16|int8|fp8|nvfp4|k8v4|rk4v4|rk4v4-e8 | "
            "--cache-type-k <bf16|int8|fp8|nvfp4|int4|int4-e8> "
-           "--cache-type-v <bf16|int8|fp8|nvfp4|int4>] [--spec mtp|dflash|dflash2 --draft-tokens N] "
+           "--cache-type-v <bf16|int8|fp8|nvfp4|int4>] "
+           "[--kvmem [--kvmem-budget N]] [--spec mtp|dflash|dflash2 --draft-tokens N] "
            "[--default-max-tokens N] [--default-thinking-budget N] "
            "[--vision] [--vision-max-tokens N] [--no-cuda-graph] [--no-prefix-reuse] "
            "[--lm-head-draft] [--no-thinking] [--preserve-thinking] "
@@ -116,6 +117,9 @@ std::string serve_usage_text(const char* argv0) {
            "       --cache-type-k/--cache-type-v choose each side of the KV cache; an omitted "
            "side stays at bf16, and the pair must have a kernel (see the server error for the "
            "supported list)\n"
+           "       --kvmem keeps the device KV pool a resident working set and backs the rest of "
+           "the context with host memory; --kvmem-budget narrows the working set in tokens "
+           "(0 or omitted keeps the whole context)\n"
            "       --no-prefix-reuse disables compatible-prefix caching (enabled by default)\n"
            "       context cache defaults: device-state=max-concurrency, private=2x concurrency, "
            "shared=max(max-concurrency,4), anchors=2; Host state=8 slots, Host KV=8192 MiB\n"
@@ -152,6 +156,9 @@ ServeOptions parse_serve_options(int argc, char** argv) {
     bool kv_device_tokens_explicit   = false;
     bool context_capacity_explicit   = false;
     bool kv_dtype_explicit           = false;
+    bool kvmem_switch                = false;
+    bool kvmem_budget_given          = false;
+    std::uint32_t kvmem_budget       = 0;
     std::optional<KvKeyStorage> kv_key_storage;
     std::optional<KvValueStorage> kv_value_storage;
     if (argc >= 2 && (std::string(argv[1]) == "--help" || std::string(argv[1]) == "-h")) {
@@ -310,6 +317,14 @@ ServeOptions parse_serve_options(int argc, char** argv) {
                     "--cache-type-v must be bf16, int8, fp8, nvfp4, or int4");
             }
             kv_value_storage = *parsed;
+        } else if (arg == "--kvmem") {
+            kvmem_switch = true;
+        } else if (arg == "--kvmem-budget") {
+            const int value =
+                parse_nonnegative_int(require_value("--kvmem-budget"), "kvmem-budget");
+            if (value == 0) { throw std::invalid_argument("--kvmem-budget must be positive"); }
+            kvmem_budget       = static_cast<std::uint32_t>(value);
+            kvmem_budget_given = true;
         } else if (arg == "--spec") {
             options.speculative.backend =
                 product::parse_speculative_backend(require_value("--spec"));
@@ -406,6 +421,12 @@ ServeOptions parse_serve_options(int argc, char** argv) {
                 std::string(kSupportedKvCachePairList));
         }
         options.kv_cache = *resolved;
+    }
+    options.kvmem = resolve_kvmem_options(kvmem_switch, kvmem_budget_given, kvmem_budget);
+    if (kvmem_budget_given && !options.kvmem.enabled) {
+        throw std::invalid_argument(
+            "--kvmem-budget narrows the KVMem window, so it needs --kvmem (or NINFER_KVMEM=1) "
+            "to be enabled");
     }
     if (!options.allow_prefix_reuse) {
         if (context_capacity_explicit) {

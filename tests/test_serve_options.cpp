@@ -106,6 +106,20 @@ int main() {
     failures += check(mixed_kv_flags_rejected,
                       "--kv-dtype was accepted together with a per-side cache type");
 
+    const ServeOptions kvmem = parse({"ninfer-serve", "model.ninfer", "--kvmem"});
+    failures += check(kvmem.kvmem.enabled, "--kvmem did not enable the KVMem window");
+    const ServeOptions kvmem_window =
+        parse({"ninfer-serve", "model.ninfer", "--kvmem", "--kvmem-budget", "512"});
+    failures += check(kvmem_window.kvmem.enabled && kvmem_window.kvmem.budget_tokens == 512,
+                      "--kvmem-budget did not narrow the KVMem window");
+    bool zero_kvmem_budget_rejected = false;
+    try {
+        (void)parse({"ninfer-serve", "model.ninfer", "--kvmem", "--kvmem-budget", "0"});
+    } catch (const std::invalid_argument&) { zero_kvmem_budget_rejected = true; }
+    failures += check(zero_kvmem_budget_rejected, "zero --kvmem-budget was accepted");
+    failures += check(kv_help.find("--kvmem-budget") != std::string::npos,
+                      "serve help omits the KVMem window");
+
     const ServeOptions model_alias =
         parse({"ninfer-serve", "model.ninfer", "--model-id", "deployment-alias"});
     failures +=

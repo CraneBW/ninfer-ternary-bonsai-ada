@@ -854,7 +854,7 @@ ProgramImplCore::ProgramImplCore(const LoadedModelData& model_in, const Sequence
         decoder->text_kv.page_pool(), text_page_descriptors);
     text_kv_addresses = std::make_unique<KVAddressSpaceStore>(
         *text_kv_pages, decoder->text_kv.execution_tables(), address_capacity,
-        decoder->text_kv.execution_tables().logical_page_capacity());
+        decoder->text_kv.execution_tables().logical_page_capacity(), plan.kvmem);
     // KVMem K3: the query capture must exist before the decode graphs are
     // captured, because those graphs bake the buffer's address.
     text_kv_addresses->install_kvmem_query(
@@ -915,7 +915,7 @@ ProgramImplCore::ProgramImplCore(const LoadedModelData& model_in, const Sequence
             backend->page_pool(), logical_page_capacity(backend->page_pool()));
         backend_kv_addresses = std::make_unique<KVAddressSpaceStore>(
             *backend_kv_pages, backend->execution_tables(), address_capacity,
-            backend->execution_tables().logical_page_capacity());
+            backend->execution_tables().logical_page_capacity(), plan.kvmem);
     }
     pressure_text_page_scratch_.resize(text_kv_pages->capacity());
     pressure_text_selected_pages_.reserve(text_kv_pages->capacity());

@@ -779,6 +779,8 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--kv-dtype bf16\|int8\|fp8\|nvfp4\|k8v4` | KV-cache storage, both sides at once | `bf16` |
 | `--cache-type-k bf16\|int8\|fp8\|nvfp4\|int4\|int4-e8` | key-side KV-cache storage | `bf16` |
 | `--cache-type-v bf16\|int8\|fp8\|nvfp4\|int4` | value-side KV-cache storage | `bf16` |
+| `--kvmem` | keep the device KV pool a resident working set and back the rest of the context with host memory | off |
+| `--kvmem-budget N` | positive KVMem window in tokens; omitted keeps the whole context | whole context |
 | `--spec mtp\|dflash\|dflash2` | speculative backend | off |
 | `--draft-tokens N` | MTP `1..5`; DFlash/DFlash2 `1..15` | unset |
 | `--lm-head-draft` | optimized proposal head | off |
@@ -811,6 +813,10 @@ The paged-KV kernels are specialized per `(key, value)` pair, so `--cache-type-k
 `fp8/fp8`, `nvfp4/nvfp4`, `fp8/nvfp4`, `int4/int4`, and `int4-e8/int4`. A side left unspecified
 stays at `bf16`, and any other pair aborts startup with the supported list. `--kv-dtype` sets both
 sides at once and cannot be combined with the per-side flags.
+
+`--kvmem` and `--kvmem-budget` mirror the `NINFER_KVMEM` and `NINFER_KVMEM_BUDGET` environment
+variables, which remain the spelling for front ends that do not expose the flags. KVMem currently
+requires `--kv-dtype int8`, and `--kvmem-budget` requires the mechanism to be enabled.
 
 Context-cost coefficients resolve once at startup from generic defaults, matching compiled values,
 and optional transfer or artifact-prefill entries from `--context-cost-presets FILE`. A malformed

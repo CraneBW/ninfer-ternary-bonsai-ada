@@ -19,7 +19,6 @@
 #include "ninfer/ops/speculative_round.h"
 
 #include <algorithm>
-#include <cstdlib>
 #include <initializer_list>
 #include <limits>
 #include <stdexcept>
@@ -660,12 +659,10 @@ void validate_target_options(DeviceContext& device, const EngineOptions& options
     // KVMem re-phases K and scores the blocks through the int8-group64 codec, so its
     // kernels address that plane layout directly. Any other storage would be decoded as
     // int8 codes with fp16 group scales, producing nonsense scores instead of an error.
-    if (const char* env = std::getenv("NINFER_KVMEM"); env != nullptr && env[0] == '1') {
-        if (options.kv_cache != KvCacheStorage::Int8Group64) {
-            throw std::invalid_argument(
-                "NINFER_KVMEM=1 requires an int8-group64 KV cache: KVMem re-phases and scores "
-                "the KV planes through the int8-group64 codec, so start with --kv-dtype int8");
-        }
+    if (options.kvmem.enabled && options.kv_cache != KvCacheStorage::Int8Group64) {
+        throw std::invalid_argument(
+            "KVMem requires an int8-group64 KV cache: it re-phases and scores the KV planes "
+            "through the int8-group64 codec, so start with --kv-dtype int8");
     }
     if (options.max_context == 0 || options.max_context > Variant::maximum_context) {
         throw std::invalid_argument("max_context exceeds the variant native context capacity");
@@ -774,6 +771,7 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
     impl->device              = inputs.device;
     impl->context_cache       = inputs.context_cache;
     impl->kv_storage          = inputs.kv_storage;
+    impl->kvmem               = inputs.kvmem;
     impl->persistent          = persistent_layout(*impl);
     impl->workspace           = build_workspace_plan(*impl);
     if (impl->use_cuda_graph) {
@@ -844,6 +842,7 @@ make_sequence_planner_impl(DeviceContext& device, const EngineOptions& options,
         .causal_scoring      = options.purpose == EnginePurpose::CausalScoring,
         .device              = options.device,
         .host_backed_kv      = options.kv_capacity.mode == KvCapacityMode::DeviceBudget,
+        .kvmem               = options.kvmem,
         .context_cache       = options.context_cache,
     };
     const std::uint32_t logical_pages = page_count(inputs.capacity);
