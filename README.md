@@ -3,6 +3,16 @@
 
 # 三元 Bonsai 2 27B 跑在 **NINFER** 上
 
+> 16 GB 的 RTX 4070 Ti SUPER，跑三元量化的 Bonsai 2 27B（2.125 bit/参数），上下文开满模型
+> 原生的 262,144 token（int8 KV）。210K token 的真实文本（上下文输入了一个大文件）实测：
+> 首 token 164 秒、decode 88.8 t/s、运行时显存 5.21 GiB。开与不开 KVMem，decode 在六种任务
+> 配置上逐位一致，prefill 也一样，短上下文同样一致。KVMem 与 MTP 投机解码可同时开。
+> 短上下文里纯工具调用 232 t/s，写小说 89；prefill 在 28k 提示上 2.30k t/s。
+> 三种任务（鹈鹕骑自行车 SVG、中文短篇小说、带工具查询）× 长/短上下文 × 带/不带思考的
+> 完整矩阵、夹具和原始数据都在仓库里，`git checkout kvmem` 就是这个版本。
+
+---
+
 > 单卡 C++20/CUDA 推理引擎 **NINFER** 的 Ada（`sm_89`）移植，跑三元量化的 Bonsai 2 27B。
 > 目标机器是一张 **RTX 4070 Ti SUPER（16 GB）**，本文所有性能数字都在它上面实测。
 
