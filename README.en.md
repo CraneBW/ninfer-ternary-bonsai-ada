@@ -62,7 +62,7 @@ Three things separate this repository from upstream. Each has its own section be
 | | |
 |---|---|
 | **Source of the ternary port** | **[shensanshu/ninfer-ada-ternary](https://www.modelscope.cn/shensanshu/ninfer-ada-ternary)** on ModelScope — engine-side `patches/`, packing and verification tools, the technical record. **It ships as a Windows `.exe` (MSVC) package** |
-| **Direct base of the source tree** | **[Ambolio/ninfer-4090-windows](https://github.com/Ambolio/ninfer-4090-windows)** v1.0.8 line |
+| **Direct base of the source tree** | **`Ambolio/ninfer-4090-windows`** v1.0.8 line — ⚠️ **no longer publicly reachable** (the account has `public_repos = 0` and the URL 404s; rechecked 2026-09-28). The base relationship is a historical fact and the credit stays, but the link does not |
 | **Canonical upstream** | **[Neroued/ninfer](https://github.com/Neroued/ninfer)** — C++20/CUDA architecture, DFlash2, ReplaySSM, Paged KV Cache |
 
 Every "upstream ternary" figure in this document was measured on **a Linux binary rebuilt from
@@ -963,7 +963,7 @@ This work stands entirely on **NINFER** and the forks around it.
 | [natpate/ninfer-windows](https://github.com/natpate/ninfer-windows) | Win32/MSVC portability layer |
 | [headpiece747/ninfer-5090-windows](https://github.com/headpiece747/ninfer-5090-windows) | Native Windows MSVC compilation base |
 | [Don-Chad/ninfer-3090](https://github.com/Don-Chad/ninfer-3090) | Early Ampere work |
-| **[Ambolio/ninfer-4090-windows](https://github.com/Ambolio/ninfer-4090-windows)** | **The direct base of this branch's source tree** |
+| **`Ambolio/ninfer-4090-windows`** (⚠️ no longer publicly reachable) | **The direct base of this branch's source tree** (v1.0.8 line). The repository now 404s — the credit stays, the link is removed |
 | **[shensanshu/ninfer-ada-ternary](https://www.modelscope.cn/shensanshu/ninfer-ada-ternary)** (ModelScope) | **The source of the ternary port itself**: engine-side `patches/`, packing and verification `tools/`, `docs/` technical record |
 | **[naamfung/zatfung](https://github.com/naamfung/zatfung)** | **Where KVMem comes from** — host-side KV offload (compaction + re-RoPE), windowed continuation, decoupling device budget from logical entitlement. Forked from this repository's `bd71d74`; `src/kvmem/*`, the KVMem logic in `logical_kv_store.h`, and the related documents all come from that line |
 

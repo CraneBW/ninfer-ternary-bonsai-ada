@@ -54,7 +54,7 @@
 | | |
 |---|---|
 | **三元移植的出处** | 魔搭 **[shensanshu/ninfer-ada-ternary](https://www.modelscope.cn/shensanshu/ninfer-ada-ternary)** —— 引擎侧 `patches/`、打包与验证工具、技术记录。**发布物是 Windows `.exe` 包（MSVC）** |
-| **源码树的直接基座** | **[Ambolio/ninfer-4090-windows](https://github.com/Ambolio/ninfer-4090-windows)** v1.0.8 线 |
+| **源码树的直接基座** | **`Ambolio/ninfer-4090-windows`** v1.0.8 线 —— ⚠️ **该仓库现已不可公开访问**（账号 `public_repos = 0`，链接 404；2026-09-28 复核）。基座关系是历史事实，署名保留、链接不再给出 |
 | **规范上游** | **[Neroued/ninfer](https://github.com/Neroued/ninfer)** —— C++20/CUDA 架构、DFlash2、ReplaySSM、Paged KV Cache |
 
 本文所有"上游三元版"的数字，跑的都是**本机用 GCC 16.2.1 重编出来的 Linux 二进制**
@@ -864,7 +864,7 @@ int8 档的偏移是 **+0.0015%**，量级正是 int8 激活量化误差本身�
 | [natpate/ninfer-windows](https://github.com/natpate/ninfer-windows) | Win32/MSVC 可移植层 |
 | [headpiece747/ninfer-5090-windows](https://github.com/headpiece747/ninfer-5090-windows) | 原生 Windows MSVC 编译基座 |
 | [Don-Chad/ninfer-3090](https://github.com/Don-Chad/ninfer-3090) | Ampere 早期工作 |
-| **[Ambolio/ninfer-4090-windows](https://github.com/Ambolio/ninfer-4090-windows)** | **本分支源码树的直接基座** |
+| **`Ambolio/ninfer-4090-windows`**（⚠️ 已不可公开访问） | **本分支源码树的直接基座**（v1.0.8 线）。仓库现已 404 —— 署名保留、链接移除 |
 | **[shensanshu/ninfer-ada-ternary](https://www.modelscope.cn/shensanshu/ninfer-ada-ternary)**（魔搭） | **三元移植本身的出处**：`patches/` 引擎侧改动、`tools/` 打包与验证工具、`docs/` 技术记录 |
 | **[naamfung/zatfung](https://github.com/naamfung/zatfung)** | **KVMem 的来源** —— 宿主端 KV 换出（紧凑打包 + re-RoPE）、窗口化续写、设备预算与逻辑 entitlement 解耦。分叉自本仓库的 `bd71d74`，`src/kvmem/*`、`logical_kv_store.h` 的 KVMem 逻辑与相关文档都出自这条线 |
 
