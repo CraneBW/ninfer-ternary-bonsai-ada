@@ -1,0 +1,12 @@
+{
+  "messages": [
+    {"role": "system", "content": "You are a helpful assistant. Use the provided tools when they are needed."},
+    {"role": "user", "content": "北京现在天气怎么样？顺便查一下上海。"},
+    {"role": "assistant", "content": "<tool_call>\n<function=get_weather>\n<parameter=city>\n北京\n</parameter>\n</function>\n</tool_call>\n<tool_call>\n<function=get_weather>\n<parameter=city>\n上海\n</parameter>\n</function>\n</tool_call>"},
+    {"role": "tool", "content": "{\"city\": \"北京\", \"condition\": \"晴\", \"temperature_c\": 26, \"humidity\": 40, \"wind\": \"西北风 3 级\", \"aqi\": 良}\n{\"city\": \"上海\", \"condition\": \"多云\", \"temperature_c\": 29, \"humidity\": 70, \"wind\": \"东南风 2 级\", \"aqi\": 优}"},
+    {"role": "user", "content": "根据上面的查询结果，给北京和上海分别写一份出行建议。每份都要说清楚：穿什么衣服、要不要带伞、适不适合户外活动、以及有什么需要特别注意的。两份都要写得详细一些。"}
+  ],
+  "tools": [
+    {"type": "function", "function": {"name": "get_weather", "description": "Get the current weather for a city", "parameters": {"type": "object", "properties": {"city": {"type": "string", "description": "City name"}}, "required": ["city"]}}}
+  ]
+}

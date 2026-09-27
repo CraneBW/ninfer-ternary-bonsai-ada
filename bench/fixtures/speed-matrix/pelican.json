@@ -1,0 +1,6 @@
+[
+  {
+    "role": "user",
+    "content": "Generate an SVG of a pelican riding a bicycle. The pelican should actually be pedaling, with its wings on the handlebars and its feet on the pedals. Use a viewBox so it scales, draw the bicycle frame, both wheels with spokes, and the pelican's pouch clearly. Output only the SVG code, no explanation."
+  }
+]
