@@ -21,7 +21,19 @@ int device_sm_count();
 // launch policies cannot query the runtime, and the host launcher that must reproduce such a
 // policy exactly has to agree with it at compile time; those two sites use this constant, every
 // other site uses device_sm_count().
-#if defined(NINFER_SM89)
+//
+// The per-arch values below name each architecture's FLAGSHIP part. A smaller card of the same
+// architecture otherwise builds against the wrong one and is scheduled as if it had the flagship's
+// SMs: the two small_t attention sites derive a split cap as kTargetSmCount / KVHeads, so a 66-SM
+// 4070 Ti SUPER built as a 128-SM 4090 asks for roughly two waves and leaves the second half
+// empty. Pass the card's real count as -DNINFER_SM_COUNT=<n> to override it. Measured on a 4070 Ti
+// SUPER where that cap is live (int8 cache, MTP verify at T=6): +0.86% .. +0.96% decode, prefill
+// unchanged, and a bf16 cache -- where the cap is not consulted at all -- stays bit-identical
+// either way. Opt-in rather than automatic because it is a fact about the card, not a tuning
+// choice: a build that names no count keeps the per-arch value, so the flagship does not move.
+#if defined(NINFER_SM_COUNT)
+inline constexpr int kTargetSmCount = NINFER_SM_COUNT;
+#elif defined(NINFER_SM89)
 inline constexpr int kTargetSmCount = 128; // NVIDIA GeForce RTX 4090
 #elif defined(NINFER_SM86)
 inline constexpr int kTargetSmCount = 82; // NVIDIA GeForce RTX 3090

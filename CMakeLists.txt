@@ -51,6 +51,18 @@ elseif(CMAKE_CUDA_ARCHITECTURES MATCHES "^89")
   add_compile_definitions(NINFER_SM89=1)
 endif()
 
+# 目标卡的物理 SM 数。"0"（默认）沿用 src/core/device.h 里按架构写死的值（各架构的旗舰：
+# sm_89 = 128 / 4090，sm_86 = 82 / 3090）。**同架构的非旗舰卡必须传自己的数**——small_t 因果
+# 注意力的分片上限是 kTargetSmCount / KVHeads，66 SM 的 4070 Ti SUPER 按 128 编会排成约两波、
+# 尾波空一半。4070 Ti SUPER 实测（int8 档 + MTP 验证轮 T=6，那个上限生效的场合）：
+# decode +0.86%~+0.96%，prefill 不变；bf16 档根本不查那个上限，两臂逐位相同。
+# 默认不改：这是「卡的事实」不是调优旋钮，不传就是原来的行为，旗舰用户一位不变。
+set(NINFER_SM_COUNT "0" CACHE STRING "目标 GPU 的物理 SM 数；0 = 沿用按架构的默认值")
+if(NOT NINFER_SM_COUNT STREQUAL "0")
+  add_compile_definitions(NINFER_SM_COUNT=${NINFER_SM_COUNT})
+  message(STATUS "kTargetSmCount overridden: NINFER_SM_COUNT=${NINFER_SM_COUNT}")
+endif()
+
 if(MSVC)
   add_compile_definitions(NOMINMAX UTF8PROC_STATIC)
   add_compile_options(
