@@ -9,6 +9,18 @@
 
 # Ternary Bonsai 2 27B on **NINFER** (Ada / `sm_89`, Linux)
 
+> A 16 GB RTX 4070 Ti SUPER running ternary Bonsai 2 27B (2.125 bits per weight), context
+> filled to the model's native 262,144 tokens (int8 KV). Measured on 210K tokens of real
+> text (a large file fed as context): 164 s to first token, 88.8 t/s decode, 5.21 GiB of
+> runtime memory. With KVMem on or off, decode shows no difference across six task
+> configurations (0.5% max) — prefill too, and short contexts as well. KVMem runs alongside
+> MTP speculative decoding. A short tool call reaches 232 t/s, writing fiction 89; prefill
+> is 2.30k t/s on a 28k prompt. The full matrix — three tasks (pelican-on-a-bicycle SVG,
+> Chinese short story, tool call) × long/short context × with/without thinking — plus its
+> fixtures and raw data are in the repository; `git checkout kvmem` is this build.
+
+---
+
 > A **ternary — 2.125 bits per weight — quantization port** of Bonsai 2 27B onto the **NINFER**
 > C++20/CUDA inference engine, targeting native Linux on Ada Lovelace (`sm_89`).
 >
