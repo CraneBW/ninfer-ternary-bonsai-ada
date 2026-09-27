@@ -1,13 +1,7 @@
 [![English](https://img.shields.io/badge/Language-English-2ea44f?style=flat-square)](README.en.md)
 [![简体中文](https://img.shields.io/badge/Language-%E7%AE%80%E4%BD%93%E4%B8%AD%E6%96%87-d73a49?style=flat-square)](README.md)
 
-> **这是英文版。主文档已改为中文，见 [README.md](README.md)** —— 那一份以**部署与性能**为核心，
-> 覆盖三版对比、编译、运行、推荐配置与全部调优旋钮。本页保留作为英文参考，
-> 横线以下是上游 NINFER 的完整 README 原文。
-
----
-
-# Ternary Bonsai 2 27B on **NINFER** (Ada / `sm_89`, Linux)
+# Ternary Bonsai 2 27B on **NINFER**
 
 > A 16 GB RTX 4070 Ti SUPER running ternary Bonsai 2 27B (2.125 bits per weight), context
 > filled to the model's native 262,144 tokens (int8 KV). Measured on 210K tokens of real
@@ -21,151 +15,991 @@
 
 ---
 
-> A **ternary — 2.125 bits per weight — quantization port** of Bonsai 2 27B onto the **NINFER**
-> C++20/CUDA inference engine, targeting native Linux on Ada Lovelace (`sm_89`).
->
-> **This repository is a derivative work. It is not upstream NINFER.** Everything below the
-> horizontal rule is the upstream README, unchanged.
+> A single-GPU C++20/CUDA inference engine (**NINFER**) ported to Ada (`sm_89`), running the
+> ternary quantization of Bonsai 2 27B. The target machine is one **RTX 4070 Ti SUPER (16 GB)**,
+> and every number below was measured on it.
+
+Ternary weights are packed `{−1, 0, +1}` at 2 bits per code plus one fp16 scale per 128-weight
+group. The storage cost is **2.125 bits per weight**. The familiar "1.58-bit" is log₂3, the
+information content of a ternary symbol — both figures are correct and they measure different
+things; **the memory system pays the former**. That is roughly half the weight traffic of a
+4-bit format, and it is the entire reason the numbers below are where they are: the model reads
+7.12 GiB of weights per verify round, and this card reads at a measured 637 GB/s.
+
+**This repository is a derivative work, not upstream NINFER.** Lineage and credits are in §8.
+
+**How to read this document**:
+
+| You want | Go to |
+|---|---|
+| What this branch does better than the upstream release, and everything it changed | **§2** |
+| To run a 262k context on a 16 GB card | **§3** (KVMem) |
+| To get it built and running | **§4** |
+| To tune flags, pick a KV format, decide how much context fits | **§5** |
+| The data (three-way comparison, speed matrix, PPL) | **§6** |
+| How the engine picks a kernel by T | **§7** |
 
 ---
 
-## What this is
+## 1. What this is
 
-**NINFER** is a single-GPU C++20/CUDA inference engine. This branch takes the ternary (PQ2_0)
-quantization of Bonsai 2 27B and lands it on **NINFER**'s Ada line, adding the tensor-core paths
-the ternary format needs and measuring every change on a physical RTX 4070 Ti SUPER.
+**In one line**: Bonsai 2 27B, ternary-quantized, running on the NINFER engine, tuned for a
+single Ada card, with long context made reachable on 16 GB.
 
-Ternary weights are packed `{−1, 0, +1}` at 2 bits per code plus one fp16 scale per 128-weight
-group. This is the ternary family usually called **1.58-bit** — that figure is log₂3, the
-information content of a ternary symbol — while the format as stored costs **2.125 bits per
-weight** once the codes and their group scales are counted. Both numbers are correct and they
-measure different things; the second one is what the memory system actually pays.
+Three things separate this repository from upstream. Each has its own section below.
 
-That is roughly half the weight traffic of a 4-bit format, which is the entire reason the numbers
-below are where they are: the model reads 7.12 GiB of weights per verify round, and the card reads
-at a measured 637 GB/s.
+1. **Kernel and dispatch work** (§2) — with the precision difference removed, this machine's
+   bf16 prefill kernel is 35% (30k) / 32% (64k) faster than upstream's; with each side's
+   default precision restored, long prompts lead by 29%.
+2. **KVMem** (§3) — only a resident window of KV stays in device memory and the rest is parked
+   in host memory, which is how a 262,144-token logical context fits on one 16 GB card
+   **at zero cost in throughput**.
+3. **Deployment and configuration in one place** (§4, §5) — build, run, what each flag costs,
+   how to choose a KV format.
+
+**What "upstream" means here**:
 
 | | |
 |---|---|
-| Engine | **NINFER** — v1.0.8 Ada line |
-| Weights | Ternary Bonsai 2 27B, `PQ2_0_G128` |
-| Hardware | RTX 4070 Ti SUPER (16 GiB, `sm_89`, 637 GB/s measured read ceiling) |
-| Toolchain | CUDA 13.4, GCC 15, Linux |
+| **Source of the ternary port** | **[shensanshu/ninfer-ada-ternary](https://www.modelscope.cn/shensanshu/ninfer-ada-ternary)** on ModelScope — engine-side `patches/`, packing and verification tools, the technical record. **It ships as a Windows `.exe` (MSVC) package** |
+| **Direct base of the source tree** | **[Ambolio/ninfer-4090-windows](https://github.com/Ambolio/ninfer-4090-windows)** v1.0.8 line |
+| **Canonical upstream** | **[Neroued/ninfer](https://github.com/Neroued/ninfer)** — C++20/CUDA architecture, DFlash2, ReplaySSM, Paged KV Cache |
 
-## Project lineage and credits
+Every "upstream ternary" figure in this document was measured on **a Linux binary rebuilt from
+it here with GCC 16.2.1** (`~/ninfer-off-build/build/apps/ninfer`, sha256 `b89c77e9…`), not on
+the Windows package upstream publishes. That isolates kernels from toolchain; it also means the
+numbers do not describe upstream's shipped binary. Protocol is in §6.1.
 
-This work stands entirely on **NINFER** and the forks around it. In lineage order:
+---
+
+## 2. What this branch changes against upstream
+
+### 2.1 The changes
+
+**Every measurement behind these figures lives in a code comment.** The gain column is a
+same-binary A/B or a median over alternating rounds; protocol in §6.1.
+
+**Prefill**
+
+| Change | Gain | Notes |
+|---|---:|---|
+| **int8 (`s8`) activation path** | **1.61×** | Upstream's int8-activation × tensor-core path. PPL shift +0.0015% |
+| **Token tile into `blockIdx.y` (G2)** | **+26.2%** (T=508) / **+24.7%** (28k) | Bit-identical. The s8 grid is `div_up(n,64)`, **independent of T**, so small-`n` layers ran at 1.2 CTA/SM at any T. Laying the tile into the grid leaves weight traffic unchanged while occupancy goes up |
+| **split-K for the T ≤ 64 gap (G3)** | **+7.1%** (T=28) | The K accumulation is re-associated into fp32 partials — deterministic, but **not bit-identical**: PPL +0.041%. Fallback in §5.4 |
+| **Prefill token tile by T** | **+42%** (T=42/50) | The 128-wide tile had no token loop, so a T under 128 paid the whole K sweep. T≤64 moves to a 64-wide tile (shared 43264 → 26880 B, 2 → 3 CTA/SM) |
+| **Filling the T=9..31 gap** | **+131% ~ +266%** | The two thresholds left a seam exactly where ordinary short prompts (13~35) land. Now split by cost model: T≤16 on an 8-wide tensor-core tile, T≥17 on int8 |
+| **s8 threshold refit 33 → 17** | Removes a 74% step at T=32 | Upstream's 33 was measured against its own bf16 path; on this machine the two lines cross at 16/17 |
+
+**Decode**
+
+| Change | Gain | Notes |
+|---|---:|---|
+| **Small-T tensor-core path for the verify pass** | the bulk of decode | Replaces blocked GEMV |
+| **Row block chosen per shape** | **+1.8%** | 16 for `n ≤ 5120`, else 32. The response is **non-monotonic**, so no single global value can be right. Bit-identical |
+| **small_t split-K** | **+1.3 ~ 1.4%** | Only shapes whose row grid underfills the card **and** leave ≥4 K steps per slice. **Not bit-identical**; fallback in §5.4 |
+| **Rotation launch packing** | — | 274 rotations per round, one per activation — already the floor |
+| **Two SASS-driven decode fixes** | — | See `.claude/skills/ninfer-perf-tuning/SKILL.md` |
+| **K ceiling 5 → 7** | **+21%** on structured output | `T=K+1≤8`; beyond that it falls out of `small_t` (verify round 13.3 ms → 40 ms). The ceiling lives in four places of different kinds and must be changed together |
+
+**KV and long context**
+
+| Change | Gain | Notes |
+|---|---:|---|
+| **KV format auto-selected from `--max-context`** | **+16.2%** at 64k | bf16 at ≤16383, fp8 at ≥16384. A pure function, never written back to a field. See §5.3 |
+| **KVMem offload** | **262k logical context fits** | Zero cost in throughput. See §3 |
+
+### 2.2 Three-way comparison
+
+Three builds, **same machine, same model file, same fixture set, same flags**
+(`--greedy --no-thinking`, `--max-new 8` for prefill, 300 tokens for decode), every cell the
+median of **three alternating rounds** — alternating so that GPU thermal drift cannot land
+entirely on one build.
+
+| Build | What it is | Binary used here |
+|---|---|---|
+| **Previous** | This repository at **`ad6cb46`** (2026-09-21) — where the last round ended and where `origin/master` sat before this one. **Not "some upstream version" — this repository's own previous commit** | `~/ninfer-work/bin-pre-s8/ninfer`<br><sub>built 2026-09-26 07:06, sha256 `cea0e193…`</sub> |
+| **Upstream ternary** | The build defined in §1 (a Linux rebuild of upstream's source) | `~/ninfer-off-build/build/apps/ninfer`<br><sub>sha256 `b89c77e9…`</sub> |
+| **This branch** | Current HEAD | `~/ninfer-build/build/apps/ninfer`<br><sub>sha256 `70ecd5ca…`</sub> |
+
+All three are Linux binaries built here with the same GCC (16.2.1); `readelf -p .comment`
+confirms it. Build times were 07:06 / 05:59 / 16:33 (2026-09-26).
+
+**Prefill, each at its own default precision** (tok/s, higher is better):
+
+| Prompt | Previous<br>(bf16) | Upstream ternary<br>(int8) | **This branch**<br>(int8) | vs previous | vs upstream |
+|---|---:|---:|---:|---:|---:|
+| Long (T=1759) | 1.22k | 1.96k | **2.53k** | **+107%** | **+29%** |
+| Medium (T=123) | 769.9 | 1.33k | **1.58k** | **+105%** | **+19%** |
+| Short (T=38) | 280.6 | 664.1 | **734.7** | **+162%** | **+11%** |
+| Tiny (T=15) | 144.4 | 333.8 | **388.4** | **+169%** | +16% |
+
+**Decode** (tok/s, `en-code.json`, 300 tokens):
+
+| Scenario | Previous | Upstream ternary | **This branch** | vs previous | vs upstream |
+|---|---:|---:|---:|---:|---:|
+| MTP draft 3 | 145.4 | 122.5 | **147.3** | **+1.3%** | **+20%** |
+| └ round net (ms) | 20.77 | 24.65 | **20.30** | **−2.3%** | **−18%** |
+| No speculation | 64.8 | 57.4 | **64.4** | −0.6% | **+12%** |
+
+> **Mind the MTP acceptance rate**: previous and upstream are both at 67.6%, this branch at
+> **66.3%**. The difference comes from split-K (§2.1): over T=17..64 it re-associates the K
+> accumulation in fp32, so the numerics are not bit-identical and this prompt's trajectory
+> forks onto a slightly lower-acceptance path. **It is not "slower per round", it is "a
+> different trajectory"** — with `KSPLIT=0` the acceptance returns to 67.6% immediately.
+> Within one binary the choice is deterministic and reproducible; it only matters across
+> builds. `NINFER_TERNARY_S8_KSPLIT=0` restores the bit-identical path.
+
+> **Where the two decode gains came from** (both on the verify path at T ≤ 8, neither touches
+> prefill): **① row block per shape** — non-monotonic response, no global value works;
+> alternating two-way A/B **+1.8%**, with acceptance, histogram and generated text all
+> unchanged. **② split-K for small shapes** — only `n ≤ 6144` shapes that still leave ≥4 K
+> steps per slice (in this model only 5120×17408), two-way A/B **+1.3~1.4%**, six fixtures
+> +0.2~1.8% with no accepted-length regression. ② **is not bit-identical**.
+
+**In one line**: long prompts went from "level" to **29% ahead**, every other prefill case
+leads, and decode holds a 20% lead (the acceptance caveat is above).
+
+### 2.3 With the precision difference removed
+
+§2.2 is **each build at its own default precision** — upstream ternary and this branch take
+int8, the previous build takes bf16. Turning int8 off (`NINFER_TERNARY_S8=0`) is what shows
+which **kernel** is actually faster.
+
+`./three-way-long.sh`, KV pinned explicitly to `--kv-dtype bf16` (**without pinning it, this
+repository auto-selects fp8 at these lengths and the other two do not, so you would be
+measuring a precision difference rather than a kernel difference** — see §5.3), median of
+three alternating rounds:
+
+| Prompt | Precision | Previous | Upstream ternary | **This branch** |
+|---|---|---:|---:|---:|
+| **28,199**<br><sub>`--max-context 32768`</sub> | each default | 1.17k <sub>(bf16)</sub> | 1.75k <sub>(int8)</sub> | **2.18k** <sub>(int8)</sub> |
+| | **both bf16** | 1.17k | **864** | **1.17k** |
+| **61,636**<br><sub>`--max-context 65536`</sub> | each default | 1.06k <sub>(bf16)</sub> | 1.51k <sub>(int8)</sub> | **1.81k** <sub>(int8)</sub> |
+| | **both bf16** | 1.06k | **804** | **1.06k** |
+
+Three conclusions, **both lengths**:
+
+1. **With the precision difference removed, this machine's bf16 prefill kernel is 35% (30k) /
+   32% (64k) faster than upstream ternary's.** Upstream's prefill advantage comes **entirely**
+   from its int8 path — true at T=1.7k, 28k and 62k alike.
+2. **With precision restored, this repository leads by 25% (30k) / 20% (64k)** (2.18k vs 1.75k;
+   1.81k vs 1.51k). The previous build was still level here — the difference is **the token tile
+   into `blockIdx.y` (G2, +26%)**, which **only applies to the int8 path**, which is why the
+   "both bf16" row below it does not move.
+3. **At bf16 the previous build and this one are still level** (1.17k / 1.17k; 1.06k / 1.06k),
+   while upstream ternary falls 35%/32% behind. **All of this round's long-prompt gain runs
+   through the int8 path**: nothing changed on the bf16 path, and nothing needed to — it was
+   already ahead.
+
+> **Three-way comparison above 64k is possible from the CLI, just not with `rk4v4`.** Upstream
+> ternary's CLI does not accept `rk4v4` (only its serve does), but **`fp8` is accepted by all
+> three** and reaches **233k** — a 124k context needs 3.9 GiB. So go through `fp8` above 64k
+> and no serve, and therefore no protocol alignment, is needed. **Not yet measured here.**
+
+### 2.4 Tried and did not work
+
+Negative results are recorded in the code too.
+
+| Attempt | Result | Mechanism |
+|---|---|---|
+| Widening the small_t tile | **Regression** (45.2 → 19.0 t/s) | The accumulators cost a resident CTA |
+| `__launch_bounds__` for occupancy | **Monotonically slower** in three independent measurements | `MinBlocks` caps registers only, **it cannot hold back shared memory** — `TernaryS8Storage<64,4>` × 4 = 103424 B > 102400 B, so a 4th CTA never fits |
+| Narrowing the s8 token tile to follow T | **Regression** (six fixtures, +1%) | The kernel is not mma-bound (tensor cores only 17~35% active); halving the tile just spreads each CTA's fixed cost over half the work. **Forcing 32 at T=38 is +19%** — the `tok_base` loop runs twice and the weights are read twice |
+| Splitting the LUT | **−12.6%** | Same-address broadcast |
+| `--lm-head-draft` | Within noise (en-code −3.6%) | Its head is 356.5 MB against the main output head's 337.7 MB, so traffic goes **up** 6% |
+| The `rk4v4-e8` KV format | 3.5× worse than `rk4v4` | Its decode side is a deliberate half-coset approximation that drops part of the E8 shaping gain. **No reason to exist in the current implementation** |
+
+---
+
+## 3. KVMem: long context without full residency
+
+**Merged from [naamfung/zatfung](https://github.com/naamfung/zatfung)**; this repository is
+where it was made to coexist with MTP.
+
+### 3.1 What it solves
+
+On a 16 GB card, KV and weights compete for the same memory. A 262,144-token context costs
+4.71 GiB at `rk4v4` and 8.06 GiB at `int8` — on top of 7.12 GiB of weights, it does not fit.
+
+KVMem keeps only a **resident window** in the device pool and parks the rest in host memory.
+The point is that the pages outside the window are not left in place as holes: the evicted
+interval is **compacted away and the remaining pages are re-phased (re-RoPE)**, with the
+coordinate system shifted to match. An implementation that selects blocks in place saves no
+tile iteration at all and is equivalent to not turning it on — that is why it failed elsewhere.
+
+### 3.2 Turning it on
+
+```bash
+./build/apps/ninfer-serve <model.ninfer> \
+  --kvmem --kv-dtype int8 \
+  --kv-device-tokens 131072 \
+  --kvmem-budget 98304 \
+  --host-kv-mib 8192
+```
+
+| Flag | Effect |
+|---|---|
+| `--kvmem` | On. **Without it everything stays resident**, exactly as before the merge |
+| `--kv-device-tokens N` | Shrinks the device pool below the context; what it frees is what KVMem gives back |
+| `--kvmem-budget N` | Token count of the resident window |
+| `--kvmem-gen-reserve N` | Pool headroom kept for decode (default 8192) |
+| `--host-kv-mib N` | Size of the host-side KV pool |
+
+CLI and server both expose all of these. The environment variables `NINFER_KVMEM` /
+`NINFER_KVMEM_BUDGET` / `NINFER_KVMEM_GEN_RESERVE` are the equivalent spelling for frontends
+that do not surface them as flags.
+
+**Two hard constraints**:
+
+- **`--kv-dtype int8` is required.** The offload and the scoring address the int8-group64 codec
+  planes directly; fp8 cannot go through them.
+- **The window size decides quality, and it is not free.** See §3.5.
+
+### 3.3 The speed cost is zero
+
+At the same KV format (int8), KVMem and full residency are identical cell by cell while
+**actually offloading**:
+
+| Task | Thinking | Resident-int8 | KVMem-int8 |
+|---|---|---:|---:|
+| Pelican on a bicycle | off | 108.1 | 108.2 |
+| Pelican on a bicycle | on | 74.6 | 74.7 |
+| Short story | on | 77.3 | 77.3 |
+| Short story | off | 58.8 | 58.9 |
+| Tool call | on | 134.3 | 134.5 |
+| Tool call | off | 180.4 | 181.3 |
+
+Protocol: 124k prompt, device pool 2,048 pages against 4,096 logical, `host KV pinned
+8.00 GiB` (**genuinely offloading**). Prefill matches too (1520~1540 vs 1520~1530), and so do
+short contexts that fit the pool without offloading (155.2/155.1, 232.5/232.0). **What it buys
+is a 262k logical context on a 16 GB card, and it does not buy it with speed.**
+
+**The merge did not touch the resident path either**: same fixture, same CLI protocol, three
+alternating rounds, 64k decode matches cell by cell before and after the merge — bf16 98.3 /
+98.3, int8 112.0 / 112.0, fp8 114.5 / 114.4, rk4v4 111.5 / 111.5, with acceptance identical
+to the digit (60.1%).
+
+### 3.4 The memory ledger
+
+Every row is the `capacity` line of a `ninfer-serve` startup log.
+
+| Configuration | Weights | Device pool | runtime | Total on card | GPU free |
+|---|---:|---:|---:|---:|---:|
+| Resident 8k, no MTP | 6.70 | 128/128 | 0.75 | **8.08** | 7.92 |
+| Resident 8k, MTP3 | 7.12 | 128/128 | 0.84 | **8.53** | 7.47 |
+| Resident 64k, MTP3 | 7.12 | 1024/1024 | 2.76 | **10.45** | 5.55 |
+| Resident 128k, MTP3 | 7.12 | 2048/2048 | 4.95 | **12.64** | 3.36 |
+| **KVMem 256k logical / 128k pool, no MTP** | 6.70 | 2048/4096 | 4.61 | **11.95** | 4.05 |
+| **KVMem 256k logical / 128k pool, MTP3** | 7.12 | 2048/4096 | 5.21 | **12.90** | 3.10 |
+
+Total on card = 16 GiB − GPU free (including roughly 0.6 GiB of CUDA context and the like).
+**KVMem runs a 262,144-token logical context in 12.90 GiB; full residency spends 12.64 GiB to
+reach 131,072.** Taking the resident path to 262,144 would need 8.06 GiB of KV pool by itself,
+putting the total past 16 GiB — it does not start, and the engine names the shortfall in bytes.
+The two device-pool columns are "physical pages / logical pages"; the ratio is how much KV sits
+in host memory.
+
+**Long-context (124k prompt) prefill**: resident-fp8 **1460**, resident-int8 **1520~1540**,
+KVMem-int8 **1520~1530** tok/s. All three tasks land in one band, because prefill depends on
+token count alone, not on task content or residency mode.
+
+### 3.5 It is lossy: the window decides recall
+
+The decisive fixture is three **real documents** on unrelated subjects concatenated into
+213,723 tokens (Maya 124k + pistols 62k + Tintin 29k), with the question answerable **only from
+the middle section** — the answer block is neither in the sink head nor in the recent tail, so
+it has to survive on mid-context top-k.
+
+| Window | Result |
+|---|---|
+| 17,408 (6% of the context) | **Loses the middle** — the model answers "there is no Section B in the text" |
+| 74,752 | Answers correctly, `Type 94 Nambu` (decode 47.0, still 27% faster than full residency) |
+
+**So it is a lossy tool that trades memory for long-context speed, not a lossless memory
+optimization.** How large the window must be depends on where your task hides its answers; for
+long context with mid-document recall, the window has to be big enough.
+
+### 3.6 Running it with MTP
+
+**They can be on at the same time** — this is what this repository added. A draft layer attends
+the whole history and cannot keep a window, so its KV is compacted together with the text
+(same budget, same frontier) and its page pool is sized by logical capacity.
+
+The original implementation excluded speculation from offload through three
+`speculative_backend == None` guards, because both sides share one `kv_offset`: compacting the
+text alone shifts the draft layer's RoPE positions by the whole evicted span. The three fixes
+(3 files, 77 lines) are: compact the MTP KV too and assert the two windows agree; take the
+prefill compaction budget as `min(configured window, pool headroom)` (the original used only
+the latter and ate the pool to fullness every time); and make `chunked_kv_prefill`'s test use
+the raw prompt length (in compacted coordinates the original test flips false, so after an
+offload no piece maps any more).
+
+**Measured**: 213,723 tokens of real text, device pool 2,048 pages / 4,096 logical (window
+1,536 pages), MTP draft 3 — TTFT **164.0 s** (prefill 1,302.8 tok/s), decode **88.8 t/s**,
+runtime **5.21 GiB**, answer correct. The same text does not start at all with all 2,048 pages
+resident.
+
+---
+
+## 4. Deployment
+
+### 4.1 Hardware and prerequisites
+
+| | Requirement |
+|---|---|
+| GPU | NVIDIA Ada `sm_89` (RTX 40 series). Tuned and verified here on an **RTX 4070 Ti SUPER 16 GB** |
+| Memory | ≥ 16 GB (weights 6.70 GiB + MTP 0.42 GiB + KV) |
+| OS | Linux (verified on Arch). **Paths must be pure ASCII** |
+| Toolchain | CUDA 13.x, GCC 15+, CMake ≥ 3.24 |
+
+**Put the display on the integrated GPU if the board has one.** Driving a desktop from the
+discrete card steals its memory bandwidth — about **10%** on this machine. That is not a tuning
+knob, it is a machine state.
+
+### 4.2 Build
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_ARCHITECTURES=89
+cmake --build build -j"$(nproc)"
+```
+
+Outputs: `build/apps/{ninfer, ninfer-serve, ninfer-perplexity}`.
+
+> **Two known build traps**, both from concurrent nvcc under `-rdc=true` and unrelated to the
+> code:
+> 1. **`TMPDIR` on tmpfs makes GCC segfault.** Point it at disk:
+>    `export TMPDIR=$PWD/tmp-nvcc`
+> 2. The build occasionally reports an ICE (`cc1plus` segfault). **Retry it** — not a code
+>    problem. Dropping to `-j6` makes it much rarer.
+
+### 4.3 Model
+
+The model is a `.ninfer` artifact of **Ternary Bonsai 2 27B**. **This repository does not
+contain or redistribute the weights** — obtain them from the official channels and observe
+their terms, which may not be Apache-2.0. See §8.
+
+### 4.4 Running it
+
+**Command line** (single question):
+
+```bash
+./build/apps/ninfer <model.ninfer> \
+  --messages prompt.json \
+  --max-context 8192 --max-new 512 \
+  --spec mtp --draft-tokens 3 \
+  --no-thinking
+```
+
+`prompt.json` is an OpenAI-style message array:
+
+```json
+[{"role": "user", "content": "Hello"}]
+```
+
+**Server** (recommended for multi-turn):
+
+```bash
+./build/apps/ninfer-serve <model.ninfer> \
+  --host 127.0.0.1 --port 8084 \
+  --kv-dtype rk4v4 --max-context 262144 --kv-capacity auto \
+  --max-concurrency 1 --prefill-chunk 1024 \
+  --spec mtp --draft-tokens 3 --no-thinking
+```
+
+```bash
+curl -s http://127.0.0.1:8084/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"messages":[{"role":"user","content":"Hello"}],"max_tokens":512}' | jq -r '.choices[0].message.content'
+```
+
+> **Prefer `ninfer-serve` over `ninfer` for multi-turn work.** The CLI's prefix cache is
+> **hard-disabled**; the server's is on by default, so the same history is prefilled from
+> scratch on every turn under the CLI.
+
+**Wiring it to an agent harness: a worked example**
+
+The two snippets above only prove the server is up. **Tool calls plus multi-turn** is a
+separate path and needs its own check — run a concrete task through an agent harness:
+
+```bash
+# Terminal 1: start the server (§5.1's recommended configuration, but **drop --no-thinking** — see below)
+# Terminal 2:
+BONSAI_API_KEY=local dsh --profile headless \
+  "Draw a 2D animation of a pelican riding a bicycle as ONE self-contained HTML \
+   file, inline SVG only, under 120 lines. Output only the code."
+```
+
+The harness's model configuration (`~/.dsh/settings.yaml`) points at
+`http://127.0.0.1:8080/v1` with model id `Ternary-Bonsai-2-27B`, and **`contextWindow` must
+match `--max-context`** — set it larger and the client sends an over-long request, which the
+server rejects outright.
+
+**Measured**: finished in **3 min 22 s**, having issued **8 requests** — the agent's tool loop:
+it wrote the file itself, ran `wc -l` on it itself, parsed the SVG to verify its structure. The
+output was a **58-line, zero-external-reference, renderable single-file HTML**.
+
+> **Two preconditions, without which this example does not terminate**:
+> ① **Do not add `--no-thinking` to the server** — an agent loop ends because the model ends it,
+> and with the thinking chain off it just rewrites the same file over and over;
+> ② do not sample with `--greedy` (that is for reconciliation and makes this worse).
+>
+> **Why an agent loop rather than one-shot generation**: every step ends in a tool call, so
+> **the thinking has a terminus**. A control run with the client output limit raised from
+> 32,768 to 199,000 took **3 min 27 s / 8 steps** — it did **not** think more (19% less
+> thinking, in fact) and terminated with a finished artifact anyway.
+> **The terminus is "every step has to land an action", not the limit.**
+
+### 4.5 Deploying into long sessions
+
+**The server's prefix cache advances turn by turn for an agent loop**, provided the history
+shape is recognised. One counterexample: if the caller **drops reasoning** from the history
+every turn (what harnesses like Hermes do), and the server anchors turns in the wrong place,
+the cache hold **freezes at the start of the session**, the miss grows linearly with the
+session, and TTFT degrades from seconds to tens of seconds. Fixed in `fe4f6cc` (the anchor is
+now "after the last user **or tool** message"), but with any frontend it is worth glancing at
+the `cache N (X%, <path>)` column in the server log:
+
+| Path | Meaning |
+|---|---|
+| `turn closure` / `private endpoint` | Normal; the value should advance every turn |
+| `shared prefix` | A different path, also normal |
+| **Any path whose value never grows** | Something is wrong; misses will accumulate |
+
+---
+
+## 5. Configuration
+
+### 5.1 Recommended configuration and what each flag costs
+
+```bash
+--kv-dtype rk4v4          # context 120k → 262,144; runtime 8.54 → 4.71 GiB
+--max-context 262144 --kv-capacity auto
+--max-concurrency 1       # interactive latency first; **batch throughput** below
+--prefill-chunk 1024      # the default is already optimal (swept 128~2048)
+--spec mtp --draft-tokens 3   # decode ×2.3. **The best K moves with the task**, see §5.1
+--no-thinking             # decode +31%. **A usage trade-off**: no thinking chain
+```
+
+For a 262k context without giving up speed, add KVMem (§3) on top of `--kv-dtype rk4v4`, or
+take `int8` + KVMem for better numerics.
+
+**`--max-concurrency` has two readings; do not look at only one.** Decode is **genuinely
+batched** (the weight read is amortised), but prefill is **exclusive** (one lane at a time). So:
+
+| | Per-lane latency | Aggregate throughput |
+|---|---|---|
+| `--max-concurrency 1` | ✅ 113 t/s | 1.00× |
+| `2 ~ 3` | falls to 70% / 51% | **about 1.40× / 1.53×** |
+
+Note that **the KV pool scales linearly with concurrency**
+(`max_concurrency × page_count(max_context)`), so **on 16 GB, `N>1` and long context (>64k)
+are mutually exclusive**.
+
+**The best `--draft-tokens` moves with the task** (measured 2026-09-26, median of three
+alternating rounds):
+
+| Task | Per-position survival | Best K | K=3 | K=5 | K=7 |
+|---|---:|---:|---:|---:|---:|
+| `en-code` (code, low predictability) | ≈0.76 | **5** | 143.4 | **151.0** | 136.6 |
+| Counting / structured output | ≈0.95 | **7** | 191.3 | 232.4 | **231.8 (+21%)** |
+| Template repetition (upper bound) | ≈0.995 | **≥7** | 197.0 | 248.4 | **289.3 (+47%)** |
+
+**Acceptance is not a constant — it decays with position, and the decay rate is a property of
+the task.** The `accepted by pos` histogram prints it directly (at K=7):
+
+```
+en-code        56,45,28,23,17,11, 7    ~0.76 per position, a loss from the 4th on
+mtp-count      40,39,39,32,30,22,13    ~0.97 for the first four, then it falls
+mtp-template   32,32,32,32,32,32,31    barely decays at all, accepted length 7.97 (ceiling 8)
+```
+
+So "a bigger draft is always slower" holds only for low-predictability tasks: **on one binary,
+`en-code` peaks at K=5 and K=7 is worse than K=3, while template repetition is 47% faster at
+K=7.** The cost side is fixed (≈1.94 ms per draft step, independent of task), the benefit side
+is survival probability, and they cross at about 0.75 per position.
+
+**K is capped at 7** (`T=K+1≤8`; beyond that it falls out of `small_t` and the verify round
+jumps from 13.3 ms to 40 ms). `--draft-tokens` is chosen per task within that. The ceiling is
+written in four places of different kinds (capture-graph width, model configuration, CLI
+validation, a runtime invariant) that are aligned by hand and must be changed together — see
+the comment in `round_state.h`.
+
+`--greedy` buys another ~12% of decode (acceptance 36% → 44%), but it **changes the output
+distribution** — **use it for performance reconciliation only**, never as a production default.
+
+**The 16 GB trade-off**: `--max-context 262144` will not start with bf16 KV; it needs a 4-bit
+KV format or KVMem.
+
+`--vision` costs about **0.5 GiB** (vision tower 0.27 + workspace 0.24). The media subsystem
+has a separate **3 GiB budget cap** (`--media-cache-mib` 1024 + `--media-live-mib` 2048) —
+that is a **host-side** allowance, allocated on demand, not part of the VRAM reservation. To
+save it you do not have to turn vision off; lower those two numbers.
+
+**`--kv-capacity auto` is equivalent to spelling out `max_context` when `--max-concurrency 1`**
+— it is not "adaptive", it only affects the "does not fit, fail loudly" branch.
+
+### 5.2 KVMem's configuration
+
+See §3.2. Three points repeated: **`--kv-dtype int8` is required**; `--kv-device-tokens`
+decides how much memory comes back; **`--kvmem-budget` decides quality** (§3.5).
+
+### 5.3 Choosing a KV format
+
+**With no `--kv-dtype`, the format is chosen from `--max-context`: `bf16` at 16383 and below,
+`fp8` at 16384 and above.** The threshold is not arbitrary — the table below is where it comes
+from. Name a format explicitly to override; all five are accepted.
+
+> **Reachable context moves with how much VRAM is free at startup; it is not a constant of the
+> model.** The values below are this machine's ceilings (16 GB card, desktop not on the discrete
+> GPU); if `--query-gpu=memory.used` already shows a few hundred MiB taken, these numbers fall
+> proportionally. To reproduce: try `--max-context` from large downward; a failure states
+> exactly how many bytes are missing (`but only N bytes are available after weights`), and
+> dividing that by bytes-per-token gives the boundary.
+> Re-measured 2026-09-26: `fp8` starts at a request of 233,000 (planned 233,024 / 3,641 pages /
+> runtime 7.66 GiB / 1.01 GiB left) and fails at 234,000; `int8` starts at 213,000. **That
+> back-solves to 32,994 bytes per token (32.2 KiB)**, matching the column below.
+
+| KV format | Measured reachable context | Per token | Notes |
+|---|---:|---:|---|
+| `bf16` | ~120k | 64 KiB | default at `--max-context` ≤ 16383 |
+| `fp8` | **233,024** | 32.3 KiB | default at ≥ 16384; **fastest at long context** |
+| `int8` | ~213k | 33.0 KiB | the most accurate of the three, but slower than `fp8`; **the only format KVMem accepts** |
+| **`rk4v4`** | **262,144 (the model's native ceiling)** | 17.0 KiB | 4-bit, runtime 8.54 → **4.71 GiB** |
+
+**Measured decode** (`--spec mtp --draft-tokens 3`, median of three alternating rounds, every
+configuration naming `--kv-dtype` explicitly so this measures kernels and not precision):
+
+| KV format | 30k prompt | 64k prompt | Long-protocol PPL cost |
+|---|---:|---:|---:|
+| `bf16` | 142.9 tok/s | 96.7 tok/s | — (anchor) |
+| `int8` | +6.2% | +13.8% | **+0.077%** |
+| **`fp8`** | **+7.1%** | **+16.4%** | +0.143% |
+| `rk4v4` | +6.9% | +13.4% | +0.213% |
+
+(The `rk4v4` acceptance in the 64k round was 61.2% against 60.1% for the other three — a KV
+format changes attention numerics, the trajectory can fork, so its +13.4% is flattered slightly.
+Also: these two anchors were measured before the two verify-path changes in §2.1, so their
+absolute values are about 1.3% low — **the percentages are unaffected**, since row block is
+chosen per shape and split-K applies only to shapes with `n ≤ 6144` and enough K depth, neither
+of which involves the KV format: **all four formats are treated alike**.)
+
+Three readings:
+
+1. **The gain is close to linear in context** (about one point per 3.7k tokens) and below 16k
+   it does not clear the run-to-run noise of a single decode measurement — which is exactly why
+   the threshold is 16384. The PPL column uses the long protocol (`--context 65536
+   --stride 32768`, 124k-token corpus, 3 windows, bf16 anchor 2.099109); **the criterion is
+   ≤0.30% and all four pass.**
+2. **`rk4v4` uses half the KV bytes of `fp8` and decodes more slowly.** Its decode side adds a
+   `kv_cache_inverse_rotate_output_kernel` per layer per attention (16 layers ⇒ 16 more nodes in
+   the graph), and that fixed cost eats the bandwidth saving. ⇒ **KV byte count is not the
+   constraint on long-context decode.** An earlier arithmetic model that treated KV reads as
+   equivalent to weight reads concluded `rk4v4` was mandatory above 110k; it did not account for
+   this term, so that conclusion was wrong.
+3. So **`rk4v4` is a capacity format, not a speed format**: it is what makes 262,144 (the native
+   ceiling) reachable — the `bf16`/`fp8`/`int8` rows run out of memory first, and only it starts.
+   **247,646 tokens with a deeply buried answer has been measured correct.** For speed use
+   `fp8`; for accuracy use `int8`.
+
+**Server-side cross-check** (`ninfer-serve` + `/v1/chat/completions`, 30k prompt,
+`--max-context 40960` — a depth all four fit, since `bf16` is 64 KiB/token and 200K would need
+12.8 GB on a 16 GB card. Two alternating rounds, **restarting the server for every
+configuration, so the prefix is cold**):
+
+| KV format | prefill | TTFT | decode | MTP acceptance |
+|---|---:|---:|---:|---:|
+| `bf16` | 2.22k / 2.21k | 12.7 / 12.8 s | **146.6 / 146.6** | 94.4% |
+| `int8` | 2.28k / 2.27k | 12.4 / 12.4 s | **157.1 / 157.0** | 94.4% |
+| **`fp8`** | 2.25k / 2.24k | 12.6 / 12.6 s | **157.1 / 157.1** | 94.4% |
+| `rk4v4` | 2.20k / 2.20k | 12.8 / 12.8 s | **156.1 / 155.9** | 94.4% |
+
+**Two observations**: ① **prefill is essentially independent of the KV format** (3.6% spread)
+— prefill is **weight-bandwidth bound** (it reads 7.12 GiB of weights), KV writes are a
+rounding error, and changing format will not get a long prompt into context any faster.
+② **Only `bf16` is clearly slower at decode**; the other three are about +7%, with `int8` and
+`fp8` level and `rk4v4` 0.6% behind. **The ordering matches the CLI table above**, so that
+table's protocol is sound.
+
+> ⚠️ Two protocol traps: **every configuration must start from a cold prefix** (from the second
+> run on, the hit rate is 99.9% and the `prefill X tok/s` line is either a remainder or absent);
+> and **the depth must fit all four formats**.
+
+### 5.4 Environment variables
+
+| Variable | Default | Effect |
+|---|---|---|
+| `NINFER_TERNARY_S8` | on | `=0` falls back to the bf16 path (**use this for same-binary A/B**) |
+| `NINFER_TERNARY_S8_MIN_TOKENS` | 17 | T at which s8 takes over |
+| `NINFER_TERNARY_S8_KSPLIT` | on | `=0` restores the bit-identical path (§2.2) |
+| `NINFER_TERNARY_GAP` | `auto` | Which path T=9..31 takes: `auto`/`small_t`/`s8`/`gemv` |
+| `NINFER_TERNARY_GAP_SMALL_T_MAX` | 16 | the `auto` boundary |
+| `NINFER_TERNARY_MMA_MIN_TOKENS` | 32 | T at which bf16 MMA takes over |
+| `NINFER_TERNARY_SHORT_TILE_TOKENS` | 64 | 64-wide / 128-wide tile boundary |
+| `NINFER_TERNARY_VERIFY_CAP` | 8 | T ceiling accepted on the verify round |
+| `NINFER_TERNARY_SMALL_T_ROWS` | 32 | small_t rows/CTA (16/32/48) |
+| `NINFER_TERNARY_SMALL_T_KSPLIT` | on | `=0` disables the decode-side split-K (§2.2) |
+| `NINFER_TERNARY_DECODE` | `small_t` | `=gemv` fallback |
+| `NINFER_TERNARY_PREFILL` | `mma` | `block`/`ref` for A/B |
+| `NINFER_TERNARY_HADAMARD` | on | `=0` disables rotation (**output is meaningless**; diagnostics only) |
+| `NINFER_TERNARY_S8_DEBUG` | off | `=1` prints **the path every call actually took** |
+| `NINFER_KVMEM` | off | `=1` enables KVMem (equivalent to `--kvmem`) |
+| `NINFER_KVMEM_BUDGET` | 0 | KVMem resident window in tokens (0 = the whole context) |
+| `NINFER_KVMEM_GEN_RESERVE` | 8192 | KVMem pool headroom kept for decode |
+
+**After changing dispatch, the first thing to do is turn the probe on and confirm the branch is
+actually taken** — speed alone cannot tell you whether you hit the intended path. This is the
+most expensive lesson in this repository; see `.claude/skills/ninfer-perf-tuning/SKILL.md`.
+
+---
+
+## 6. Performance data
+
+### 6.1 Before reading these numbers: protocol and precision
+
+**The fixed conditions** (without aligning these, the numbers below are not comparable):
+
+| | Value |
+|---|---|
+| KV precision | **`bf16`** (the format all three builds accept; `rk4v4` is **not accepted by upstream ternary's CLI**, only its serve) |
+| `--max-context` | 8192 (long-prompt scenarios set their own) |
+| Sampling | **`--greedy`** — for reconciliation only; it changes the output distribution and is **not a production default** |
+| Thinking | **`--no-thinking`** |
+| Generation length | `--max-new 8` for prefill scenarios; 300 tokens for decode |
+| Rounds | **median of three alternating rounds** (all three builds run in each round, so thermal drift cannot land entirely on one of them) |
+
+> **⚠️ Absolute values drift ±1~2% between time windows; ratios do not.** Same day, same
+> machine, same fixtures, same binary, two full sweeps 45 minutes apart: the previous build's
+> long-prompt prefill read 1.25k and then 1.22k (−2.4%), decode 146.9 and then 145.4 (−1.0%) —
+> and **all three builds moved by the same amount**, so the percentages in these tables are
+> stable and the absolute values are not. The conclusion: **use these tables to compare builds,
+> not time windows**; to reconcile against another window, **run both configurations on the
+> spot**.
+
+**★ Precision has three independent axes, so say which one is moving:**
+
+| Axis | Same across the three builds? | Notes |
+|---|---|---|
+| **Weights** | **Yes** | Fixed ternary `PQ2_0_G128` at 2.125 bits per weight. **Never a variable** |
+| **Activations** | **No** ← the only one that moves | Which GEMM path is taken (below) |
+| **KV cache** | **Yes** | Every table in this section is pinned to `bf16` (see the fixed conditions above) |
+
+So "what precision is that build" is too coarse a question. **Only the activation axis moves**,
+and specifically:
+
+| Build | Activation path (at `--max-context 8192`) |
+|---|---|
+| **Previous** | Only two bf16 paths (a small-T tile path and a large-T MMA path). **It had no s8 path yet** |
+| **Upstream ternary** | **One more path at prefill: int8** (activations quantized absmax per token); decode still bf16 |
+| **This branch** | Same as upstream |
+
+**That int8 path only applies at prefill** — its threshold is T ≥ 17 (`kTernaryS8MinTokens`),
+while the verify width ceiling at decode is 16 (`kMaximumVerifyTokens`). **So the decode table
+in §2.2 is in fact the same precision across all three builds** (all bf16); what differs is the
+trajectory — prefill numerics propagate through the KV, which is why the acceptance cell moves.
+
+**To compare prefill at equal precision, turn int8 off in all three:**
+
+```bash
+NINFER_TERNARY_S8=0 <binary> <model> ...      # the previous build has no such switch; setting it is harmless
+```
+
+§2.3 therefore gives two rows: **"each default"** (how it would actually be deployed) and
+**"both bf16"** (the pure kernel comparison with the activation difference stripped).
+
+### 6.2 The speed matrix: task × context × thinking × residency
+
+Three tasks, each run at short and long context, with and without thinking, at fp8 and int8 KV,
+across three configurations: **all-resident fp8**, **all-resident int8**, **KVMem int8**.
+
+Protocol: CLI, `--greedy`, `--max-new 256`, `--spec mtp`; short context `--max-context 8192`
+(prompts 69~340 tokens), long context `--max-context 131072` (prompt ~124k); KVMem given
+`--kv-device-tokens 131072 --kvmem-budget 98304 --host-kv-mib 8192` (2,048 device pages against
+4,096 logical, **genuinely offloading**). **K is each task's own optimum** (see the footnote
+table below).
+
+**Short context**
+
+| Task | Thinking | K | Resident-fp8 | Resident-int8 | KVMem-int8 |
+|---|---|---:|---:|---:|---:|
+| Pelican on a bicycle | off | 5 | 155.2 | 155.2 | 155.1 |
+| Pelican on a bicycle | on | 3 | 146.8 | 146.5 | 146.6 |
+| Tool call (pure tool_call) | off | 7 | **232.6** | 232.5 | 232.0 |
+| Tool call (pure tool_call) | on | 7 | 194.8 | 194.2 | 194.8 |
+| Short story | on | 3 | 101.7 | 107.4 | 107.3 |
+| Short story | off | 3 | 89.0 | 85.9 | 85.9 |
+
+**Long context (prompt ~124k)**
+
+| Task | Thinking | K | Resident-fp8 | Resident-int8 | KVMem-int8 |
+|---|---|---:|---:|---:|---:|
+| Pelican on a bicycle | off | 5 | 113.1 | 108.1 | 108.2 |
+| Pelican on a bicycle | on | 3 | 71.1 | 74.6 | 74.7 |
+| Short story | on | 3 | 78.8 | 77.3 | 77.3 |
+| Short story | off | 3 | 57.2 | 58.8 | 58.9 |
+| Tool call | on | 7 | 108.2 | 134.3 | 134.5 |
+| Tool call | off | 7 | 182.6 | 180.4 | 181.3 |
+
+**Prefill**: short context 852~1970 tok/s (**it rises with prompt length — the fixed overhead
+cannot be amortised away, so it does not measure the engine**); long context, all three tasks
+in one band: **resident-fp8 1460**, **resident-int8 1520~1540**, **KVMem-int8 1520~1530**.
+A 28k prompt adds **2.30k**, joining §2.3's 2.18k (28k) and 1.81k (62k) and this section's
+1.53k (124k) into a line that falls monotonically with length.
+
+**Four conclusions**
+
+1. **KVMem's speed cost is zero.** The two int8 columns are identical cell by cell while
+   **genuinely offloading**: 108.1/108.2, 74.6/74.7, 77.3/77.3, 58.8/58.9, 134.3/134.5,
+   180.4/181.3; prefill too. Short contexts (fits the pool, no offload) match as well
+   (155.2/155.1, 232.5/232.0). **What it buys is a 262k logical context on a 16 GB card, and it
+   is not paid for in speed.**
+2. **Decode is dominated by MTP acceptance**, not by the KV format or residency mode. At long
+   context the fp8/int8 difference runs entirely through acceptance: tool-thinking 108.2 vs
+   134.3 (−24%), because fp8 quantization changes the output and acceptance drops from 65.5% to
+   49.1%; tool-nothink the two are level (182.6 vs 180.4) because acceptance is 96% either way.
+3. **Long context costs about a third**: tool 232 → 181 (−22%), fiction 86 → 59 (−31%).
+4. **K moves with the task** (table below); fixing one K puts some tasks on their suboptimum.
+
+| Task | Best K from per-position survival | K=3 | K=5 | K=7 |
+|---|---:|---:|---:|---:|
+| Pelican on a bicycle | 3 thinking / 5 not | 146.4 | **154.8** | 134.9 |
+| Short story | 3 | **101.5** | 88.9 | 81.7 |
+| Tool call | **7** | 184.1 | 217.0 | **232.4** |
+
+**One trap**: "tool call" is two different tasks whose speeds differ by 2×. **Pure tool_call**
+(structured output, 82~96% acceptance) reaches 232 at K=7; **"write advice after the result
+comes back"** (natural language, 42% acceptance) reaches 112. Changing the former into the
+latter so the output is long enough to measure decode swaps out the task along with it.
+
+### 6.3 Numerics
+
+| Configuration | PPL |
+|---|---:|
+| This machine's baseline (`NINFER_TERNARY_S8=0`) | **9.69192** |
+| This machine's default (int8 path on) | **9.6934** |
+
+Protocol: `ninfer-perplexity --text wiki-slice.txt --context 512 --stride 256` (110 windows /
+28,160 tokens).
+
+**split-K and the T=17..64 window** (`NINFER_TERNARY_S8_KSPLIT`, on by default): in this window
+the token axis fits only one 64-slice and the row axis underfills the card
+(`gridX = div_up(n,64) < 198`), so s8 slices along K to add CTAs, worth **+7.1%** prefill at
+T=28. The cost is that the K accumulation is re-associated into fp32 partials and summed —
+**deterministic, but not bit-identical**: PPL at `--context 32` is therefore +0.041%, while
+**the two numbers above are unaffected** (`--context 512` has T=508, already outside the window;
+the same value is read before and after G3).
+
+> **It does not change decode speed, but it does change decode results.** The verify width
+> ceiling at decode is 16 (`kMaximumVerifyTokens`), below s8's own threshold of 17
+> (`kTernaryS8MinTokens`, see `x.ne[1] >= ternary_s8_min_tokens()` in
+> `ternary_rowsplit_gemm.cu`), **so decode does not go through s8 at all**. What changes is
+> prefill numerics, so this prompt's output trajectory can fork: it did on `en-code.json`
+> (acceptance 67.6% → 66.0%), while `bash.json` (T=31) and `gap-sm.json` (T=27), also inside the
+> window, are **byte-identical**. **Forking is a task-dependent event, not a certainty.** To
+> restore the bit-identical path: `NINFER_TERNARY_S8_KSPLIT=0`.
+
+**The second split-K, on the verify path** (`NINFER_TERNARY_SMALL_T_KSPLIT`, on by default,
+2026-09-26): it points the **other** way — it slices decode at T ≤ 8, exactly the range s8
+cannot reach. It applies only to shapes where the row grid underfills the card **and** at least
+4 K steps remain per slice (in this model only `5120×17408`, 4 slices, 1280 CTAs), because
+shapes with only 1~2 steps per slice measure **slower** (the prologue cannot be amortised):
+without that gate the overall result is **−1%**, with it +1.3~1.4%. Six fixtures +0.2~1.8%,
+no accepted-length regression, and **PPL is bit-identical between the two configurations**
+(prefill never slices, so the two numbers above are unaffected). It is likewise not
+bit-identical; the fallback is `NINFER_TERNARY_SMALL_T_KSPLIT=0`.
+
+> **★ Those two numbers are `fp8` KV numbers.** `ninfer-perplexity` pins its KV to `fp8` in
+> source (see `apps/perplexity/main.cpp`), **while the `ninfer` CLI selects by `--max-context`**
+> (bf16 at ≤16383, fp8 at ≥16384 — §5.3). Different protocols; **do not mix the numbers** —
+> §2.2's performance table runs at `--max-context 8192`, which is bf16 KV, while this section is
+> fp8 KV.
+
+The int8 path's shift is **+0.0015%**, which is the magnitude of the int8 activation
+quantization error itself.
+
+**The KV axis** (same protocol, five formats, first measured 2026-09-26):
+
+| KV format | PPL | vs `bf16` | Per token | Notes |
+|---|---:|---:|---:|---|
+| **`bf16`** | **9.688451** | — | 64.00 KiB | CLI default at `--max-context` ≤ 16383. The lossless reference |
+| `int8` | 9.691663 | +0.033% | 33.00 KiB | **more accurate than `fp8`**, but slower at decode |
+| `fp8` | 9.693396 | +0.051% | 32.25 KiB | CLI default at ≥ 16384, and `ninfer-perplexity`'s default |
+| `rk4v4` | 9.702774 | **+0.148%** | **17.00 KiB** | the **only** format that reaches 262,144; slower than `fp8` at decode |
+| `rk4v4-e8` | 9.726728 | **+0.395%** | 17.00 KiB | **worse than `rk4v4` at identical capacity and speed** |
+
+Three conclusions:
+
+1. **`int8` is more accurate than `fp8`** (+0.033% vs +0.051%) for only 2.3% more bytes. The
+   reason is the encoding: `int8-g64` is an 8-bit **fixed point** with one scale per 64
+   dimensions, while `fp8-e4m3-r256` has a **3-bit mantissa** and one scale per 256.
+   **Per-element precision differs by about 6×.** But "more accurate" does not mean "a better
+   default": `fp8` measures faster at decode (+16.4% vs +13.4% at 64k, §5.3), so `fp8` is the
+   long-context default and `int8` is the accuracy-first choice — and the only format KVMem
+   accepts (§3.2).
+2. **`rk4v4` costs +0.148%**, at the low end of the KV formats' "soft door" (0.05%~1%). As the
+   **only** format that reaches 262,144 on a 16 GB card, that is a defensible price. This is the
+   first time this repository has quantified it.
+3. **`rk4v4-e8` is 3.5× worse than `rk4v4` at identical capacity, speed, and bytes per token.**
+   Its decode side is a **deliberate half-coset approximation** (the code comment, verbatim:
+   *"the D8+0.5 E8 coset is collapsed … **not an exact E8**"*) — part of the E8 shaping gain is
+   thrown away. **In the current implementation `rk4v4-e8` has no reason to exist.**
+
+> ⚠️ **This is the short protocol, `--context 512`.** Per-element quantization error does not
+> depend on context length (the KV is written once and only read back), so the table is valid
+> numerically; but the longer the context the more selective attention becomes, so the cost can
+> be **higher** (not lower). **The long protocol has been run** (`--context 65536 --stride
+> 32768`, 124k-token corpus, 3 windows, bf16 anchor 2.099109): `int8` +0.077% / `fp8` +0.143% /
+> `rk4v4` +0.213%, criterion ≤0.30%, all four pass. **`rk4v4`'s long-protocol cost is 1.44× its
+> short-protocol cost**, in the expected direction.
+
+> ⚠️ **Do not compare this 9.69 against numbers from elsewhere.** PPL is a product of its
+> protocol: a different corpus, context, or stride is a different number. The upstream
+> document's golden criterion is ≈6.445, which is its own protocol. Reconcile against this
+> machine's own history.
+
+### 6.4 Two server behaviours that bite
+
+**① `reasoning_effort` defaults to the model's own `xhigh`.**
+`result.reasoning_effort.default_effort = ReasoningEffort::XHigh;` at `chat_template.cpp:432`.
+**Turning thinking on without naming a level means the highest level** — it is not something the
+caller set. To lower it, pass `reasoning_effort: low|medium|high` explicitly (`request.h:142`
+accepts none/minimal/low/medium/high/xhigh).
+
+**② `--default-thinking-budget` is a licence, not a brake.**
+The thinking/body split relies on the model emitting control tokens (`frontend.cpp:557`); the
+budget only feeds a semantic tracker that is **disabled by default entirely**
+(`semantic.in_reasoning = starts_in_reasoning && thinking.budget.has_value()`, and the comment
+says it is off by default so every token is not decoded twice). Exceeding the budget **raises
+`model output exceeded the licensed thinking budget` — it errors out, it does not wrap up for
+the model.** ⇒ **It does not solve "it will not stop thinking".**
+
+**Three things for users** (all direct consequences of the two above, none about model
+behaviour):
+
+| You want | Do this |
+|---|---|
+| Control over the thinking level | Pass `reasoning_effort` explicitly; do not rely on the default |
+| Thinking that terminates | **Use an agent loop** — every step ends in a tool call, so the thinking has a terminus (a runnable example is in §4.4). `--default-thinking-budget` is another route, but **it errors on overrun — do not treat it as "wraps up automatically"** |
+| Speed above all | `--no-thinking` (trade-off in §5.1) |
+
+**"Thinking terminates" measured** (same binary, same machine, server at `--max-context 200000
+--kv-dtype fp8 --spec mtp --draft-tokens 3`, **no `--no-thinking`, no
+`--default-thinking-budget`** ⇒ thinking unlimited, level the default `xhigh`):
+
+| | Client limit 32,768 | **Client limit raised to 199,000** |
+|---|---|---|
+| First usable output | 3 min 22 s / 7 steps | **3 min 27 s / 8 steps** |
+| Step 1 thinking | 56,783 characters | **34,844 characters** |
+| Total thinking | 58,689 characters | **47,487 characters** |
+| Output | 58-line single-file HTML | **49-line single-file HTML** |
+
+**Raising the limit did not make it think more (19% less, in fact), and it terminated and
+produced output anyway.** ⇒ **The terminus is "every step has to land an action", not the
+output limit.** Raising the limit is neither a way to make long thinking converge nor the reason
+it fails to.
+
+---
+
+## 7. Engine internals: T dispatch and constants
+
+### 7.1 Dispatch
+
+The ternary linear layers pick a kernel by token count T. **T is not the prompt length** — the
+rule, consistent across seven fixtures:
+
+```
+the T the linear layers see = prompt_tokens − 4
+```
+
+Current defaults:
+
+| T | Path |
+|---|---|
+| 1 | `small_t` (tensor core) |
+| 2..8 | `small_t` (verify round) |
+| 9..16 | `small_t_tiled` (8-wide tile, re-entered every 8 tokens) |
+| 17 and up | `s8` (int8 activations × int8 weights, tensor core) |
+| (with s8 off) ≥32 | `short_mma` / `wide_mma` (bf16) |
+
+After changing dispatch, **the first thing to do is set `NINFER_TERNARY_S8_DEBUG=1` and confirm
+the branch is actually taken** — speed alone cannot tell you whether you hit the intended path.
+
+### 7.2 Measured constants on this machine
+
+Re-measure all of these on a different card.
+
+| Quantity | Value |
+|---|---|
+| Read-only bandwidth ceiling | 637 GB/s (measured; **whether the unit is GB/s or GiB/s is not yet pinned down**, see below) |
+| Weights per pass | **6.80 GB = 6.33 GiB** (64 layers at 6461.8 MB + `output_head` 337.7 MB, summed per tensor; excludes MTP) |
+| `s8` cost | T=15 → 44.3 ms, T=28 → 51.3 ms. **Not "near-flat"** — the mma count is independent of T (the tile is fixed at 64 wide), so at T=15 **76% of the mmas run on zeros** |
+| `small_t` cost | T=9..16 is about **20.5 ms × ceil(T/8)**; **T=1..8 is completely flat** (T=1 and T=4 measure 13.75 / 13.3 ms — same kernel, same weights) |
+| `small_t` / `s8` crossover | **T=17** |
+| 64-wide / 128-wide tile crossover | **T=64** |
+| decode bandwidth | **6.80 GB / 13.75 ms = 494 GB/s** (about 78% of 637) |
+| Kernels per decode token | **1224** (all inside one CUDA graph, **64 ns** between frames, only 3.7% genuinely idle) |
+| Decode round budget | `ternary_small_t_mma_kernel` **420.6 calls/round × 37.2 µs = 15 646 µs = 79%**; `ternary_rotate_bf16` 274 × 3.3 = 905 µs (4.6%); `recurrent_record` 577 µs; `pq2_mma_s8` 386 µs |
+
+> ⚠️ **The units in the rows above are inconsistent, and that is a known problem.** The 637
+> ceiling is used as GB/s in some derivations (6.80 GB ÷ 637 = 10.7 ms) and as GiB/s in others
+> (6.65 ÷ 637 = 10.4 ms). The two differ by 7%. **Do not quote percentages until it is pinned
+> down.** One clean single-kernel reading would settle it.
+
+**The decode lever is entirely inside that 79%**, and it is already running at about 73% of
+effective bandwidth (7.12 GiB of weights ÷ 672 GB/s = an 11.4 ms floor against 15.6 ms
+measured). **Cutting bytes cuts the floor directly, and pays better than squeezing kernel
+efficiency.**
+
+---
+
+## 8. Lineage and credits
+
+This work stands entirely on **NINFER** and the forks around it.
 
 | Project | Contribution |
 |---|---|
-| **[Neroued/ninfer](https://github.com/Neroued/ninfer)** | **Canonical upstream NINFER** — C++20/CUDA architecture, DFlash2, ReplaySSM, Paged KV Cache. Apache-2.0. |
-| [UDPSendToFailed/ninfer-4090](https://github.com/UDPSendToFailed/ninfer-4090) | Original RTX 4090 fork; WDDM evictable-budget bypass and the E8-lattice `rk4v4-e8` KV storage |
-| [sergiuszm/ninfer-4090](https://github.com/sergiuszm/ninfer-4090) | Ada `sm_89` kernel optimizations, `rk4v4-e8` adaptation, GDN cooperative-launch fix |
-| [natpate/ninfer-windows](https://github.com/natpate/ninfer-windows) | Win32/MSVC portability layer, unbuffered async I/O |
+| **[Neroued/ninfer](https://github.com/Neroued/ninfer)** | **Canonical upstream NINFER** — C++20/CUDA architecture, DFlash2, ReplaySSM, Paged KV Cache. Apache-2.0 |
+| [UDPSendToFailed/ninfer-4090](https://github.com/UDPSendToFailed/ninfer-4090) | The original RTX 4090 fork; the E8-lattice `rk4v4-e8` KV storage |
+| [sergiuszm/ninfer-4090](https://github.com/sergiuszm/ninfer-4090) | Ada `sm_89` kernel optimizations, GDN cooperative-launch fix |
+| [natpate/ninfer-windows](https://github.com/natpate/ninfer-windows) | Win32/MSVC portability layer |
 | [headpiece747/ninfer-5090-windows](https://github.com/headpiece747/ninfer-5090-windows) | Native Windows MSVC compilation base |
-| [Don-Chad/ninfer-3090](https://github.com/Don-Chad/ninfer-3090) | Ampere work and early compatibility bridges |
-| **[Ambolio/ninfer-4090-windows](https://github.com/Ambolio/ninfer-4090-windows)** | **The direct base of the source tree** — the Windows Ada line this branch's engine code starts from |
+| [Don-Chad/ninfer-3090](https://github.com/Don-Chad/ninfer-3090) | Early Ampere work |
+| **[Ambolio/ninfer-4090-windows](https://github.com/Ambolio/ninfer-4090-windows)** | **The direct base of this branch's source tree** |
+| **[shensanshu/ninfer-ada-ternary](https://www.modelscope.cn/shensanshu/ninfer-ada-ternary)** (ModelScope) | **The source of the ternary port itself**: engine-side `patches/`, packing and verification `tools/`, `docs/` technical record |
+| **[naamfung/zatfung](https://github.com/naamfung/zatfung)** | **Where KVMem comes from** — host-side KV offload (compaction + re-RoPE), windowed continuation, decoupling device budget from logical entitlement. Forked from this repository's `ad6cb46`; `src/kvmem/*`, the KVMem logic in `logical_kv_store.h`, and the related documents all come from that line |
 
-Two of those are the direct inputs, and they deserve to be named before the rest:
-**[shensanshu/ninfer-ada-ternary](https://www.modelscope.cn/shensanshu/ninfer-ada-ternary)** on
-ModelScope (*"NInfer on Ada · 三元 Bonsai 2 27B 实战移植"*, Apache-2.0) is **the source of the ternary
-port itself** — its `patches/` are the engine-side changes, its `tools/` are the packer and the
-verification harness, and its `docs/` are the technical record. Ambolio's branch is where the engine
-source tree comes from.
+**Method references**: ternary encode/decode semantics follow `ggml-quants.c` in the llama.cpp
+ecosystem; the folded Hadamard basis follows PrismML's published runtime and its
+`prism.hadamard.*` metadata contract; the tensor-core FWT design was informed by the public
+HadaCore and TurboQuant work. These are method references only; the code here is an independent
+implementation.
 
-### Model weights — not distributed here
+### Model weights
 
-The model is **Ternary Bonsai 2 27B**, built on `Qwen/Qwen3.8-27B` with the architecture unchanged
-and the weights quantized to ternary over a Hadamard-rotated basis. **Weight copyright belongs to
-its authors and publishers — PrismML and the upstream Qwen lineage — and this repository does not
-contain or redistribute any model weights.** Obtain them from the official channels and observe
-their own terms, which may not be Apache-2.0. A `.ninfer` artifact produced from them is a
-weight-derived work, so its redistribution obligations follow the *weight* licence, not this
-repository's.
+The model is **Ternary Bonsai 2 27B**, built on `Qwen/Qwen3.8-27B` with the architecture
+unchanged and the weights quantized to ternary over a Hadamard-rotated basis. **Weight copyright
+belongs to its authors and publishers — PrismML and the upstream Qwen lineage — and this
+repository does not contain or redistribute any model weights.** A `.ninfer` artifact produced
+from them is a weight-derived work, so its redistribution obligations follow the *weight*
+licence, not this repository's.
 
-### Method references
+The upstream `NOTICE` and `LICENSE` are retained verbatim. Every file this branch modifies
+carries a prominent notice at the top, as Apache-2.0 §4(b) requires.
 
-Ternary encode/decode semantics follow `ggml-quants.c` in the llama.cpp ecosystem. The folded
-Hadamard basis follows PrismML's published runtime and its `prism.hadamard.*` metadata contract.
-The tensor-core FWT design was informed by the public HadaCore and TurboQuant work. These are
-method references only; the code here is an independent implementation.
+---
 
-The upstream `NOTICE` and `LICENSE` are retained verbatim. Every file this branch modifies carries a
-prominent notice at the top, as Apache-2.0 §4(b) requires.
+## Other documents
 
-## What this branch changes
+| Document | Contents |
+|---|---|
+| `.claude/skills/ninfer-perf-tuning/SKILL.md` | **Tuning methodology**: measurement discipline, dispatch probes, A/B design, numerical gates, the traps that lie silently |
+| [README.md](README.md) | Chinese edition, same structure |
+| `docs/` | Upstream product guides (CLI, serving, performance, evaluation, maintainer) |
+| `bench/fixtures/speed-matrix/` | The fixtures behind §6.2, the raw results (`results.jsonl`), and the re-run scripts |
 
-Seven commits on top of the upstream baseline, each with its measurements in the message:
+---
 
-- **Ternary tensor-core prefill path** — 6.8x over the blocked GEMV on the same weights, then
-  3.51x more from NCU-guided tuning (`prefill-3.2x`, `prefill-3.51x` tags).
-- **A small-T tensor-core path for the speculative verify pass.** The prefill kernel tiles the token
-  axis at 128, which is 97% empty at T=3; the verify path keeps all of K inside one CTA so the
-  weights are read exactly once for all drafted tokens. This is where most of the decode speed came
-  from, and it moved MTP from net-negative to net-positive.
-- **Two rounds of decode optimisation found by reading SASS**, not by reasoning: a ternary that the
-  compiler had emitted as both arms plus a SEL, and a bias prefix left over from an earlier magic
-  constant. Both are bit-identical in and out.
-- **Rotation launch packing** — the rotation is one warp per (K-block, token) pair, so its grid is
-  fixed by the data; the only free parameter is how those warps are packed, and at 8 per block a
-  decode-shaped rotation put 20 warps on 3 of 66 SMs.
-
-## Specification
-
-```
-Device      NVIDIA GeForce RTX 4070 Ti SUPER - 16 GB (16376 MiB) - sm_89 (Ada) - driver 615.71.09
-Model       Ternary Bonsai 2 27B - 2.125 bit per weight - native context ceiling 256k
-
-Decode      100.8 t/s      MTP draft 3, 300 tokens, en-code
-Prefill     1230  t/s      tensor-core path
-VRAM        7.12 GiB       weights, of which 0.42 GiB is the MTP layer (6.70 GiB without --spec)
-Context     120k tokens    bf16 KV, measured ceiling on 16 GB (128k will not start)
-            238k tokens    fp8 KV, measured ceiling (240k will not start)
-
-Long-context recall   6/6 at 16k/32k/64k/96k (bf16) - 6/6 at 128k/192k (fp8)
-                      (six-needle retrieval; 192k also 6/6 under two other query orders)
-```
-
-Every figure above is measured on this machine, not quoted. The context ceilings come from
-`--kv-capacity auto`, which sizes against VRAM and fails loudly when the request does not fit;
-the two numbers either side of each ceiling were both tried.
-
-Note what the KV dtype buys: fp8 doubles the reachable context, and recall holds under it —
-128k and 192k both returned 6/6 with fp8 KV.
-
-## Measured on this hardware
-
-Decode, `en-code.json`, 300 tokens, MTP at draft 3, best of two passes with the engine's own
-acceptance accounting identical in every arm:
-
-| Configuration | decode |
-|---|---:|
-| Speculative verify on the SIMT tile kernel | 43.2 t/s |
-| Verify on the small-T tensor-core path | 89.9 t/s |
-| + draft-window tuning and the SASS-driven decode work | 99.0 t/s |
-| + rotation launch packing, row-block reuse | **100.8 t/s** |
-
-Prefill: **1.23k t/s** on the tensor-core path (177 t/s blocked GEMV, 50 t/s on the reference
-kernel). Numerical equivalence against the reference prefill kernel holds to a PPL difference of
-0.015%.
-
-## What was tried and did not work
-
-Recorded here because the negative results took as long to establish as the positive ones, and
-three of them are structural rather than a matter of tuning:
-
-- Lowering the verify kernel's activation traffic by widening the row block. The load-mix argument
-  said activations were two thirds of the L2 traffic; dropping them by a third moved the effective
-  rate only from 453 to 480 GB/s against a 637 ceiling. The kernel is not L2-bandwidth-bound. The
-  0.45% it does buy is kept, on an engine A/B rather than on the theory.
-- Raising resident warps in the GDN record kernel. Occupancy was the obvious suspect at 16 of 48
-  warps; forcing registers down to fit 32 warps made it monotonically **slower**, twice. It is
-  limited by the serial recurrence over accepted tokens, not by residency.
-- Fusing the rotation calls. **NINFER** already does this — one rotation serves all four attention
-  projections, because the activation is the same width for all of them.
-
-The largest single line item, the verify pass at 13.3 ms against a 10.7 ms floor, has no lever I was
-able to find. It is not for lack of measuring: 80% of the throughput floor would need 117 t/s.
+**This repository is a derivative work. It is not upstream NINFER.** Everything below the
+horizontal rule is the upstream README, unchanged.
 
 ---
 
