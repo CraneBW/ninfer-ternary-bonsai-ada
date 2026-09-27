@@ -107,7 +107,7 @@
 
 | 版本 | 具体是什么 | 本表用的二进制 |
 |---|---|---|
-| **上一版** | 本仓库 **`ad6cb46`**（2026-09-21）—— 上一轮结束时的状态，也是本轮开工前 `origin/master` 的位置。**不是"上游的某个版本"，是本仓库自己的上一个提交** | `~/ninfer-work/bin-pre-s8/ninfer`<br><sub>2026-09-26 07:06 构建，sha256 `cea0e193…`</sub> |
+| **上一版** | 本仓库 **`bd71d74`**（2026-09-21）—— 上一轮结束时的状态，也是本轮开工前 `origin/master` 的位置。**不是"上游的某个版本"，是本仓库自己的上一个提交** | `~/ninfer-work/bin-pre-s8/ninfer`<br><sub>2026-09-26 07:06 构建，sha256 `cea0e193…`</sub> |
 | **上游三元版** | §1 那张表里定义的那个（本机重编的 Linux 版） | `~/ninfer-off-build/build/apps/ninfer`<br><sub>sha256 `b89c77e9…`</sub> |
 | **本版** | 本仓库当前 HEAD | `~/ninfer-build/build/apps/ninfer`<br><sub>sha256 `70ecd5ca…`</sub> |
 
@@ -410,7 +410,7 @@ harness 侧的模型配置（`~/.dsh/settings.yaml`）指向 `http://127.0.0.1:8
 **服务端的前缀缓存对 agent 循环是逐轮推进的**，前提是历史形态被正确识别。
 一个反例：如果调用方每一轮都**丢弃 reasoning**（Hermes 这类 harness 的常见做法），
 而服务端把轮次锚点认错，缓存命中量会**冻结在会话早期**，未命中量随会话线性增长，
-TTFT 从秒级退化到几十秒。已在 `fe4f6cc` 修复（锚点改为「最后一条 user **或 tool** 消息之后」），
+TTFT 从秒级退化到几十秒。已在 `d69ef3d` 修复（锚点改为「最后一条 user **或 tool** 消息之后」），
 但换任何前端时都值得看一眼启动日志里的 `cache N (X%, <路径>)` 那一列：
 
 | 路径 | 含义 |
@@ -866,7 +866,7 @@ int8 档的偏移是 **+0.0015%**，量级正是 int8 激活量化误差本身�
 | [Don-Chad/ninfer-3090](https://github.com/Don-Chad/ninfer-3090) | Ampere 早期工作 |
 | **[Ambolio/ninfer-4090-windows](https://github.com/Ambolio/ninfer-4090-windows)** | **本分支源码树的直接基座** |
 | **[shensanshu/ninfer-ada-ternary](https://www.modelscope.cn/shensanshu/ninfer-ada-ternary)**（魔搭） | **三元移植本身的出处**：`patches/` 引擎侧改动、`tools/` 打包与验证工具、`docs/` 技术记录 |
-| **[naamfung/zatfung](https://github.com/naamfung/zatfung)** | **KVMem 的来源** —— 宿主端 KV 换出（紧凑打包 + re-RoPE）、窗口化续写、设备预算与逻辑 entitlement 解耦。分叉自本仓库的 `ad6cb46`，`src/kvmem/*`、`logical_kv_store.h` 的 KVMem 逻辑与相关文档都出自这条线 |
+| **[naamfung/zatfung](https://github.com/naamfung/zatfung)** | **KVMem 的来源** —— 宿主端 KV 换出（紧凑打包 + re-RoPE）、窗口化续写、设备预算与逻辑 entitlement 解耦。分叉自本仓库的 `bd71d74`，`src/kvmem/*`、`logical_kv_store.h` 的 KVMem 逻辑与相关文档都出自这条线 |
 
 **方法参考**：三元编解码语义对齐 llama.cpp 生态的 `ggml-quants.c`；折叠 Hadamard 基参考 PrismML 的
 公开运行时与其 `prism.hadamard.*` 元数据契约；张量核 FWT 的设计思路受公开的 HadaCore / TurboQuant 工作启发。

@@ -117,7 +117,7 @@ entirely on one build.
 
 | Build | What it is | Binary used here |
 |---|---|---|
-| **Previous** | This repository at **`ad6cb46`** (2026-09-21) — where the last round ended and where `origin/master` sat before this one. **Not "some upstream version" — this repository's own previous commit** | `~/ninfer-work/bin-pre-s8/ninfer`<br><sub>built 2026-09-26 07:06, sha256 `cea0e193…`</sub> |
+| **Previous** | This repository at **`bd71d74`** (2026-09-21) — where the last round ended and where `origin/master` sat before this one. **Not "some upstream version" — this repository's own previous commit** | `~/ninfer-work/bin-pre-s8/ninfer`<br><sub>built 2026-09-26 07:06, sha256 `cea0e193…`</sub> |
 | **Upstream ternary** | The build defined in §1 (a Linux rebuild of upstream's source) | `~/ninfer-off-build/build/apps/ninfer`<br><sub>sha256 `b89c77e9…`</sub> |
 | **This branch** | Current HEAD | `~/ninfer-build/build/apps/ninfer`<br><sub>sha256 `70ecd5ca…`</sub> |
 
@@ -455,7 +455,7 @@ output was a **58-line, zero-external-reference, renderable single-file HTML**.
 shape is recognised. One counterexample: if the caller **drops reasoning** from the history
 every turn (what harnesses like Hermes do), and the server anchors turns in the wrong place,
 the cache hold **freezes at the start of the session**, the miss grows linearly with the
-session, and TTFT degrades from seconds to tens of seconds. Fixed in `fe4f6cc` (the anchor is
+session, and TTFT degrades from seconds to tens of seconds. Fixed in `d69ef3d` (the anchor is
 now "after the last user **or tool** message"), but with any frontend it is worth glancing at
 the `cache N (X%, <path>)` column in the server log:
 
@@ -965,7 +965,7 @@ This work stands entirely on **NINFER** and the forks around it.
 | [Don-Chad/ninfer-3090](https://github.com/Don-Chad/ninfer-3090) | Early Ampere work |
 | **[Ambolio/ninfer-4090-windows](https://github.com/Ambolio/ninfer-4090-windows)** | **The direct base of this branch's source tree** |
 | **[shensanshu/ninfer-ada-ternary](https://www.modelscope.cn/shensanshu/ninfer-ada-ternary)** (ModelScope) | **The source of the ternary port itself**: engine-side `patches/`, packing and verification `tools/`, `docs/` technical record |
-| **[naamfung/zatfung](https://github.com/naamfung/zatfung)** | **Where KVMem comes from** — host-side KV offload (compaction + re-RoPE), windowed continuation, decoupling device budget from logical entitlement. Forked from this repository's `ad6cb46`; `src/kvmem/*`, the KVMem logic in `logical_kv_store.h`, and the related documents all come from that line |
+| **[naamfung/zatfung](https://github.com/naamfung/zatfung)** | **Where KVMem comes from** — host-side KV offload (compaction + re-RoPE), windowed continuation, decoupling device budget from logical entitlement. Forked from this repository's `bd71d74`; `src/kvmem/*`, the KVMem logic in `logical_kv_store.h`, and the related documents all come from that line |
 
 **Method references**: ternary encode/decode semantics follow `ggml-quants.c` in the llama.cpp
 ecosystem; the folded Hadamard basis follows PrismML's published runtime and its
