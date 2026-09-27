@@ -182,6 +182,22 @@ long last_real_user_query(const std::vector<ChatMessage>& messages) {
     throw std::invalid_argument("no user query found in chat messages");
 }
 
+// The last message the caller can only append past: a user turn, or a tool result under either
+// spelling (ChatRole::Tool, or the <tool_response> wrapper this template folds into a user
+// message). Unlike last_real_user_query this is the boundary the stable prefix ends at, not the
+// boundary reasoning retention turns at. An agent loop holds exactly one user turn and then
+// alternates assistant/tool for the rest of the session, so a turn closure anchored at the user
+// query lands on the very first assistant segment and never moves again; since a checkpoint is
+// republished only when it moves strictly forward, every later turn drops it and re-prefills the
+// entire tail.
+long last_appending_input(const std::vector<ChatMessage>& messages) {
+    for (long i = static_cast<long>(messages.size()) - 1; i >= 0; --i) {
+        const ChatRole role = messages[static_cast<std::size_t>(i)].role;
+        if (role == ChatRole::User || role == ChatRole::Tool) { return i; }
+    }
+    return -1;
+}
+
 // Split an assistant turn into (reasoning, content) exactly as the Qwen3.6 jinja
 // does when reasoning_content is not provided: reasoning is the text between the
 // last <think> and the first </think>; content is everything after the last
@@ -514,6 +530,9 @@ RenderedChat CompiledChatTemplate::render(const std::vector<ChatMessage>& messag
     }
 
     const long last_query_index  = last_real_user_query(messages);
+    // keep_thinking keeps the user-query boundary: it decides how much reasoning history the
+    // prompt carries, so widening it here would silently drop reasoning from earlier turns.
+    const long last_closure_index = last_appending_input(messages);
     const bool preserve_thinking = options.preserve_thinking.value_or(effort_template);
     std::optional<RewriteCheckpointByteSpec> rewrite_checkpoint;
     std::vector<std::size_t> rewrite_execution_boundaries;
@@ -609,7 +628,8 @@ RenderedChat CompiledChatTemplate::render(const std::vector<ChatMessage>& messag
         reasoning = trim_ascii_whitespace(reasoning);
 
         const bool keep_thinking = preserve_thinking || (static_cast<long>(i) > last_query_index);
-        if (!preserve_thinking && !rewrite_checkpoint && static_cast<long>(i) > last_query_index) {
+        if (!preserve_thinking && !rewrite_checkpoint &&
+            static_cast<long>(i) > last_closure_index) {
             // Closing the current turn may rewrite everything beginning with this assistant
             // segment. Keep the stable history before the opener recoverable; retaining the
             // deterministic opener itself is not worth losing the whole prefix when a caller
