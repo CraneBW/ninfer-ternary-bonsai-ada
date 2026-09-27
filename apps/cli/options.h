@@ -31,6 +31,9 @@ struct Options {
     // Off by default, like the server: leaving it alone keeps every KV page resident on the
     // device, which is the behaviour this repo measured before the KVMem line arrived.
     KvMemOptions kvmem;
+    // The host tier KVMem parks its window-external pages in. Reserved only when --kvmem is on;
+    // the server spells the same knob --host-kv-mib.
+    std::size_t host_kv_bytes = kDefaultHostKvCapacityBytes;
     SpeculativeOptions speculative;
     bool enable_vision  = false;
     bool use_cuda_graph = true;

@@ -88,7 +88,8 @@ std::string usage_text(const char* argv0) {
            " <model.ninfer> (--prompt <text>|--messages <messages.json>)\n"
            "       [--max-context N] [--kv-capacity N|auto] [--kv-device-tokens N] "
            "[--prefill-chunk N] [--max-new N]\n"
-           "       [--device N] [--kvmem [--kvmem-budget N] [--kvmem-gen-reserve N]]\n"
+           "       [--device N] [--kvmem [--kvmem-budget N] [--kvmem-gen-reserve N] "
+           "[--host-kv-mib N]]\n"
            "       [--kv-dtype bf16|int8|fp8|nvfp4|k8v4|rk4v4|rk4v4-e8] "
            "[--cache-type-k bf16|int8|fp8|nvfp4|int4|int4-e8 "
            "--cache-type-v bf16|int8|fp8|nvfp4|int4]\n"
@@ -123,7 +124,9 @@ std::string usage_text(const char* argv0) {
            "omitted keeps the whole context), and --kvmem-gen-reserve keeps that many tokens of\n"
            "the pool free for decoding (default " +
            std::to_string(kDefaultKvMemGenReserveTokens) +
-           "). Without --kvmem every KV page stays resident on the device.\n"
+           "). --host-kv-mib sizes the host tier those evicted pages land in (default " +
+           std::to_string(kDefaultHostKvCapacityBytes >> 20) +
+           " MiB). Without --kvmem every KV page stays resident on the device.\n"
            "Sampling defaults come from the loaded model and thinking mode; flags override "
            "individual fields.\n";
 }
@@ -169,6 +172,12 @@ Options parse_options(int argc, char** argv) {
             options.kv_capacity = KvCapacityPolicy::device_budget(
                 parse_u32(value(arg), "kv-device-tokens"));
             kv_device_tokens_explicit = true;
+        } else if (arg == "--host-kv-mib") {
+            const std::uint64_t mib = parse_u64(value(arg), "host-kv-mib");
+            if (mib > std::numeric_limits<std::size_t>::max() / (1ULL << 20)) {
+                throw std::invalid_argument("--host-kv-mib is out of range");
+            }
+            options.host_kv_bytes = static_cast<std::size_t>(mib << 20);
         } else if (arg == "--kvmem") {
             kvmem_switch = true;
         } else if (arg == "--kvmem-budget") {

@@ -288,7 +288,12 @@ int main(int argc, char** argv) {
         // consumer and must not reserve an extra Device StateImage or run terminal capture.
         engine_options.context_cache.enabled                = false;
         engine_options.context_cache.host_state_slots       = 0;
-        engine_options.context_cache.host_kv_capacity_bytes = 0;
+        // KVMem is the exception: it parks the window-external KV pages in the host tier, so its
+        // backing is this request's own working set rather than a retained context. Zeroing it
+        // left a KVMem run with no host pages at all, which refused every context longer than the
+        // device pool. The server already exposes the size; the CLI needs the same knob.
+        engine_options.context_cache.host_kv_capacity_bytes =
+            cli.kvmem.enabled ? cli.host_kv_bytes : 0;
         engine_options.startup_observer                     = startup_log.observer();
 
         ninfer::Engine engine(std::move(engine_options));

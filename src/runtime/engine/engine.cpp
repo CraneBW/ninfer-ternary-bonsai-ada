@@ -71,7 +71,12 @@ EngineOptions normalize_engine_options(EngineOptions options) {
         }
         cache.device_state_slots                = 0;
         cache.host_state_slots                  = 0;
-        cache.host_kv_capacity_bytes            = 0;
+        // KVMem is the one consumer of the host KV tier that has nothing to do with retaining
+        // context: it parks the window-external KV pages there for the length of a single
+        // request. Zeroing the capacity here left a CLI (context cache off by construction)
+        // with no host pages at all, so every context longer than the device pool refused to
+        // start. The server reaches the same tier through its own context cache.
+        cache.host_kv_capacity_bytes = options.kvmem.enabled ? cache.host_kv_capacity_bytes : 0;
         cache.max_private_continuations         = concurrency;
         cache.max_shared_prefixes               = 0;
         cache.max_long_anchors_per_continuation = 0;
