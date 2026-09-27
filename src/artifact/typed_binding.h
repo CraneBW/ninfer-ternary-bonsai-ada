@@ -11,6 +11,10 @@ namespace ninfer::artifact {
 
 class MaterializedArtifact;
 
+/// The QType the materialiser stamps on a Weight built from this format. Total over the formats a
+/// stored tensor may take; throws std::logic_error on one that is not storable.
+[[nodiscard]] QType qtype_for(NumericFormat format);
+
 [[nodiscard]] ObjectHandle bind_tensor(Binder& binder, std::string_view name, NumericFormat format,
                                        std::initializer_list<std::uint64_t> shape,
                                        TensorPlacement placement);

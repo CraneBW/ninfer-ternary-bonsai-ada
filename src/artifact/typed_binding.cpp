@@ -34,34 +34,6 @@ StorageLayout storage_layout_for(NumericFormat format) {
     throw std::logic_error("unhandled numeric format");
 }
 
-QType qtype_for(NumericFormat format) {
-    switch (format) {
-    case NumericFormat::BF16:
-        return QType::BF16_CTRL;
-    case NumericFormat::FP32:
-        return QType::FP32_CTRL;
-    case NumericFormat::I32:
-        return QType::I32_CTRL;
-    case NumericFormat::Q4G64_F16S:
-        return QType::Q4G64_F16S;
-    case NumericFormat::Q5G64_F16S:
-        return QType::Q5G64_F16S;
-    case NumericFormat::Q6G64_F16S:
-        return QType::Q6G64_F16S;
-    case NumericFormat::W8G32_F16S:
-        return QType::W8G32_F16S;
-    case NumericFormat::NVFP4:
-        return QType::NVFP4;
-    case NumericFormat::FP8_E4M3FN_ROW_BF16S:
-        return QType::FP8_E4M3FN_ROW_BF16S;
-    case NumericFormat::PTQ1_0_G128:
-        return QType::PTQ1_0_G128;
-    case NumericFormat::PQ2_0_G128:
-        return QType::PQ2_0_G128;
-    }
-    throw std::logic_error("unhandled numeric format");
-}
-
 DType dtype_for(NumericFormat format) {
     switch (format) {
     case NumericFormat::BF16:
@@ -155,6 +127,38 @@ Weight row_scale_weight(const MaterializedArtifact& materialized, ObjectHandle h
 }
 
 } // namespace
+
+// Public because the correspondence is not the binder's private business: a caller that has to
+// reason about a tensor's format before it is materialised (choices that depend on what a kernel
+// can accept, made while the artifact is still a plan) needs the same qtype the materialiser will
+// stamp on the Weight. Declared in the header, defined here, so there is one table.
+QType qtype_for(NumericFormat format) {
+    switch (format) {
+    case NumericFormat::BF16:
+        return QType::BF16_CTRL;
+    case NumericFormat::FP32:
+        return QType::FP32_CTRL;
+    case NumericFormat::I32:
+        return QType::I32_CTRL;
+    case NumericFormat::Q4G64_F16S:
+        return QType::Q4G64_F16S;
+    case NumericFormat::Q5G64_F16S:
+        return QType::Q5G64_F16S;
+    case NumericFormat::Q6G64_F16S:
+        return QType::Q6G64_F16S;
+    case NumericFormat::W8G32_F16S:
+        return QType::W8G32_F16S;
+    case NumericFormat::NVFP4:
+        return QType::NVFP4;
+    case NumericFormat::FP8_E4M3FN_ROW_BF16S:
+        return QType::FP8_E4M3FN_ROW_BF16S;
+    case NumericFormat::PTQ1_0_G128:
+        return QType::PTQ1_0_G128;
+    case NumericFormat::PQ2_0_G128:
+        return QType::PQ2_0_G128;
+    }
+    throw std::logic_error("unhandled numeric format");
+}
 
 ObjectHandle bind_tensor(Binder& binder, std::string_view name, NumericFormat format,
                          std::initializer_list<std::uint64_t> shape, TensorPlacement placement) {

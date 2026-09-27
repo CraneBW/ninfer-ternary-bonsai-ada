@@ -21,6 +21,19 @@ namespace ninfer::ops {
                                                                std::int32_t max_columns);
 
 /**
+ * True when the full-vocabulary entry point below accepts a head of this format and geometry --
+ * i.e. when the registered profile is W8Full or Fp8Full rather than the optimized Q4 head. The
+ * format list lives in one place (`resolve_profile` in linear_topk.cpp); this is that question
+ * asked without the weights, so a caller that must decide before anything is materialised can
+ * ask it instead of restating the list and drifting from it.
+ *
+ * The geometry arguments are the arm's own precondition, not a convenience: a W8 head of the
+ * wrong row count is no more usable as a full proposal head than a Q6 one is.
+ */
+[[nodiscard]] bool linear_topk_serves_full_head(QType qtype, std::int32_t head_rows,
+                                                std::int32_t input_rows) noexcept;
+
+/**
  * @brief Projects independent matrix columns through a full vocabulary head and returns
  * the stable top sixteen scores and global token ids per column.
  *

@@ -4,6 +4,7 @@
 #include "targets/qwen3_6_27b/impl/load/bindings.h"
 
 #include "artifact/typed_binding.h"
+#include "ninfer/ops/linear_topk.h"
 
 #include <algorithm>
 #include <array>
@@ -608,6 +609,43 @@ ArtifactLoadPlan bind_artifact(artifact::Binder& binder, WeightsProfile weights_
     out.features     = features;
 
     const NumericFormat vocabulary_format = endpoint_format(weights_profile);
+
+    // A masked draft builds every proposal through the fused linear_topk, whose FULL-head arm
+    // registers only W8 and FP8 (ops/linear_topk, where that list lives). When the artifact's
+    // stored vocabulary head is some other member of the grouped row-split family -- a ternary
+    // PQ2 head, in this port's case -- there is no profile to run and `--spec dflash2` on the
+    // default full head cannot start. Today that fails LATE and obscurely: the 10 GB load, the
+    // plan, the CUDA graphs, and then "linear_topk: unsupported head profile" from the first
+    // proposal, naming neither the flag nor the model.
+    //
+    // The format has to be PEEKED, not taken from vocabulary_format. endpoint_format() names the
+    // format the loader's plan asks for, and require_tensor() accepts any member of the family
+    // (the members are container-compatible -- see its comment in artifact/binder.h); the
+    // materialiser then stamps the Weight with what the artifact REALLY declares, not with what
+    // the plan named. Those two disagreed by exactly this much here, which is why a check written
+    // against vocabulary_format silently passed while the run went on to fail. binder.find() is
+    // the documented way to learn the stored format before binding, and this is that check.
+    //
+    // The optimized draft head is the answer rather than a fallback: every weights profile below
+    // requires text/draft_head of the artifact (it is bound unconditionally), so the flag is
+    // always available to the user, and choosing it here rather than in the engine would change
+    // the proposal distribution without saying so.
+    if (features.masked_draft() && features.proposal_head == ProposalHead::Full) {
+        const auto* descriptor = binder.find("text/output_head");
+        const auto* stored =
+            descriptor == nullptr ? nullptr : std::get_if<artifact::TensorDescriptor>(descriptor);
+        // A missing or mis-shaped object is bind_weight()'s error to raise with its own message;
+        // this only reads the format, and only when there is one to read.
+        if (stored != nullptr &&
+            !ops::linear_topk_serves_full_head(artifact::qtype_for(stored->format), 248320, 5120)) {
+            throw std::invalid_argument(
+                "--spec dflash2 requires --lm-head-draft: this artifact stores its vocabulary "
+                "head in a format the fused linear_topk has no profile for (it registers W8 and "
+                "FP8 heads only), so the full head cannot serve as the proposal head. The flag "
+                "selects the artifact's dedicated draft head instead.");
+        }
+    }
+
     out.token_embedding =
         bind_weight(binder, "text/token_embedding", vocabulary_format, {248320, 5120});
     switch (weights_profile) {

@@ -34,15 +34,19 @@ bool overlaps(const Tensor& lhs, const Tensor& rhs) {
     return overlaps(lhs.data, lhs.bytes(), rhs.data, rhs.bytes());
 }
 
+// The formats the FULL-head arm accepts, in exactly one place: resolve_profile() selects
+// W8Full/Fp8Full from this list and linear_topk_serves_full_head() reports it, so a caller that
+// has to decide before the weights exist cannot disagree with the loader.
+bool full_head_format(QType qtype) noexcept {
+    return qtype == QType::W8G32_F16S || qtype == QType::FP8_E4M3FN_ROW_BF16S;
+}
+
 HeadProfile resolve_profile(QType qtype, std::int32_t head_rows, std::int32_t input_rows) {
     if (input_rows != detail::kLinearTopKHidden) {
         throw std::invalid_argument("linear_topk: unsupported head profile");
     }
-    if (head_rows == detail::kLinearTopKFullRows && qtype == QType::W8G32_F16S) {
-        return HeadProfile::W8Full;
-    }
-    if (head_rows == detail::kLinearTopKFullRows && qtype == QType::FP8_E4M3FN_ROW_BF16S) {
-        return HeadProfile::Fp8Full;
+    if (head_rows == detail::kLinearTopKFullRows && full_head_format(qtype)) {
+        return qtype == QType::W8G32_F16S ? HeadProfile::W8Full : HeadProfile::Fp8Full;
     }
     if (head_rows == detail::kLinearTopKOptimizedRows && qtype == QType::Q4G64_F16S) {
         return HeadProfile::Q4Optimized;
@@ -207,6 +211,12 @@ void execute(const Tensor& hidden, const Weight& head, const Tensor* id_map, Ten
     }
 }
 } // namespace
+
+bool linear_topk_serves_full_head(QType qtype, std::int32_t head_rows,
+                                  std::int32_t input_rows) noexcept {
+    return input_rows == detail::kLinearTopKHidden && head_rows == detail::kLinearTopKFullRows &&
+           full_head_format(qtype);
+}
 
 std::size_t linear_topk_workspace_capacity_bytes(QType qtype, std::int32_t head_rows,
                                                  std::int32_t input_rows, std::int32_t min_columns,
