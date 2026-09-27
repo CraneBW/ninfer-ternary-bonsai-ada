@@ -266,6 +266,9 @@ add_library(ninfer_ops STATIC
   ops/linear_add/w8/w8_linear_add_gemm_mma.cu
   ops/linear_add/w8/w8_linear_add_gemm_simt.cu
   ops/linear_add/w8/w8_linear_add_plan.cpp
+  # Host-only: it gates, allocates and routes; the epilogue it asks for is built on the far side of
+  # the device-only header line, inside ops/linear/ternary/ternary_rowsplit_gemm.cu.
+  ops/linear_add/ternary/ternary_linear_add.cpp
   ops/linear_swiglu/q4/q4_linear_swiglu_gemm_mma.cu
   ops/linear_swiglu/q4/q4_linear_swiglu_gemv.cu
   ops/linear_swiglu/q4/q4_linear_swiglu_plan.cpp

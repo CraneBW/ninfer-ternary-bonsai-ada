@@ -40,6 +40,7 @@
 
 #include "ops/common/mma.cuh"
 #include "ops/common/memory.cuh"
+#include "ops/linear/ternary/ternary_epilogue.cuh"
 #include "ops/linear/ternary/ternary_rowsplit_storage.cuh"
 #include "ops/linear/ternary/ternary_s8_scratch.h"
 
@@ -715,10 +716,23 @@ void ternary_pq2_mma_s8_kernel(const std::int8_t* __restrict__ act_codes,
 // fixed-order sum over a private buffer is deterministic, and it costs one extra pass over
 // tokens*rows*4 bytes, which for the shapes that actually split (n <= 12608, tokens <= 64) is at
 // most 3.2 MB.
+// `Epilogue` is the same value transform the main kernels carry (see ternary_epilogue.cuh), and on
+// a SPLIT launch this kernel is the only writer of `out`: the main kernel stores raw fp32 partials
+// and every value the consumer sees is summed here. So a fused residual wired into the main kernel
+// alone would be dropped on exactly the shapes that split -- every small_t shape with n <= 6144 at
+// T <= 8, i.e. most of this model's widths on the verify path, and every int8 shape with n <= 12608
+// at T <= 64 -- and dropped silently, because the output is still bf16 and still the right shape.
+// Both call sites of this kernel therefore name their epilogue explicitly rather than relying on the
+// default.
+//
+// apply() is called after the `i >= total` guard and not before it: that guard is what makes
+// (token, row) an element this thread owns, and a real epilogue dereferences memory.
+template <class Epilogue = TernaryIdentityEpilogue>
 __global__ void ternary_s8_reduce_kernel(const float* __restrict__ partial,
                                          __nv_bfloat16* __restrict__ out,
                                          std::int32_t out_row_stride, std::int32_t rows,
-                                         std::int32_t tokens, std::int32_t slices) {
+                                         std::int32_t tokens, std::int32_t slices,
+                                         Epilogue epilogue = {}) {
     const std::int64_t total = static_cast<std::int64_t>(tokens) * rows;
     const std::int64_t i     = static_cast<std::int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (i >= total) { return; }
@@ -728,7 +742,8 @@ __global__ void ternary_s8_reduce_kernel(const float* __restrict__ partial,
     for (std::int32_t s = 0; s < slices; ++s) {
         sum += partial[static_cast<std::int64_t>(s) * total + i];
     }
-    out[static_cast<std::int64_t>(token) * out_row_stride + row] = __float2bfloat16_rn(sum);
+    out[static_cast<std::int64_t>(token) * out_row_stride + row] =
+        __float2bfloat16_rn(epilogue.apply(row, token, sum));
 }
 
 } // namespace ninfer::ops::detail

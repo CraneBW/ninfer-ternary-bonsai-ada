@@ -14,6 +14,7 @@
 #include "ops/linear_add/fp8/fp8_linear_add_plan.h"
 #include "ops/linear_add/nvfp4/nvfp4_linear_add_plan.h"
 #include "ops/linear_add/q5/q5_linear_add_plan.h"
+#include "ops/linear_add/ternary/ternary_linear_add_plan.h"
 #include "ops/linear_add/w8/w8_linear_add_plan.h"
 
 #include <cstdint>
@@ -258,10 +259,23 @@ void linear_add(const Tensor& x, const Weight& w, Tensor& residual_out, LinearPo
         if (policy != LinearPolicy::A16Only) {
             throw std::invalid_argument("ternary linear_add admits only A16");
         }
-        // residual_out += W * x. There is no fused ternary residual kernel, so compose it from the
-        // shared ternary GEMM and the existing elementwise add. The GEMM also maps x into the
-        // folded basis, which is why the projection scratch and the rotation buffer both come from
-        // this op's workspace.
+        // G4-S3: first ask the ternary rung to fold the residual into its own store, which removes
+        // both the elementwise kernel and the [N, T] projection scratch it reads back. That arm
+        // declines -- returning false, having launched nothing -- whenever the shape's route is not
+        // one whose every writer of `out` carries the epilogue (the int8 and MMA rungs do not yet),
+        // and then the composition below answers instead. The two arms are the same op: the only
+        // difference is which one adds.
+        //
+        // The fallback is also why linear_add_workspace_capacity_bytes() did not move. It still
+        // declares the projection scratch, the rotation buffer and the int8/split-K scratch, i.e.
+        // exactly what the path below allocates; the fused arm is a strict subset of that. Shrinking
+        // the declaration to the fused arm's needs is a follow-up, and it is only safe once this
+        // fallback is unreachable -- doing it now would turn every declined shape into a bad_alloc
+        // (the failure ternary_rotation.cpp's folded_activation already recorded once).
+        if (detail::ternary_linear_add_try_fused(x, w, residual_out, ws, stream)) { return; }
+        // residual_out += W * x, composed from the shared ternary GEMM and the existing elementwise
+        // add. The GEMM also maps x into the folded basis, which is why the projection scratch and
+        // the rotation buffer both come from this op's workspace.
         auto scope       = ws.scope();
         Tensor projected = ws.alloc(DType::BF16, {w.n, t});
         detail::ternary_dispatch(x, w, projected, policy, &ws, stream);

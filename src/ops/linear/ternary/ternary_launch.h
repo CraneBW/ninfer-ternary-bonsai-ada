@@ -31,6 +31,32 @@ void launch_ternary_gemm_t8(const Tensor& x, const Weight& w, Tensor& out,
                             std::int32_t out_row_stride, cudaStream_t stream,
                             TernaryS8Scratch scratch);
 
+// ---- the fused-residual arm (G4-S3) ------------------------------------------------------------
+//
+// Which small-t entry point this shape would be served by, or None when it would be served by none
+// of them. `x` is the activation ALREADY in the folded basis and `scratch` is the same scratch the
+// launch will be given, so this returns the dispatch's own answer rather than an approximation of
+// it (see the definition in ternary_rowsplit_gemm.cu for what it mirrors and why).
+//
+// It exists because the residual add a `linear_add` consumer runs as a second kernel can only be
+// folded in on a route whose every writer of `out` carries the epilogue. Today that is the three
+// small-t routes and nothing else.
+enum class TernarySmallTRoute { None, Decode, Verify, Tiled };
+
+TernarySmallTRoute ternary_small_t_route(const Tensor& x, const Weight& w,
+                                         std::int32_t out_row_stride, TernaryS8Scratch scratch);
+
+// `residual_out += W * x_folded`, with the add folded into that rung's store. `residual_out` is both
+// the operand and the destination, which is the op's own contract; the row stride must be its row
+// count (the [N, T] contiguous case the op validates).
+//
+// Returns false having launched NOTHING when the route carries no epilogue; the caller then falls
+// back to materialising the projection and adding it, which is also why the workspace capacity did
+// not have to move.
+bool launch_ternary_add_residual(TernarySmallTRoute route, const Tensor& x_folded, const Weight& w,
+                                 Tensor& residual_out, std::int32_t out_row_stride,
+                                 cudaStream_t stream, TernaryS8Scratch scratch);
+
 // Runs the int8 activation-quantization pass ONCE for a folded activation that several projections
 // are about to share, and stamps the shape into `scratch` so their launches skip it.
 //

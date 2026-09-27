@@ -147,8 +147,23 @@ bool gemv_admits(const Tensor& x, const Weight& w, std::int32_t max_tokens) {
            (w.k % 128) == 0 && x.ne[1] >= 1 && x.ne[1] <= max_tokens && x.ne[0] == w.k;
 }
 
+// `Epilogue` is the value transform applied at each store (see ternary_epilogue.cuh). It is
+// defaulted to the identity, which is what keeps the three append-only row-block instantiations the
+// dispatch selects between -- <8, MinBlocks, 16/32/48> -- meaning exactly what they meant before the
+// parameter existed; every call site still names it, because the launcher is the only place that
+// knows WHICH projection is being computed and therefore whether its consumer wants anything folded
+// in.
+//
+// S4 (the silu*mul consumer) will need a second parameter here -- `output_rows`, defaulting to w.n --
+// and a NEW gate at each call site, because a consumer that writes w.n/2 rows cannot go through the
+// `rows = w.n` this function hardcodes. Nothing inside the kernel has to move for that: it already
+// separates `rows` (the boundary the stores are guarded by) from `out_row_stride` (the addressing).
+// Left out rather than added unexercised -- an `output_rows` parameter no caller passes is a
+// parameter no caller has verified.
+template <class Epilogue = TernaryIdentityEpilogue>
 void launch_small_t(const Tensor& x, const Weight& w, Tensor& out, std::int32_t out_row_stride,
-                    cudaStream_t stream, std::int32_t rows_override, TernaryS8Scratch scratch);
+                    cudaStream_t stream, std::int32_t rows_override, TernaryS8Scratch scratch,
+                    Epilogue epilogue = {});
 
 // Defined next to note_rung, declared here because the split runs inside launch_small_t.
 void note_split(std::int32_t rows, std::int32_t k, std::int32_t tokens, std::int32_t row_block,
@@ -202,7 +217,8 @@ void launch_ternary_gemm_t1(const Tensor& x, const Weight& w, Tensor& out,
             // path's: 32, and not the per-shape table -- that table was measured at T = 4 only.
             // Empty scratch on purpose: split-K was measured on the verify shape, and T = 1 is a
             // different work point (a slice would cut a k loop that is already the whole kernel).
-            launch_small_t(x, w, out, out_row_stride, stream, 32, TernaryS8Scratch{});
+            launch_small_t(x, w, out, out_row_stride, stream, 32, TernaryS8Scratch{},
+                           TernaryIdentityEpilogue{});
             return;
         }
         launch_pq2_gemv_tile(x, w, out, out_row_stride, x.ne[1], stream);
@@ -300,8 +316,10 @@ int verify_token_cap() {
     return cap;
 }
 
+template <class Epilogue>
 void launch_small_t(const Tensor& x, const Weight& w, Tensor& out, std::int32_t out_row_stride,
-                    cudaStream_t stream, std::int32_t rows_override, TernaryS8Scratch scratch) {
+                    cudaStream_t stream, std::int32_t rows_override, TernaryS8Scratch scratch,
+                    Epilogue epilogue) {
     const std::int32_t rows = w.n;
     const std::int32_t tokens = x.ne[1];
     const int row_block = small_t_rows_for(rows, rows_override);
@@ -333,15 +351,16 @@ void launch_small_t(const Tensor& x, const Weight& w, Tensor& out, std::int32_t 
     };
     const auto args = [&](auto tag) {
         constexpr int kRows = decltype(tag)::value;
-        // The epilogue is named here rather than left to the kernel's default, even though the two
-        // are the same type today. The launcher is the only place that knows WHICH projection is
-        // being computed -- and therefore whether the consumer wants a residual, a silu, or nothing
-        // -- so it is the call site the fused epilogue is going to have to be named at. Naming the
-        // identity now keeps that change to this expression and leaves the kernel template alone.
+        // The epilogue is named here rather than left to the kernel's default. The launcher is the
+        // only place that knows WHICH projection is being computed -- and therefore whether the
+        // consumer wants a residual, a silu, or nothing -- so it is the call site the fused
+        // epilogue is named at. It is a parameter of this function (not a hardcoded identity) so
+        // that one launch path serves both arms: what the epilogue cannot change here is the
+        // schedule, the guards or the grid.
         ternary_small_t_mma_kernel<8, (kRows == 16 ? 4 : (kRows == 32 ? 3 : 2)), kRows>
             <<<grid_for(kRows), TernarySmallTSchedule::kThreads, 0, stream>>>(
-                x_ptr, codes, scales, out_ptr, rows, w.k, tokens, out_row_stride,
-                TernaryIdentityEpilogue{}, slices > 1 ? scratch.partial : nullptr);
+                x_ptr, codes, scales, out_ptr, rows, w.k, tokens, out_row_stride, epilogue,
+                slices > 1 ? scratch.partial : nullptr);
     };
     using std::integral_constant;
     switch (row_block) {
@@ -362,11 +381,17 @@ void launch_small_t(const Tensor& x, const Weight& w, Tensor& out, std::int32_t 
         // share one buffer without the caller having to know which stride it was built at. On this
         // route the two are equal anyway (ternary_dispatch_basis_strided passes w.n), but the
         // reduce is written against `rows` regardless so the pair stays consistent if that changes.
+        //
+        // The epilogue has to be carried through HERE too, and this is the trap the split introduces
+        // (it did not exist while small_t was unsplit): when K is sliced, this reduce is the only
+        // writer of `out`, so a fused residual wired into ternary_small_t_mma_kernel alone would be
+        // dropped on every shape that splits -- silently, and on the very shapes the verify path
+        // runs (n <= kSmallTSplitMaxRows at T <= 8), where small_t is not a fallback but the point.
         const std::int64_t total = static_cast<std::int64_t>(rows) * tokens;
         const int threads = 256;
         const unsigned blocks = static_cast<unsigned>((total + threads - 1) / threads);
-        ternary_s8_reduce_kernel<<<blocks, threads, 0, stream>>>(
-            scratch.partial, out_ptr, out_row_stride, rows, tokens, slices);
+        ternary_s8_reduce_kernel<Epilogue><<<blocks, threads, 0, stream>>>(
+            scratch.partial, out_ptr, out_row_stride, rows, tokens, slices, epilogue);
         CUDA_CHECK(cudaGetLastError());
     }
 }
@@ -389,8 +414,19 @@ void launch_small_t(const Tensor& x, const Weight& w, Tensor& out, std::int32_t 
 // view whose data pointer is already t0 * k elements in, and out's nb[1] already carries the
 // parent's row stride -- which is the stride the launcher is handed. Nothing here has to know the
 // width of either.
+//
+// `fuse_residual` is a LAUNCHER-level choice and a bool on purpose -- it is not the epilogue
+// mechanism the identity/residual parameter is, and it carries no state: the whole point of the
+// tiled route is that the epilogue's state CANNOT come from the caller. The kernel is handed a
+// token index that is local to the tile (`col0 = nt * 8 + 2*lid` counts from the tile's first
+// token) while out_row_stride stays the parent's, so an epilogue built for the parent tensor would
+// index its residual from the parent's base at a tile-local token -- i.e. add every tile's residual
+// to the FIRST tile's rows. In range, wrong, and silent. Building it here, from the slice the store
+// is about to write, is what makes the two agree: the residual a `linear_add` folds in IS the
+// output (the op updates it in place), so the tile's own base pointer is the only correct one.
 void launch_small_t_tiled(const Tensor& x, const Weight& w, Tensor& out,
-                          std::int32_t out_row_stride, cudaStream_t stream) {
+                          std::int32_t out_row_stride, cudaStream_t stream,
+                          bool fuse_residual = false) {
     constexpr std::int32_t kTile = 8;
     const std::int32_t tokens    = x.ne[1];
     for (std::int32_t t0 = 0; t0 < tokens; t0 += kTile) {
@@ -403,7 +439,18 @@ void launch_small_t_tiled(const Tensor& x, const Weight& w, Tensor& out,
         // eight tokens wide, which is twice the width the table was measured at. The empty scratch
         // also keeps split-K off this route: its tiles are 8 tokens wide, which would pass the
         // split's own token gate, and the split was measured on the verify shape rather than here.
-        launch_small_t(x_tile, w, out_tile, out_row_stride, stream, 32, TernaryS8Scratch{});
+        // (The split is why the fused arm needs nothing from the reduce kernel on THIS route: with
+        // no scratch there is no slice, and the small-t kernel's own store is the only writer.)
+        const auto launch_tile = [&](auto epilogue) {
+            launch_small_t(x_tile, w, out_tile, out_row_stride, stream, 32, TernaryS8Scratch{},
+                           epilogue);
+        };
+        if (fuse_residual) {
+            launch_tile(residual_into(static_cast<__nv_bfloat16*>(out_tile.data),
+                                      out_row_stride));
+        } else {
+            launch_tile(TernaryIdentityEpilogue{});
+        }
     }
 }
 
@@ -773,11 +820,15 @@ void launch_pq2_mma_s8(const Tensor& x, const Weight& w, Tensor& out,
     if (slices > 1) {
         // Same stream, so this is ordered after every slice. Deterministic by construction: the
         // slices are summed in a fixed order, which is what keeps the PPL gate meaningful.
+        //
+        // Identity named explicitly even though it is the kernel's default: the int8 rung has no
+        // fused consumer yet (S5), and naming it here is what stops a later edit from reading as
+        // "the s8 path already carries an epilogue" when it does not.
         const std::int64_t total  = static_cast<std::int64_t>(tokens) * w.n;
         const unsigned     blocks = static_cast<unsigned>((total + 255) / 256);
-        ternary_s8_reduce_kernel<<<blocks, 256, 0, stream>>>(
+        ternary_s8_reduce_kernel<TernaryIdentityEpilogue><<<blocks, 256, 0, stream>>>(
             scratch.partial, static_cast<__nv_bfloat16*>(out.data), out_row_stride, w.n, tokens,
-            slices);
+            slices, TernaryIdentityEpilogue{});
         CUDA_CHECK(cudaGetLastError());
     }
 }
@@ -835,6 +886,171 @@ void note_split(std::int32_t rows, std::int32_t k, std::int32_t tokens, std::int
                  static_cast<int>(div_up(rows, row_block) * slices));
 }
 
+// ---------------------------------------------------------------------------------------------
+// G4-S3: the fused-residual arm of the small-t rung.
+// ---------------------------------------------------------------------------------------------
+//
+// `linear_add` (`residual += W*x`) is the heavier of the two consumers in this model that run an
+// elementwise kernel straight after a ternary GEMM (the other is linear_swiglu's silu*mul): the
+// projection is materialised into a scratch by the GEMM and then read back and added, so the same
+// bytes move twice for a value the GEMM already had in a register. Fusing the add removes the
+// second kernel and the scratch traffic together.
+//
+// What is fused is the ADD, and it is a read-modify-write of the DESTINATION: the kernel stores
+// `epilogue.apply(row, token, sum)`, and apply() reads the element it is about to overwrite. That is
+// `linear_add`'s contract exactly -- the op updates its residual in place -- which is why the
+// residual pointer and the output pointer are one pointer and the epilogue is built with
+// residual_into() from the destination rather than from a tensor the caller names separately.
+//
+// Two refusals bound this arm, and both of them decline rather than error:
+//
+//   * It only ever takes a route whose EVERY writer of `out` carries the epilogue. Those are the
+//     three small-t routes below: the direct kernel, the direct kernel plus the split-K reduce
+//     (which is the only writer when K is sliced -- see ternary_s8_reduce_kernel), and the tiled
+//     launcher, which rebuilds the epilogue per tile. The int8 rung and the MMA rungs write `out`
+//     themselves and carry no epilogue yet (S5/S6), so a shape that routes to them is not fused.
+//   * It therefore declines more shapes than small_t itself covers. That is the intended
+//     asymmetry: declining costs the caller one extra elementwise kernel, while fusing where the
+//     epilogue is not wired costs the RESIDUAL ITSELF -- with a bf16 output of the right shape and
+//     no error anywhere, which is the one failure mode this whole arm has to be built against.
+//
+// `ternary_small_t_route` is this file's answer to "which rung would the dispatch pick", and it has
+// to stay that: the arms above (launch_ternary_gemm_t1 / launch_ternary_gemm_t8) decide the same
+// conditions, and two copies of a condition drift. It is written as the mirror of those arms, in the
+// order they test them, and note_residual() below is what makes the answer checkable at run time
+// instead of on review -- compare its line against the rung line for the same call. Anything that
+// changes an arm above changes this function.
+// The enum itself is declared in ternary_launch.h, which this file includes: the fused-residual op
+// has to name a route across the .cuh line, so the type lives on the host-safe side and is not
+// repeated here.
+const char* small_t_route_name(TernarySmallTRoute route) {
+    switch (route) {
+    case TernarySmallTRoute::Decode: return "decode";
+    case TernarySmallTRoute::Verify: return "verify";
+    case TernarySmallTRoute::Tiled:  return "tiled";
+    case TernarySmallTRoute::None:   break;
+    }
+    return "none";
+}
+
+// The fused arm, which note_rung cannot show: on this route the rung name, the row block and the
+// grid are the ones small_t would have used anyway, and the only difference is that the residual
+// went into the store instead of through a second kernel -- which is precisely the thing an A/B has
+// to be able to confirm ran. Shares note_rung's switch and budget so one env var turns on
+// everything that describes which kernel actually ran.
+void note_residual(TernarySmallTRoute route, const Tensor& x, const Weight& w,
+                   std::int32_t out_row_stride) {
+    static const int min_t = [] {
+        const char* value = std::getenv("NINFER_TERNARY_S8_DEBUG_MIN_T");
+        return value == nullptr ? 0 : std::atoi(value);
+    }();
+    static int budget = [] {
+        const char* value = std::getenv("NINFER_TERNARY_S8_DEBUG_BUDGET");
+        return value == nullptr ? 24 : std::atoi(value);
+    }();
+    if (budget <= 0 || std::getenv("NINFER_TERNARY_S8_DEBUG") == nullptr) { return; }
+    if (static_cast<int>(x.ne[1]) < min_t) { return; }
+    --budget;
+    std::fprintf(stderr, "[ternary] residual  route=%-6s qtype=%d T=%d k=%d n=%d stride=%d\n",
+                 small_t_route_name(route), static_cast<int>(w.qtype),
+                 static_cast<int>(x.ne[1]), static_cast<int>(w.k), static_cast<int>(w.n),
+                 static_cast<int>(out_row_stride));
+}
+
+// Which small-t entry point (if any) this shape would be served by, or None when it would not be
+// served by one at all. Called by the fused-residual op with the same scratch the launch will be
+// given, so the answer is the dispatch's answer rather than an approximation of it; the tensor it
+// reads is only ever asked for its SHAPE (the activation's values never enter this decision, and
+// neither does whether it has been folded yet).
+TernarySmallTRoute ternary_small_t_route(const Tensor& x, const Weight& w,
+                                         std::int32_t out_row_stride, TernaryS8Scratch scratch) {
+    const std::int32_t t = x.ne[1];
+    // launch_small_t hardcodes rows = w.n and guards every store with `row < rows`, so a narrower
+    // stride would scatter the tile across neighbouring rows. The fused consumer's output is the
+    // residual tensor, which require_tensor() has already pinned to [w.n, T] contiguous.
+    if (out_row_stride < w.n) { return TernarySmallTRoute::None; }
+    // Every small-t kernel walks the activation as x[token * w.k + column] and stages whole 128-wide
+    // groups, so the layout conditions gemv_admits states apply here too -- plus the 1024-wide K step
+    // (kSmallTGroupK) the kernel's K loop and its group-relative split are built from.
+    if (!gemv_admits(x, w, std::numeric_limits<std::int32_t>::max())) {
+        return TernarySmallTRoute::None;
+    }
+    if ((w.k % kSmallTGroupK) != 0) { return TernarySmallTRoute::None; }
+    if (t == 1) {
+        // launch_ternary_gemm_t1's first arm. Declines when NINFER_TERNARY_DECODE=gemv restores the
+        // SIMT GEMV: that kernel has no epilogue, so the fused arm must not assume this one was
+        // taken.
+        return decode_uses_small_t() ? TernarySmallTRoute::Decode : TernarySmallTRoute::None;
+    }
+    if (t <= verify_token_cap()) {
+        // launch_ternary_gemm_t8's first arm, under the same env-readable cap it uses.
+        return verify_uses_small_t() ? TernarySmallTRoute::Verify : TernarySmallTRoute::None;
+    }
+    if (t < mma_min_tokens()) {
+        // The gap band (T = 9..31 by default): the three sub-arms of the gap branch in
+        // launch_ternary_gemm_t8, in its order.
+        const GapRoute route = gap_route();
+        const bool ban_small_t = route == GapRoute::S8 || route == GapRoute::Gemv;
+        if (ban_small_t) { return TernarySmallTRoute::None; }
+        const bool prefer_small_t = route == GapRoute::SmallT ||
+                                    (route == GapRoute::Auto && t <= gap_small_t_max_tokens());
+        if (prefer_small_t) { return TernarySmallTRoute::Tiled; }
+        // The gap branch's int8 sub-arm is tested before the second small_t one and has no token
+        // threshold inside the band, so it pre-empts whenever its scratch exists.
+        const bool s8_ok = scratch.codes != nullptr && scratch.scales != nullptr &&
+                           ternary_s8_enabled() && out_row_stride >= w.n;
+        if (s8_ok) { return TernarySmallTRoute::None; }
+        return TernarySmallTRoute::Tiled;
+    }
+    // T >= mma_min_tokens, and the T <= cap case whose preferred arm was vetoed: served by the MMA,
+    // the blocked GEMV or the reference kernel, none of which carries an epilogue (S5/S6).
+    return TernarySmallTRoute::None;
+}
+
+// Runs `residual += W * x_folded` with the add folded into the rung's own store. Returns false --
+// having launched nothing -- when this route has no epilogue, which leaves the caller's
+// materialise-then-add path as the answer.
+//
+// The route is passed in rather than recomputed so that the caller's gate and this launch are ONE
+// decision; the None case is unreachable through ternary_linear_add_try_fused(), and returning
+// false rather than throwing keeps a future caller that passes a mismatch merely unfused instead of
+// broken.
+bool launch_ternary_add_residual(TernarySmallTRoute route, const Tensor& x_folded, const Weight& w,
+                                 Tensor& residual_out, std::int32_t out_row_stride,
+                                 cudaStream_t stream, TernaryS8Scratch scratch) {
+    if (route == TernarySmallTRoute::None) { return false; }
+    note_residual(route, x_folded, w, out_row_stride);
+    auto* out_ptr = static_cast<__nv_bfloat16*>(residual_out.data);
+    switch (route) {
+    case TernarySmallTRoute::Decode:
+        // The T = 1 policy, unchanged from launch_ternary_gemm_t1: a 32-wide row block and no
+        // split-K (the split was measured on the verify shape, where a slice adds blocks; at one
+        // token it would cut a K loop that is already the whole kernel).
+        launch_small_t(x_folded, w, residual_out, out_row_stride, stream, 32, TernaryS8Scratch{},
+                       residual_into(out_ptr, out_row_stride));
+        return true;
+    case TernarySmallTRoute::Verify:
+        // The verify policy, unchanged from launch_ternary_gemm_t8: the row block and the slice
+        // count both come from the shape through the same headers the dispatch reads. The split is
+        // why the reduce kernel carries the epilogue -- without it, this arm would drop the residual
+        // on every splitting shape (n <= kSmallTSplitMaxRows at T <= 8, i.e. most of the verify
+        // pass).
+        launch_small_t(x_folded, w, residual_out, out_row_stride, stream, 0, scratch,
+                       residual_into(out_ptr, out_row_stride));
+        return true;
+    case TernarySmallTRoute::Tiled:
+        // Inside the gap band: the same 8-token re-entry the unfused arm takes, with the epilogue
+        // rebased onto each tile inside the launcher. No scratch is passed there, so this route has
+        // no split and the small-t kernel's store is its only writer.
+        launch_small_t_tiled(x_folded, w, residual_out, out_row_stride, stream,
+                             /*fuse_residual=*/true);
+        return true;
+    case TernarySmallTRoute::None:
+        break; // unreachable: filtered above, kept so the switch stays exhaustive
+    }
+    return false;
+}
+
 void launch_ternary_gemm_t8(const Tensor& x, const Weight& w, Tensor& out,
                             std::int32_t out_row_stride, cudaStream_t stream,
                             TernaryS8Scratch scratch) {
@@ -861,7 +1077,8 @@ void launch_ternary_gemm_t8(const Tensor& x, const Weight& w, Tensor& out,
             note_rung("small_t", x, w, out_row_stride);
             // 0 = pick the row block per shape, and the scratch decides whether the shape also
             // splits K: both were measured on this path and on no other.
-            launch_small_t(x, w, out, out_row_stride, stream, 0, scratch);
+            launch_small_t(x, w, out, out_row_stride, stream, 0, scratch,
+                           TernaryIdentityEpilogue{});
             return;
         }
         // The A/B arm below is NOT interchangeable with the small-T kernel over the whole cap.
@@ -921,7 +1138,7 @@ void launch_ternary_gemm_t8(const Tensor& x, const Weight& w, Tensor& out,
         // blocked GEMV below -- which is always correct, just slow, so falling through is right.
         if (!ban_small_t && prefer_small_t && small_t_ok) {
             note_rung("small_t_tiled", x, w, out_row_stride);
-            launch_small_t_tiled(x, w, out, out_row_stride, stream);
+            launch_small_t_tiled(x, w, out, out_row_stride, stream, /*fuse_residual=*/false);
             return;
         }
         if (!ban_s8 && s8_ok) {
@@ -931,7 +1148,7 @@ void launch_ternary_gemm_t8(const Tensor& x, const Weight& w, Tensor& out,
         }
         if (!ban_small_t && small_t_ok) {
             note_rung("small_t_tiled", x, w, out_row_stride);
-            launch_small_t_tiled(x, w, out, out_row_stride, stream);
+            launch_small_t_tiled(x, w, out, out_row_stride, stream, /*fuse_residual=*/false);
             return;
         }
     }
