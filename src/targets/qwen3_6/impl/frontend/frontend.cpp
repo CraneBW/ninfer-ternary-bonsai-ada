@@ -1158,6 +1158,18 @@ runtime::OutputDecision OutputSession::preview_model(std::span<const TokenId> to
         }
 
         if (stop_token) {
+            // Design C: a model stop while still in the thinking phase (not normally closed) would
+            // otherwise end with an empty answer. Force the engine's target-control path so the
+            // thinking is closed and the model continues in the answer region.
+            if (impl_->preview_semantic.in_reasoning && impl_->preview_semantic.budget) {
+                if (!impl_->policy.publish_stop_token) {
+                    impl_->preview_state  = std::move(before_state);
+                    impl_->preview_output = std::move(before_output);
+                }
+                impl_->preview_semantic.control_pending = true;
+                return complete(count, FinishReason::None,
+                                runtime::ContinuationAction::ApplyTargetControl);
+            }
             if (!impl_->policy.publish_stop_token) {
                 impl_->preview_state  = std::move(before_state);
                 impl_->preview_output = std::move(before_output);
