@@ -296,6 +296,39 @@ MtpDecodeState::MtpDecodeState(DeviceSpan backing, const MtpDecodeStateLayout& l
     }
 }
 
+MtpDecodeState MtpDecodeState::verification_view(std::uint32_t verify_window) const {
+    if (current_drafts.ne[0] <= 0) {
+        throw std::logic_error("MTP decode state has no draft window");
+    }
+    if (verify_window == 0 ||
+        static_cast<std::int64_t>(verify_window) > static_cast<std::int64_t>(current_drafts.ne[0])) {
+        throw std::invalid_argument("MTP verification width exceeds the draft window");
+    }
+    const auto batch = current_drafts.ne[1];
+    const auto width = static_cast<std::int32_t>(verify_window) + 1;
+    // Reinterpreting the leading columns is safe because every per-column tensor is laid out
+    // column-major within a row, so a narrower header keeps row r at the same base address while
+    // shortening its stride. The host fills ingress and reads egress at this same width.
+    const auto columns = [batch](const Tensor& tensor, std::int32_t leading_columns) {
+        return Tensor(tensor.data, tensor.dtype, {leading_columns, batch});
+    };
+    const auto rows_by_columns = [batch, width](const Tensor& tensor) {
+        return Tensor(tensor.data, tensor.dtype, {tensor.ne[0], width, batch});
+    };
+    MtpDecodeState view       = *this;
+    view.current_drafts       = columns(current_drafts, width - 1);
+    view.target_rope_positions = columns(target_rope_positions, width);
+    view.licensed_tokens      = columns(licensed_tokens, width);
+    view.verify_ids           = columns(verify_ids, width);
+    view.target_positions     = columns(target_positions, width);
+    view.target_argmax        = columns(target_argmax, width);
+    view.alignment_ids        = columns(alignment_ids, width);
+    view.target_logits        = rows_by_columns(target_logits);
+    view.target_hidden        = rows_by_columns(target_hidden);
+    view.alignment_hidden     = rows_by_columns(alignment_hidden);
+    return view;
+}
+
 DFlashDecodeState::DFlashDecodeState(DeviceSpan backing, const DFlashDecodeStateLayout& layout,
                                      std::uint32_t batch_capacity, std::uint32_t draft_window) {
     if (batch_capacity == 0 || batch_capacity > kMaximumConcurrency || draft_window == 0 ||

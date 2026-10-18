@@ -27,8 +27,9 @@ namespace ninfer::targets::qwen3_6 {
 // The cost of a draft is fixed (~1.94 ms) and the return is the survival probability, so the
 // crossover sits at s ~= 0.75: below it more K loses, above it more K wins. A single deployment-wide
 // K cannot serve all three, which is why this is a CEILING and --draft-tokens picks within it.
-// Adaptive K would need a captured graph per K (this constant is part of the graph shape) and is a
-// separate change.
+// Adaptive K needs a captured graph per K because this constant is part of the graph shape; with
+// --adaptive-mtp the program captures one graph per verification width from three up to this
+// ceiling and each round replays verification_view(width) of the same state.
 //
 // This number is written in four places and they are kept in step by hand, because each is a
 // different kind of thing rather than four copies of one: this one is the captured graph's width,
@@ -275,6 +276,12 @@ struct MtpDecodeState {
     MtpDecodeState() = default;
     MtpDecodeState(DeviceSpan backing, const MtpDecodeStateLayout& layout,
                    std::uint32_t batch_capacity, std::uint32_t draft_window);
+
+    // The same device buffers reinterpreted for a round that verifies only the first
+    // "verify_window" drafts: every per-column tensor narrows to the columns that round touches,
+    // and the draft tensors keep their full window. Ingress and egress arrays are strided by the
+    // returned view, so the host fills and reads them at the width of the round it runs.
+    [[nodiscard]] MtpDecodeState verification_view(std::uint32_t verify_window) const;
 };
 
 struct DFlashDecodeState {

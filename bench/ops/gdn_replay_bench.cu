@@ -462,11 +462,11 @@ private:
 };
 
 Measurement measure_fold(const FoldResources& resources,
-                         const std::vector<ops::GdnReplayFoldRow>& rows, DeviceBuffer& flush,
-                         int warmup, int repeat) {
+                         const std::vector<ops::GdnReplayFoldRow>& rows, std::int32_t width,
+                         DeviceBuffer& flush, int warmup, int repeat) {
     cudaStream_t stream = nullptr;
     const auto launch   = [&](cudaStream_t launch_stream) {
-        resources.fold_plan().execute(rows, launch_stream);
+        resources.fold_plan().execute(rows, width, launch_stream);
     };
     Measurement result;
     result.warm           = bench::measure_launch(launch, stream, warmup, repeat);
@@ -543,7 +543,8 @@ int run(const Options& options) {
                         const std::vector<ops::GdnReplayFoldRow> rows =
                             make_rows(batch, width, commits);
                         const Measurement measurement =
-                            measure_fold(resources, rows, flush, options.warmup, options.repeat);
+                            measure_fold(resources, rows, width, flush, options.warmup,
+                                         options.repeat);
                         print_result(profile, width, batch, commits, rows, measurement);
                     }
                 }

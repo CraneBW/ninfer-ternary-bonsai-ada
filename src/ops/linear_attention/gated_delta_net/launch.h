@@ -46,7 +46,7 @@ void launch_recurrent_record(const Tensor& q, const Tensor& k, const Tensor& v, 
 
 void launch_replay_fold(const GdnReplayRecords& records, LinearAttentionStateAllLayersView states,
                         const GdnReplayFoldKernelRows& rows, std::int32_t active_rows,
-                        cudaStream_t stream);
+                        std::int32_t active_width, cudaStream_t stream);
 
 std::size_t chunked_workspace_bytes(std::int32_t value_heads, std::int32_t tokens);
 

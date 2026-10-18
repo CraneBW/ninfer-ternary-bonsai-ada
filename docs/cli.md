@@ -155,7 +155,7 @@ long-decode, and long-context inputs.
 
 ## Speculative decoding
 
-Speculative decoding is disabled by default. Select MTP with one to five draft positions, or the
+Speculative decoding is disabled by default. Select MTP with one to seven draft positions, or the
 35B-A3B DFlash or Qwen3.8-27B DFlash2 backend with one to fifteen. Both masked-draft backends
 may be combined with `--vision`.
 `--lm-head-draft` selects the optimized proposal head and requires a selected backend:
@@ -192,6 +192,16 @@ use MTP with three draft tokens and DFlash with seven draft tokens (block length
 the optimized proposal head. DFlash accepts one to fifteen draft tokens; seven forms the measured
 block length eight, while fifteen uses the maximum supported block length sixteen.
 
+`--adaptive-mtp` makes `--draft-tokens` a ceiling instead of a fixed width. Each round tracks how
+often each draft position survived acceptance and how long the round took at that width, then
+verifies the prefix the measured survival per unit of round cost favors; the draft window itself
+stays at the ceiling, and only the verified and proposed prefix narrows. Because drafts are still
+verified against the target model, the committed greedy output is identical to a fixed window. The
+width starts at three, grows when wider rounds earn their cost, and contracts when the drafts stop
+surviving, so one configuration serves chat text (where late draft positions rarely survive and a
+narrow round is cheaper) and highly regular output such as generated JSON (where they do). It
+requires `--spec mtp` and a ceiling of at least three.
+
 ## Common options
 
 The table lists executable defaults. The examples above select FP8 KV and MTP3.
@@ -207,7 +217,8 @@ The table lists executable defaults. The examples above select FP8 KV and MTP3.
 | `--cache-type-k bf16\|int8\|fp8\|nvfp4\|int4\|int4-e8` | key-side KV-cache storage | `bf16` |
 | `--cache-type-v bf16\|int8\|fp8\|nvfp4\|int4` | value-side KV-cache storage | `bf16` |
 | `--spec mtp\|dflash\|dflash2` | speculative backend | off |
-| `--draft-tokens N` | MTP `1..5`; DFlash/DFlash2 `1..15` | unset |
+| `--draft-tokens N` | MTP `1..7`; DFlash/DFlash2 `1..15` | unset |
+| `--adaptive-mtp` | MTP only: verify `3..--draft-tokens` drafts per round, chosen per request | off |
 | `--lm-head-draft` | optimized proposal head | off |
 | `--vision` | enable image/video input and load Vision GPU allocations | off |
 | `--no-cuda-graph` | disable CUDA Graph decode | graphs on |

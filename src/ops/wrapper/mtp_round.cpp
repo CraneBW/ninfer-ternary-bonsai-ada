@@ -31,12 +31,15 @@ void require_vector(const Tensor& t, DType dtype, std::int32_t count, const char
     require_matrix(t, dtype, count, 1, op, name);
 }
 
-void require_row_pitched_matrix(const Tensor& t, std::int32_t rows, std::int32_t cols,
+// The AR outputs are sliced from a round buffer sized for the draft window. A round that
+// proposes fewer drafts than that window fills a prefix of the buffer, so the minimum column
+// count is the requirement; the step stride stays the buffer's own pitch.
+void require_row_pitched_matrix(const Tensor& t, std::int32_t rows, std::int32_t min_cols,
                                 const char* op, const char* name) {
     constexpr std::int64_t element = sizeof(std::int32_t);
-    if (rows <= 0 || cols <= 0 || t.dtype != DType::I32 || t.ne[0] != rows || t.ne[1] != cols ||
-        t.ne[2] != 1 || t.ne[3] != 1 || t.nb[0] != element || t.nb[1] < rows * element ||
-        t.nb[1] % element != 0 || t.data == nullptr) {
+    if (rows <= 0 || min_cols <= 0 || t.dtype != DType::I32 || t.ne[0] != rows ||
+        t.ne[1] < min_cols || t.ne[2] != 1 || t.ne[3] != 1 || t.nb[0] != element ||
+        t.nb[1] < rows * element || t.nb[1] % element != 0 || t.data == nullptr) {
         throw std::invalid_argument(std::string(op) + ": invalid row-pitched matrix for " + name);
     }
 }
@@ -48,14 +51,19 @@ void mtp_prepare_next_round(const Tensor& verify_ids, const Tensor& next_anchors
                             const Tensor& remaining_budgets, const Tensor& licensed_counts,
                             const Tensor& rope_deltas, Tensor& alignment_ids, Tensor& next_extents,
                             Tensor& ar_positions, Tensor& ar_rope_positions,
-                            Tensor& ar_valid_columns, std::int32_t max_context,
-                            cudaStream_t stream) {
+                            Tensor& ar_valid_columns, std::int32_t proposal_drafts,
+                            std::int32_t max_context, cudaStream_t stream) {
     constexpr const char* op = "mtp_prepare_next_round";
     const std::int32_t T     = verify_ids.ne[0];
     const std::int32_t batch = verify_ids.ne[1];
     // 8 = one draft ceiling (7) plus the token the round starts from; see round_state.h.
     if (T < 2 || T > 8) {
         throw std::invalid_argument("mtp_prepare_next_round: T must be in [2,8]");
+    }
+    // The verified width and the next proposal are independent: an adaptive MTP round verifies
+    // fewer drafts than it proposes.
+    if (proposal_drafts < 1 || proposal_drafts > 15) {
+        throw std::invalid_argument("mtp_prepare_next_round: proposal drafts must be in [1,15]");
     }
     if (batch < 1) { throw std::invalid_argument("mtp_prepare_next_round: B must be positive"); }
     if (max_context <= 0) {
@@ -70,7 +78,7 @@ void mtp_prepare_next_round(const Tensor& verify_ids, const Tensor& next_anchors
     require_vector(rope_deltas, DType::I32, batch, op, "rope_deltas");
     require_matrix(alignment_ids, DType::I32, T, batch, op, "alignment_ids");
     require_vector(next_extents, DType::I32, batch, op, "next_extents");
-    const std::int32_t steps = std::max(T - 2, 1);
+    const std::int32_t steps = std::max(proposal_drafts - 1, 1);
     require_row_pitched_matrix(ar_positions, batch, steps, op, "ar_positions");
     require_row_pitched_matrix(ar_rope_positions, batch, steps, op, "ar_rope_positions");
     require_row_pitched_matrix(ar_valid_columns, batch, steps, op, "ar_valid_columns");
@@ -82,7 +90,8 @@ void mtp_prepare_next_round(const Tensor& verify_ids, const Tensor& next_anchors
     detail::mtp_prepare_next_round_launch(verify_ids, next_anchors, accepted, updated_frontiers,
                                           remaining_budgets, licensed_counts, rope_deltas,
                                           alignment_ids, next_extents, ar_positions,
-                                          ar_rope_positions, ar_valid_columns, max_context, stream);
+                                          ar_rope_positions, ar_valid_columns, proposal_drafts,
+                                          max_context, stream);
 }
 
 } // namespace ninfer::ops

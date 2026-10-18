@@ -273,7 +273,7 @@ int run_case(const FoldProfile profile, std::int32_t width, std::int32_t rows,
     WorkspaceArena reference_workspace(256);
 
     for (std::int32_t layer = 0; layer < profile.layers; ++layer) {
-        const GdnReplayRecordLayer layer_records = records.layer(layer, rows);
+        const GdnReplayRecordLayer layer_records = records.layer(layer, rows, width);
         for (std::int32_t row = 0; row < rows; ++row) {
             const auto initial_recurrent = initial_recurrent_values(recurrent_slot_elements, seed, layer, row);
             const Tensor actual_initial = state_pool.recurrent_slot(
@@ -346,7 +346,8 @@ int run_case(const FoldProfile profile, std::int32_t width, std::int32_t rows,
         DeviceContext context;
         DecodeGraphDefinition definition;
         DecodeGraphExecutable graph;
-        definition.capture(context.stream, [&] { fold_plan.execute(fold_rows, context.stream); });
+        definition.capture(context.stream,
+                           [&] { fold_plan.execute(fold_rows, width, context.stream); });
         graph.instantiate(definition);
         // Host row descriptors are captured by value. Restore GPU state between replays.
         for (int replay = 0; replay < 2; ++replay) {
@@ -355,7 +356,7 @@ int run_case(const FoldProfile profile, std::int32_t width, std::int32_t rows,
             context.synchronize();
         }
     } else {
-        fold_plan.execute(fold_rows, nullptr);
+        fold_plan.execute(fold_rows, width, nullptr);
         cuda_synchronize();
     }
 
@@ -627,7 +628,7 @@ int run_record_fold_rounds() {
         device_beta.copy_from_host(beta_host.data(), device_beta.bytes);
 
         for (std::int32_t layer = 0; layer < kProfile.layers; ++layer) {
-            GdnReplayRecordLayer layer_records = records.layer(layer, 1);
+            GdnReplayRecordLayer layer_records = records.layer(layer, 1, kWidth);
             Tensor conv_states = state_pool.layer_view(static_cast<std::uint32_t>(layer)).conv;
             ops::gdn_input_proj_conv_snapshot(x, qk_parent.view(), vz_parent.view(), conv_weight, conv_states, valid,
                                               initial_selector, snapshot_selector, snapshot_query,
@@ -692,7 +693,7 @@ int run_record_fold_rounds() {
         }
 
         const std::array fold_rows{ops::GdnReplayFoldRow{kInitialSlot, kInitialSlot, commit}};
-        fold_plan.execute(fold_rows, nullptr);
+        fold_plan.execute(fold_rows, kWidth, nullptr);
         cuda_synchronize();
         for (std::int32_t layer = 0; layer < kProfile.layers; ++layer) {
             const Tensor folded_recurrent =

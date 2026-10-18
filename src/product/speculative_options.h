@@ -30,6 +30,9 @@ namespace ninfer::product {
 }
 
 inline void validate_speculative_cli_options(const SpeculativeOptions& options) {
+    if (options.adaptive_mtp && options.backend != SpeculativeBackend::Mtp) {
+        throw std::invalid_argument("--adaptive-mtp requires --spec mtp");
+    }
     switch (options.backend) {
     case SpeculativeBackend::None:
         if (options.draft_tokens != 0 || options.proposal_head != ProposalHead::Full) {
@@ -44,6 +47,11 @@ inline void validate_speculative_cli_options(const SpeculativeOptions& options) 
         // message to the shape of a CUDA graph. Listed in round_state.h's comment.
         if (options.draft_tokens == 0 || options.draft_tokens > 7) {
             throw std::invalid_argument("--spec mtp requires --draft-tokens in [1,7]");
+        }
+        // The adaptive floor is three: a two-wide round buys almost nothing over a one-wide one,
+        // so a ceiling below three would leave the controller with nothing to choose between.
+        if (options.adaptive_mtp && options.draft_tokens < 3) {
+            throw std::invalid_argument("--adaptive-mtp requires --draft-tokens in [3,7]");
         }
         return;
     case SpeculativeBackend::DFlash:

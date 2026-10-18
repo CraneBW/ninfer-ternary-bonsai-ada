@@ -36,7 +36,9 @@ struct GdnReplayFoldRow {
  * same initial state and represented inputs. Projection is not re-evaluated at the commit width.
  *
  * Construction validates the immutable record/state geometry, layout, address ranges and
- * disjointness once. execute() validates only active rows, state selectors and commit extents.
+ * disjointness once. execute() validates only active rows, state selectors and commit extents, and
+ * reads the records with the active width the round wrote: rows are packed with that width inside
+ * each layer, while the layer stride keeps the allocation's full record width.
  * The bound record/state addresses must remain stable for the plan lifetime. CUDA Graph capture
  * copies row descriptors by value; replay consumes record/state contents at the bound addresses,
  * while changing host row descriptors requires a new capture.
@@ -49,7 +51,8 @@ class GdnReplayFoldPlan {
 public:
     GdnReplayFoldPlan(const GdnReplayRecords& records, LinearAttentionStateAllLayersView states);
 
-    void execute(std::span<const GdnReplayFoldRow> rows, cudaStream_t stream) const;
+    void execute(std::span<const GdnReplayFoldRow> rows, std::int32_t active_width,
+                 cudaStream_t stream) const;
 
 private:
     GdnReplayRecords records_;

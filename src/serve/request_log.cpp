@@ -323,6 +323,11 @@ Json speculative_json(const GenerationMetrics& metrics) {
                 {"accepted_per_position", metrics.speculative_accepted_per_position}};
 }
 
+Json adaptive_speculative_json(const GenerationMetrics& metrics) {
+    return Json{{"rounds_per_window", metrics.speculative_rounds_per_window},
+                {"window_transitions", metrics.speculative_window_transitions}};
+}
+
 Json materialization_json(const ninfer::MaterializationDiagnostics& diagnostics) {
     return Json{
         {"predicted_now_ns", diagnostics.predicted_now_ns},
@@ -590,6 +595,10 @@ std::string format_request_done_json(const std::string& server_instance_id, std:
         {"decode", outcome.metrics.decode_seconds},   {"total", outcome.metrics.total_seconds}};
     record["engine_timing"]   = request_engine_timing_json(outcome.metrics.engine_timing);
     record["speculative"]     = speculative_json(outcome.metrics);
+    // Present only for an adaptive MTP request: a fixed draft window has nothing to report here.
+    if (!outcome.metrics.speculative_rounds_per_window.empty()) {
+        record["adaptive_speculative"] = adaptive_speculative_json(outcome.metrics);
+    }
     record["materialization"] = materialization_json(outcome.metrics.materialization);
     return record.dump();
 }

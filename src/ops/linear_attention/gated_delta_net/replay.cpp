@@ -260,9 +260,12 @@ void require_records_disjoint_from_states(const GdnReplayRecords& records,
 
 detail::gated_delta_net::GdnReplayFoldKernelRows
 validate_fold_rows(const GdnReplayRecords& records, LinearAttentionStateAllLayersView states,
-                   std::span<const GdnReplayFoldRow> rows) {
+                   std::span<const GdnReplayFoldRow> rows, std::int32_t active_width) {
     if (rows.empty() || rows.size() > static_cast<std::size_t>(records.spec.record_capacity)) {
         throw std::invalid_argument("gdn_replay_fold: active row count is out of range");
+    }
+    if (active_width <= 0 || active_width > records.spec.width) {
+        throw std::invalid_argument("gdn_replay_fold: active width is out of range");
     }
     detail::gated_delta_net::GdnReplayFoldKernelRows packed{};
     for (std::size_t row = 0; row < rows.size(); ++row) {
@@ -272,7 +275,7 @@ validate_fold_rows(const GdnReplayRecords& records, LinearAttentionStateAllLayer
             rows[row].destination_state_slot >= states.spec.slot_count) {
             throw std::invalid_argument("gdn_replay_fold: linear state slot is out of range");
         }
-        if (rows[row].commit_columns < 0 || rows[row].commit_columns > records.spec.width) {
+        if (rows[row].commit_columns < 0 || rows[row].commit_columns > active_width) {
             throw std::invalid_argument("gdn_replay_fold: commit extent is out of range");
         }
         for (std::size_t previous = 0; previous < row; ++previous) {
@@ -312,11 +315,13 @@ GdnReplayFoldPlan::GdnReplayFoldPlan(const GdnReplayRecords& records,
     require_records_disjoint_from_states(records_, states_);
 }
 
-void GdnReplayFoldPlan::execute(std::span<const GdnReplayFoldRow> rows, cudaStream_t stream) const {
+void GdnReplayFoldPlan::execute(std::span<const GdnReplayFoldRow> rows, std::int32_t active_width,
+                                cudaStream_t stream) const {
     const detail::gated_delta_net::GdnReplayFoldKernelRows packed =
-        validate_fold_rows(records_, states_, rows);
+        validate_fold_rows(records_, states_, rows, active_width);
     detail::gated_delta_net::launch_replay_fold(records_, states_, packed,
-                                                static_cast<std::int32_t>(rows.size()), stream);
+                                                static_cast<std::int32_t>(rows.size()), active_width,
+                                                stream);
 }
 
 } // namespace ninfer::ops

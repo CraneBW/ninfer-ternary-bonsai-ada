@@ -116,7 +116,7 @@ int main() {
                                 records.gate.bytes(),
                             "record payload bytes");
 
-    const auto layer2 = records.layer(2, 3);
+    const auto layer2 = records.layer(2, 3, static_cast<std::int32_t>(spec.width));
     failures += expect_shape(layer2.conv, 256, 4, 3, 1, "layer conv slice");
     failures += expect_shape(layer2.key, 128, 2, 4, 3, "layer key slice");
     failures += expect_shape(layer2.value, 128, 6, 4, 3, "layer value slice");
@@ -129,10 +129,24 @@ int main() {
         static_cast<std::byte*>(layer2.key.data) - static_cast<std::byte*>(records.key.data) ==
             static_cast<std::ptrdiff_t>(2 * spec.record_capacity * records.key.nb[3]),
         "layer key slice offset differs");
-    failures += expect_throw([&] { (void)records.layer(-1, 1); }, "negative layer");
-    failures += expect_throw([&] { (void)records.layer(3, 1); }, "past-end layer");
-    failures += expect_throw([&] { (void)records.layer(0, 0); }, "zero active rows");
-    failures += expect_throw([&] { (void)records.layer(0, 6); }, "excess active rows");
+    failures += expect_throw([&] { (void)records.layer(-1, 1, 4); }, "negative layer");
+    failures += expect_throw([&] { (void)records.layer(3, 1, 4); }, "past-end layer");
+    failures += expect_throw([&] { (void)records.layer(0, 0, 4); }, "zero active rows");
+    failures += expect_throw([&] { (void)records.layer(0, 6, 4); }, "excess active rows");
+    failures += expect_throw([&] { (void)records.layer(0, 1, 0); }, "zero active width");
+    failures += expect_throw([&] { (void)records.layer(0, 1, 5); }, "excess active width");
+
+    // A round that verifies fewer columns than the draft window packs its records at that narrower
+    // width; the layer stride stays on the allocated width.
+    const auto narrow = records.layer(1, 2, 3);
+    failures += expect_shape(narrow.conv, 256, 3, 2, 1, "narrow conv slice");
+    failures += expect_shape(narrow.key, 128, 2, 3, 2, "narrow key slice");
+    failures += expect_shape(narrow.value, 128, 6, 3, 2, "narrow value slice");
+    failures += expect_shape(narrow.gate, 2, 6, 3, 2, "narrow gate slice");
+    failures += expect(
+        static_cast<std::byte*>(narrow.key.data) - static_cast<std::byte*>(records.key.data) ==
+            static_cast<std::ptrdiff_t>(spec.record_capacity * records.key.nb[3]),
+        "narrow layer key slice offset differs");
 
     failures += expect_size(record_bytes({.layers          = 48,
                                           .record_capacity = 8,

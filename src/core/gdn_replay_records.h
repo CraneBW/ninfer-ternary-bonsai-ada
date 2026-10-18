@@ -55,7 +55,11 @@ struct GdnReplayRecords {
     GdnReplayRecords() = default;
     GdnReplayRecords(DeviceSpan backing, const GdnReplayRecordLayout& layout);
 
-    [[nodiscard]] GdnReplayRecordLayer layer(std::int32_t layer, std::int32_t rows) const;
+    // active_width narrows every record plane to the columns the current round wrote. Records are
+    // packed per row with that width, so the writer and the fold must agree on it; spec.width is
+    // only the allocation ceiling.
+    [[nodiscard]] GdnReplayRecordLayer layer(std::int32_t layer, std::int32_t rows,
+                                            std::int32_t active_width) const;
 };
 
 } // namespace ninfer

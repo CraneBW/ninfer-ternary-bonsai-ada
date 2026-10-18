@@ -88,7 +88,7 @@ std::string serve_usage_text(const char* argv0) {
            "--cache-type-v <bf16|int8|fp8|nvfp4|int4>] "
            "[--kvmem [--kvmem-budget N] [--kvmem-gen-reserve N]] "
            "[--spec mtp|dflash|dflash2 --draft-tokens N] "
-           "[--default-max-tokens N] [--default-thinking-budget N] "
+           "[--adaptive-mtp] [--default-max-tokens N] [--default-thinking-budget N] "
            "[--vision] [--vision-max-tokens N] [--no-cuda-graph] [--no-prefix-reuse] "
            "[--lm-head-draft] [--no-thinking] [--preserve-thinking] "
            "[--tolerant-tool-calls] [--cors] "
@@ -130,6 +130,8 @@ std::string serve_usage_text(const char* argv0) {
            "; 0 disables generation-time reclaim). Too small a reserve evicts freshly retrieved "
            "content mid-generation; a pool that cannot afford it clamps it down\n"
            "       --no-prefix-reuse disables compatible-prefix caching (enabled by default)\n"
+           "       --adaptive-mtp verifies 3..--draft-tokens drafts per MTP round, the width the "
+           "drafts' measured survival and round cost favor; greedy output is unchanged\n"
            "       context cache defaults: device-state=max-concurrency, private=2x concurrency, "
            "shared=max(max-concurrency,4), anchors=2; Host state=max(8, 2x max-concurrency) slots, Host KV=8192 MiB\n"
            "       --device-state-slots is extra checkpoint capacity beyond active lanes; "
@@ -348,6 +350,8 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         } else if (arg == "--draft-tokens") {
             options.speculative.draft_tokens = static_cast<std::uint32_t>(
                 parse_nonnegative_int(require_value("--draft-tokens"), "draft-tokens"));
+        } else if (arg == "--adaptive-mtp") {
+            options.speculative.adaptive_mtp = true;
         } else if (arg == "--default-max-tokens") {
             options.default_max_tokens =
                 parse_nonnegative_int(require_value("--default-max-tokens"), "default-max-tokens");

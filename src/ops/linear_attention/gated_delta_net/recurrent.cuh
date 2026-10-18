@@ -463,7 +463,7 @@ struct FoldAccess {
     __nv_bfloat16* conv_layer0;
     std::int64_t recurrent_layer_stride;
     std::int64_t conv_layer_stride;
-    std::int32_t record_capacity;
+    std::int32_t layer_stride_columns;
     std::int32_t width;
     GdnReplayFoldKernelRows rows;
 
@@ -494,8 +494,12 @@ struct FoldAccess {
         return rows.row[coord.batch].commit_columns;
     }
 
-    __device__ __forceinline__ std::int64_t record_outer(const RecurrentCoordinates& coord) const {
-        return static_cast<std::int64_t>(coord.layer) * record_capacity + coord.batch;
+    // Layer offsets follow the allocation's full record width; the row stride inside a layer is the
+    // width this round wrote.
+    __device__ __forceinline__ std::int64_t record_column(const RecurrentCoordinates& coord,
+                                                          std::int32_t token) const {
+        return static_cast<std::int64_t>(coord.layer) * layer_stride_columns +
+               static_cast<std::int64_t>(coord.batch) * width + token;
     }
 
     __device__ __forceinline__ const float*
@@ -518,19 +522,19 @@ struct FoldAccess {
 
     __device__ __forceinline__ const __nv_bfloat16* key_ptr(const RecurrentCoordinates& coord,
                                                             std::int32_t token) const {
-        const std::int64_t column = record_outer(coord) * width + token;
+        const std::int64_t column = record_column(coord, token);
         return key_record + (column * Geometry::kQkHeads + coord.qk_head) * kStateDim;
     }
 
     __device__ __forceinline__ const __nv_bfloat16* value_ptr(const RecurrentCoordinates& coord,
                                                               std::int32_t token) const {
-        const std::int64_t column = record_outer(coord) * width + token;
+        const std::int64_t column = record_column(coord, token);
         return value_record + (column * Geometry::kValueHeads + coord.value_head) * kStateDim;
     }
 
     __device__ __forceinline__ RawGatePair load_gate(const RecurrentCoordinates& coord,
                                                      std::int32_t token) const {
-        const std::int64_t column = record_outer(coord) * width + token;
+        const std::int64_t column = record_column(coord, token);
         return load_record_gate(gate_record, column * Geometry::kValueHeads + coord.value_head);
     }
 
@@ -565,7 +569,7 @@ struct FoldAccess {
                 (3LL * Geometry::kConvChannels) +
             channel;
         const __nv_bfloat16* record =
-            conv_record + record_outer(coord) * width * Geometry::kConvChannels + channel;
+            conv_record + record_column(coord, 0) * Geometry::kConvChannels + channel;
 
         __nv_bfloat16 h0;
         __nv_bfloat16 h1;

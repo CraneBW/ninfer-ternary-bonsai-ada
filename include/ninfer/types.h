@@ -249,8 +249,12 @@ enum class SpeculativeBackend : std::uint8_t {
 
 struct SpeculativeOptions {
     SpeculativeBackend backend = SpeculativeBackend::None;
-    // Startup-fixed K: MTP 1..5; DFlash and DFlash2 1..15 (query width K+1).
+    // Startup-fixed K: MTP 1..7, DFlash and DFlash2 1..15 (query width K+1). Under adaptive MTP
+    // this is the ceiling of a per-round choice, and K stays the draft window in every case.
     std::uint32_t draft_tokens = 0;
+    // MTP only: verify fewer than K drafts when a request's measured draft survival and the
+    // round's measured cost favor a narrower round.
+    bool adaptive_mtp = false;
     ProposalHead proposal_head = ProposalHead::Full;
 };
 
@@ -928,6 +932,10 @@ struct SpeculativeStats {
     std::uint64_t accepted_tokens = 0;
     std::uint64_t fallback_steps  = 0;
     std::vector<std::uint64_t> accepted_per_position;
+    // Adaptive MTP: rounds executed per verified width (index window-1) and the number of rounds
+    // whose width differed from the previous round. Both stay empty/zero for a fixed draft window.
+    std::vector<std::uint64_t> rounds_per_window;
+    std::uint64_t window_transitions = 0;
 };
 
 struct ThinkingBudgetStats {

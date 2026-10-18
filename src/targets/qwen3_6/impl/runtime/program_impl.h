@@ -2,6 +2,7 @@
 // This file differs from upstream NInfer; see patches/ in the release bundle
 // for the change list, rebuild steps and required verification.
 #include "targets/qwen3_6/impl/runtime/instance.h"
+#include "targets/qwen3_6/impl/runtime/mtp_adaptive.h"
 #include "targets/qwen3_6/impl/runtime/program.h"
 #include "targets/qwen3_6/impl/runtime/rebuild_work.h"
 #include "targets/qwen3_6/impl/runtime/yarn.h"
@@ -43,6 +44,9 @@ std::uint32_t normalized_private_capacity(const ContextCacheOptions& options) {
 }
 
 using Clock = std::chrono::steady_clock;
+
+// Each adaptive verification width owns a disjoint range of MTP graph topology classes.
+constexpr std::uint32_t kMtpClassesPerWidth = 64;
 
 std::uint64_t elapsed_ns(Clock::time_point started) noexcept {
     const auto elapsed =
@@ -623,16 +627,21 @@ std::array<std::int32_t, 3> prompt_rope_position(const PreparedPromptData& promp
 }
 
 schedule::MtpCausalAttentionEnvelopes mtp_causal_attention_envelopes(std::uint32_t max_frontier,
-                                                                     std::uint32_t k,
+                                                                     std::uint32_t verify_window,
+                                                                     std::uint32_t draft_window,
                                                                      std::uint32_t capacity) {
     const auto visible = [capacity](std::uint64_t value) {
         return static_cast<std::uint32_t>(std::min<std::uint64_t>(capacity, value));
     };
     schedule::MtpCausalAttentionEnvelopes out;
-    out.target_verify = {1, visible(static_cast<std::uint64_t>(max_frontier) + k + 1ULL)};
-    out.batch         = out.target_verify;
-    for (std::uint32_t step = 0; step + 1 < k; ++step) {
-        out.ar[step] = {1, visible(static_cast<std::uint64_t>(max_frontier) + k + step + 2ULL)};
+    out.target_verify = {
+        1, visible(static_cast<std::uint64_t>(max_frontier) + verify_window + 1ULL)};
+    out.batch = out.target_verify;
+    // The round still proposes K drafts, so its autoregressive steps run to K even on a narrower
+    // verification width.
+    for (std::uint32_t step = 0; step + 1 < draft_window; ++step) {
+        out.ar[step] = {1, visible(static_cast<std::uint64_t>(max_frontier) + verify_window + step +
+                                   2ULL)};
     }
     return out;
 }
@@ -648,10 +657,12 @@ schedule::DFlashEnvelopes dflash_envelopes(std::uint32_t min_frontier, std::uint
 }
 
 DecodeGraphProfile& select_graph_profile(DecodeGraphFamily& family, std::uint32_t batch_size,
-                                         std::uint32_t frontier, const char* label) {
+                                         std::uint32_t frontier, const char* label,
+                                         std::uint32_t verify_window = 0) {
     const auto it = std::find_if(
         family.profiles.begin(), family.profiles.end(), [&](const DecodeGraphProfile& profile) {
-            return profile.batch_size == batch_size && profile.min_execution_frontier <= frontier &&
+            return profile.batch_size == batch_size && profile.verify_window == verify_window &&
+                   profile.min_execution_frontier <= frontier &&
                    frontier <= profile.max_execution_frontier;
         });
     if (it == family.profiles.end()) {
@@ -741,7 +752,8 @@ void instantiate_graph_family(DecodeGraphFamily& family, const char* label, Devi
                     install_and_upload(topology, i);
 
                     DecodeGraphProfile& profile = family.profiles[i];
-                    prepare(profile.min_execution_frontier, profile.batch_size);
+                    prepare(profile.min_execution_frontier, profile.batch_size,
+                            profile.verify_window);
                     device.synchronize();
                     topology.executable.launch(device.stream);
                     device.synchronize();
@@ -772,7 +784,8 @@ ProgramImplCore::ProgramImplCore(const LoadedModelData& model_in, const Sequence
       continuation_capacity(normalized_private_capacity(plan.context_cache)),
       shared_prefix_capacity(plan.context_cache.max_shared_prefixes.value_or(0)),
       prefill_chunk(plan.prefill_chunk), draft_window(plan.draft_window),
-      speculative_backend(plan.speculative_backend), kv_storage(plan.kv_storage),
+      adaptive_mtp(plan.adaptive_mtp), speculative_backend(plan.speculative_backend),
+      kv_storage(plan.kv_storage),
       proposal_head(plan.proposal_head), vision_enabled(plan.features.vision),
       use_cuda_graph(plan.use_cuda_graph), causal_scoring(plan.causal_scoring),
       kv_payload_bytes(plan.persistent.kv_payload_bytes),
@@ -1060,6 +1073,16 @@ ProgramImplCore::ProgramImplCore(const LoadedModelData& model_in, const Sequence
         ops::set_text_rope_frequencies(yarn.scale_factor > 1.0F ? yarn.inv_freq.data() : nullptr);
     }
     device.synchronize();
+    if (adaptive_mtp) {
+        if (speculative_backend != SpeculativeBackend::Mtp) {
+            throw std::invalid_argument("adaptive MTP requires the MTP speculative backend");
+        }
+        if (draft_window < minimum_adaptive_window(draft_window)) {
+            throw std::invalid_argument("adaptive MTP needs a draft window of at least three");
+        }
+        mtp_controller.emplace();
+        mtp_controller->reset(draft_window);
+    }
     if (use_cuda_graph) {
         StartupPhaseScope graph_phase(startup_observer, StartupPhase::CudaGraphPrepare);
         prepare_graphs();
@@ -10447,11 +10470,23 @@ runtime::ExecutionTiming ProgramImplCore::resolve_pending_raw(
             any_terminal_or_cancelled || terminal[row] != 0 || cancelled[row] != 0;
     }
 
+    // The fold reads each record row at the width its round packed it with, so the whole batch has to
+    // agree: a speculative round picks one verification width for every row it serves.
+    const std::uint32_t record_width = requests[lanes[0]].pending.record_width;
+    if (record_width == 0) {
+        throw std::logic_error("speculative pending row has no GDN record width");
+    }
+    for (std::size_t row = 1; row < lanes.size(); ++row) {
+        if (requests[lanes[row]].pending.record_width != record_width) {
+            throw std::logic_error("speculative pending batch mixes GDN record widths");
+        }
+    }
+
     const auto tail_started = Clock::now();
     try {
         timing.resume_submit();
         replay_fold->execute(std::span<const ops::GdnReplayFoldRow>(fold_rows.data(), lanes.size()),
-                             device.stream);
+                             static_cast<std::int32_t>(record_width), device.stream);
 
         // Sparse acceptance reads counts. Publish only the prefix licensed by the Frontend.
         if (speculative_backend == SpeculativeBackend::DFlash2) {
@@ -11394,7 +11429,8 @@ void ProgramImplCore::prepare_graphs() {
             }
             cache.page_pool().zero_pages(pages, device.stream);
         };
-    const auto prepare_representative = [&](std::uint32_t frontier, std::uint32_t batch_size) {
+    const auto prepare_representative = [&](std::uint32_t frontier, std::uint32_t batch_size,
+                                            std::uint32_t verify_window) {
         if (batch_size == 0 || batch_size > max_concurrency) {
             throw std::logic_error("CUDA Graph representative batch is invalid");
         }
@@ -11453,10 +11489,13 @@ void ProgramImplCore::prepare_graphs() {
             }
         }
         if (io.mtp_decode) {
+            if (verify_window == 0 || verify_window > draft_window) {
+                throw std::logic_error("graph representative MTP width is outside the window");
+            }
             *mtp_host_ingress          = {};
             *mtp_host_egress           = {};
-            const std::uint32_t extent = std::min(draft_window, capacity - frontier - 1U);
-            const std::uint32_t width  = draft_window + 1U;
+            const std::uint32_t extent = std::min(verify_window, capacity - frontier - 1U);
+            const std::uint32_t width  = verify_window + 1U;
             for (std::uint32_t row = 0; row < batch_size; ++row) {
                 mtp_host_ingress->anchors[row] = 0;
                 mtp_host_ingress->base_frontiers[row] =
@@ -11466,8 +11505,8 @@ void ProgramImplCore::prepare_graphs() {
                 mtp_host_ingress->current_extents[row] = static_cast<std::int32_t>(extent);
                 mtp_host_ingress->target_valid_columns[row] =
                     static_cast<std::int32_t>(extent + 1U);
-                for (std::uint32_t step = 0; step < draft_window; ++step) {
-                    mtp_host_ingress->current_drafts[row * draft_window + step] = 0;
+                for (std::uint32_t step = 0; step < verify_window; ++step) {
+                    mtp_host_ingress->current_drafts[row * verify_window + step] = 0;
                 }
                 for (std::uint32_t column = 0; column < width; ++column) {
                     mtp_host_ingress->target_rope_positions[row * width + column] =
@@ -11521,7 +11560,7 @@ void ProgramImplCore::prepare_graphs() {
             *io.ordinary,          *ordinary_host_ingress,
             *ordinary_host_egress, state_images->continuation_hidden_store()};
         const GraphExecutionProfile code_warm = ordinary_profiles.front();
-        prepare_representative(code_warm.min, 1);
+        prepare_representative(code_warm.min, 1, 0);
         device.synchronize();
         schedule::ordinary_decode_batch(ordinary_state, 1, {code_warm.min + 1, code_warm.max + 1},
                                         nullptr);
@@ -11549,35 +11588,53 @@ void ProgramImplCore::prepare_graphs() {
     if (speculative_backend == SpeculativeBackend::Mtp) {
         const auto planned_profiles = mtp_graph_profiles(capacity, draft_window);
         validate_graph_profiles(planned_profiles, capacity - 1, "MTP");
-        schedule::MtpBatchContext mtp_state{execution_core(),
-                                            decoder->text_kv,
-                                            *decoder->mtp_cache(),
-                                            *io.mtp_decode,
-                                            *mtp_host_ingress,
-                                            *mtp_host_egress,
-                                            state_images->continuation_hidden_store()};
-        const GraphExecutionProfile code_warm = planned_profiles.front();
-        prepare_representative(code_warm.min, 1);
-        device.synchronize();
-        schedule::mtp_decode_batch(
-            mtp_state, 1, draft_window,
-            mtp_causal_attention_envelopes(code_warm.max, draft_window, capacity), nullptr);
-        device.synchronize();
+        // A captured MTP round bakes its verification width into the kernels, so an adaptive run
+        // captures one family node set per reachable width; a fixed run captures only its one.
+        const std::uint32_t first_window =
+            adaptive_mtp ? minimum_adaptive_window(draft_window) : draft_window;
+        const std::uint32_t width_count = draft_window - first_window + 1U;
+        mtp_graphs.profiles.reserve(planned_profiles.size() * max_concurrency * width_count);
+        for (std::uint32_t verify_window = first_window; verify_window <= draft_window;
+             ++verify_window) {
+            qwen3_6::MtpDecodeState frame = io.mtp_decode->verification_view(verify_window);
+            schedule::MtpBatchContext mtp_state{execution_core(),
+                                                decoder->text_kv,
+                                                *decoder->mtp_cache(),
+                                                frame,
+                                                *mtp_host_ingress,
+                                                *mtp_host_egress,
+                                                state_images->continuation_hidden_store()};
+            const GraphExecutionProfile code_warm = planned_profiles.front();
+            prepare_representative(code_warm.min, 1, verify_window);
+            device.synchronize();
+            schedule::mtp_decode_batch(mtp_state, 1, verify_window, draft_window,
+                                       mtp_causal_attention_envelopes(code_warm.max, verify_window,
+                                                                      draft_window, capacity),
+                                       nullptr);
+            device.synchronize();
 
-        mtp_graphs.profiles.reserve(planned_profiles.size() * max_concurrency);
-        for (std::uint32_t batch_size = 1; batch_size <= max_concurrency; ++batch_size) {
-            for (const GraphExecutionProfile planned : planned_profiles) {
-                mtp_graphs.profiles.emplace_back();
-                DecodeGraphProfile& profile    = mtp_graphs.profiles.back();
-                profile.batch_size             = batch_size;
-                profile.min_execution_frontier = planned.min;
-                profile.max_execution_frontier = planned.max;
-                profile.topology_class =
-                    planned.topology_class * max_concurrency + (batch_size - 1U);
-                schedule::capture_mtp_decode_batch(
-                    mtp_state, static_cast<std::int32_t>(batch_size), draft_window,
-                    mtp_causal_attention_envelopes(planned.max, draft_window, capacity),
-                    profile.definition);
+            for (std::uint32_t batch_size = 1; batch_size <= max_concurrency; ++batch_size) {
+                for (const GraphExecutionProfile planned : planned_profiles) {
+                    if (planned.topology_class >= kMtpClassesPerWidth) {
+                        throw std::logic_error("MTP graph profiles exceed the classes of one width");
+                    }
+                    mtp_graphs.profiles.emplace_back();
+                    DecodeGraphProfile& profile    = mtp_graphs.profiles.back();
+                    profile.batch_size             = batch_size;
+                    profile.min_execution_frontier = planned.min;
+                    profile.max_execution_frontier = planned.max;
+                    profile.verify_window          = verify_window;
+                    profile.topology_class =
+                        (verify_window * kMtpClassesPerWidth + planned.topology_class) *
+                            max_concurrency +
+                        (batch_size - 1U);
+                    schedule::capture_mtp_decode_batch(
+                        mtp_state, static_cast<std::int32_t>(batch_size), verify_window,
+                        draft_window,
+                        mtp_causal_attention_envelopes(planned.max, verify_window, draft_window,
+                                                       capacity),
+                        profile.definition);
+                }
             }
         }
     }
@@ -11595,7 +11652,7 @@ void ProgramImplCore::prepare_graphs() {
         const ops::CausalAttentionExecutionEnvelope code_warm_target{
             1, static_cast<std::uint32_t>(std::min<std::uint64_t>(
                    capacity, static_cast<std::uint64_t>(code_warm.max) + draft_window + 1ULL))};
-        prepare_representative(code_warm.min, 1);
+        prepare_representative(code_warm.min, 1, 0);
         device.synchronize();
         schedule::dflash_decode_batch(dflash_state, 1, draft_window,
                                       dflash_envelopes(code_warm.min, code_warm.max, draft_window),
@@ -11686,7 +11743,11 @@ void ProgramImplCore::install_sampling(SequenceState& sequence, RequestControl& 
         .enabled               = speculative_backend != SpeculativeBackend::None,
         .draft_window          = draft_window,
         .accepted_per_position = std::vector<std::uint64_t>(draft_window, 0),
+        .rounds_per_window =
+            adaptive_mtp ? std::vector<std::uint64_t>(draft_window, 0)
+                         : std::vector<std::uint64_t>{},
     };
+    request.mtp_signal = MtpAdaptiveSignal{};
     const bool penalties = request.sampling_host.presence_penalty != 0.0F ||
                            request.sampling_host.frequency_penalty != 0.0F;
     if (penalties) { CUDA_CHECK(cudaMemsetAsync(counts.data, 0, counts.bytes(), device.stream)); }
@@ -12398,7 +12459,6 @@ ProgramImplCore::decode_mtp_batch(std::span<const std::uint32_t> lanes,
         throw std::invalid_argument("MTP batch membership is invalid");
     }
 
-    const std::uint32_t width      = draft_window + 1;
     std::uint32_t maximum_frontier = 0;
     for (std::size_t row = 0; row < lanes.size(); ++row) {
         const std::uint32_t lane = lanes[row];
@@ -12425,6 +12485,33 @@ ProgramImplCore::decode_mtp_batch(std::span<const std::uint32_t> lanes,
         maximum_frontier = std::max(maximum_frontier, sequence.execution_frontier);
     }
 
+    // One batch runs one verification width. A fixed run always verifies the whole draft window;
+    // an adaptive run hands the controller every row's survival evidence and remaining room, then
+    // clamps its choice into the widths the graph holds.
+    std::uint32_t verify_window = draft_window;
+    if (adaptive_mtp) {
+        std::array<const MtpAdaptiveSignal*, kAdaptiveMtpMaximumBatch> signals{};
+        std::array<std::uint32_t, kAdaptiveMtpMaximumBatch> available{};
+        std::array<std::uint32_t, kAdaptiveMtpMaximumBatch> room{};
+        std::uint64_t cohort_key = 14695981039346656037ULL;
+        for (std::size_t row = 0; row < lanes.size(); ++row) {
+            const SequenceState& sequence     = active_sequence(lanes[row]);
+            const std::uint32_t rows_room     = std::min(
+                capacity - sequence.execution_frontier, budgets[row].generated_tokens_remaining);
+            signals[row]   = &requests[lanes[row]].mtp_signal;
+            room[row]      = rows_room;
+            available[row] = std::min(sequence.mtp_draft_count,
+                                      rows_room > 0 ? rows_room - 1U : 0U);
+            cohort_key ^= static_cast<std::uint64_t>(lanes[row]);
+        }
+        const std::uint32_t selected = mtp_controller->select(
+            std::span<const MtpAdaptiveSignal* const>(signals.data(), lanes.size()),
+            std::span<const std::uint32_t>(available.data(), lanes.size()),
+            std::span<const std::uint32_t>(room.data(), lanes.size()), cohort_key);
+        verify_window = std::clamp(selected, minimum_adaptive_window(draft_window), draft_window);
+    }
+    const std::uint32_t width = verify_window + 1U;
+
     const auto started = Clock::now();
     try {
         std::optional<nvtx::ScopedRange> submit_range;
@@ -12432,14 +12519,14 @@ ProgramImplCore::decode_mtp_batch(std::span<const std::uint32_t> lanes,
                              static_cast<std::uint64_t>(lanes.size()));
         DecodeGraphExecutable* executable = nullptr;
         schedule::MtpCausalAttentionEnvelopes envelopes =
-            mtp_causal_attention_envelopes(maximum_frontier, draft_window, capacity);
+            mtp_causal_attention_envelopes(maximum_frontier, verify_window, draft_window, capacity);
         if (use_cuda_graph) {
-            DecodeGraphProfile& profile =
-                select_graph_profile(mtp_graphs, static_cast<std::uint32_t>(lanes.size()),
-                                     maximum_frontier, "MTP batch");
+            DecodeGraphProfile& profile = select_graph_profile(
+                mtp_graphs, static_cast<std::uint32_t>(lanes.size()), maximum_frontier, "MTP batch",
+                verify_window);
             executable = &install_graph_profile(mtp_graphs, profile, "MTP batch");
-            envelopes = mtp_causal_attention_envelopes(profile.max_execution_frontier, draft_window,
-                                                       capacity);
+            envelopes = mtp_causal_attention_envelopes(profile.max_execution_frontier, verify_window,
+                                                       draft_window, capacity);
         }
 
         for (std::size_t row = 0; row < lanes.size(); ++row) {
@@ -12450,7 +12537,7 @@ ProgramImplCore::decode_mtp_batch(std::span<const std::uint32_t> lanes,
                                                     ? budgets[row].generated_tokens_remaining - 1
                                                     : 0;
             const std::uint32_t extent =
-                std::min({sequence.mtp_draft_count, draft_window, max_by_budget,
+                std::min({sequence.mtp_draft_count, verify_window, max_by_budget,
                           capacity - sequence.execution_frontier - 1});
             mtp_host_ingress->anchors[row]        = sequence.ledger.back();
             mtp_host_ingress->base_frontiers[row] = checked_i32(frontier, "MTP batch frontier");
@@ -12458,8 +12545,8 @@ ProgramImplCore::decode_mtp_batch(std::span<const std::uint32_t> lanes,
                 checked_i32(budgets[row].generated_tokens_remaining, "MTP batch remaining budget");
             mtp_host_ingress->current_extents[row]      = static_cast<std::int32_t>(extent);
             mtp_host_ingress->target_valid_columns[row] = static_cast<std::int32_t>(extent + 1);
-            for (std::uint32_t j = 0; j < draft_window; ++j) {
-                mtp_host_ingress->current_drafts[row * draft_window + j] =
+            for (std::uint32_t j = 0; j < verify_window; ++j) {
+                mtp_host_ingress->current_drafts[row * verify_window + j] =
                     j < extent ? sequence.mtp_drafts[j] : sequence.ledger.back();
             }
             for (std::uint32_t j = 0; j < width; ++j) {
@@ -12481,19 +12568,20 @@ ProgramImplCore::decode_mtp_batch(std::span<const std::uint32_t> lanes,
                                       std::min(capacity, frontier + extent + draft_window));
         }
 
+        qwen3_6::MtpDecodeState frame = io.mtp_decode->verification_view(verify_window);
         schedule::MtpBatchContext schedule_state{{device, model, work, state_images->linear(),
                                                   replay_records ? &*replay_records : nullptr, io,
                                                   prefill_hidden, prefill_chunk, proposal_head},
                                                  decoder->text_kv,
                                                  *decoder->mtp_cache(),
-                                                 *io.mtp_decode,
+                                                 frame,
                                                  *mtp_host_ingress,
                                                  *mtp_host_egress,
                                                  state_images->continuation_hidden_store()};
 
         mark_workspace_usage(workspace_plan.mtp_round);
         schedule::mtp_decode_batch(schedule_state, static_cast<std::int32_t>(lanes.size()),
-                                   draft_window, envelopes, executable);
+                                   verify_window, draft_window, envelopes, executable);
         submit_range.reset();
         timing.begin_wait();
         {
@@ -12537,15 +12625,27 @@ ProgramImplCore::decode_mtp_batch(std::span<const std::uint32_t> lanes,
                         1;
                 }
             }
+            if (adaptive_mtp) {
+                request.mtp_signal.observe(pcur, static_cast<std::uint32_t>(accepted_i));
+                request.speculative_stats.rounds_per_window[verify_window - 1U] += 1;
+                if (mtp_controller->transitioned()) {
+                    request.speculative_stats.window_transitions += 1;
+                }
+            }
             request.pending = PendingCandidate{
                 .kind          = PendingKind::Speculative,
                 .base_E        = base_E,
                 .base_S        = base_S,
                 .prompt_tokens = 0,
                 .produced      = static_cast<std::uint32_t>(count_i),
+                .record_width  = width,
             };
             request.lifecycle = Lifecycle::Pending;
             request.timings.decode_seconds += seconds;
+        }
+        if (mtp_controller) {
+            mtp_controller->observe_execution(static_cast<std::uint32_t>(lanes.size()),
+                                              verify_window, seconds);
         }
         return runtime::BatchedGeneratedRound{
             .tokens     = std::span<const TokenId>(mtp_host_egress->licensed_tokens.data(),
@@ -12738,6 +12838,7 @@ ProgramImplCore::decode_dflash_batch(std::span<const std::uint32_t> lanes,
                                  .base_S        = base_S,
                                  .prompt_tokens = 0,
                                  .produced      = static_cast<std::uint32_t>(count_i),
+                                 .record_width  = width,
             };
             request.lifecycle = Lifecycle::Pending;
             request.timings.decode_seconds += seconds;

@@ -184,11 +184,15 @@ void ordinary_decode_batch(OrdinaryBatchContext& state, std::int32_t batch_size,
 
 // Executes one exact-B MTP verification/alignment/proposal transaction. Each row may carry a
 // different current and next proposal extent while the model traversal remains batched.
-void capture_mtp_decode_batch(MtpBatchContext& state, std::int32_t batch_size, std::uint32_t k,
+// "verify_window" is how many drafts this round verifies; "draft_window" is the startup-fixed K the
+// round still proposes, so the frame must already be a verification_view(verify_window).
+void capture_mtp_decode_batch(MtpBatchContext& state, std::int32_t batch_size,
+                              std::uint32_t verify_window, std::uint32_t draft_window,
                               MtpCausalAttentionEnvelopes envelopes,
                               DecodeGraphDefinition& definition);
-void mtp_decode_batch(MtpBatchContext& state, std::int32_t batch_size, std::uint32_t k,
-                      MtpCausalAttentionEnvelopes envelopes, DecodeGraphExecutable* executable);
+void mtp_decode_batch(MtpBatchContext& state, std::int32_t batch_size, std::uint32_t verify_window,
+                      std::uint32_t draft_window, MtpCausalAttentionEnvelopes envelopes,
+                      DecodeGraphExecutable* executable);
 
 [[nodiscard]] DFlashFeatureSink
 dflash_feature_sink(PrefillContext& state, DFlashFeatureSink::PrefillConsumer consume_prefill = {});

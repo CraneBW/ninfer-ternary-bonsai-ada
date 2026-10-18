@@ -44,7 +44,10 @@ Vision is disabled by default: its weights and Vision-specific unified-workspace
 allocated, and media requests and token-count requests fail with HTTP 400 `vision_disabled`. Add
 `--vision` when the server must accept image or video input. Speculative residency is likewise
 frozen by `--spec mtp|dflash|dflash2` and `--draft-tokens`; omitting `--spec` loads no speculative backend.
-`--lm-head-draft` additionally loads the optimized proposal head. DFlash on 35B-A3B and DFlash2 on Qwen3.8-27B can be combined
+`--lm-head-draft` additionally loads the optimized proposal head. `--adaptive-mtp` keeps
+`--draft-tokens` as the ceiling and lets each MTP round verify a narrower draft prefix when the
+measured survival of the drafts it proposed, weighted against the round's measured cost, favors one;
+the committed greedy output is unchanged. DFlash on 35B-A3B and DFlash2 on Qwen3.8-27B can be combined
 with `--vision`; each accelerates generated-text decode after multimodal prefill, while Vision encode
 and prefill remain outside speculative acceleration. A later request cannot enable a capability
 omitted at startup.
@@ -794,7 +797,8 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--kvmem-budget N` | positive KVMem window in tokens; omitted keeps the whole context | whole context |
 | `--kvmem-gen-reserve N` | pool room kept free for decoding, in tokens; `0` disables generation-time reclaim | `8192` |
 | `--spec mtp\|dflash\|dflash2` | speculative backend | off |
-| `--draft-tokens N` | MTP `1..5`; DFlash/DFlash2 `1..15` | unset |
+| `--draft-tokens N` | MTP `1..7`; DFlash/DFlash2 `1..15` | unset |
+| `--adaptive-mtp` | MTP verifies `3..--draft-tokens` drafts per round, chosen per request from measured draft survival and round cost | off |
 | `--lm-head-draft` | optimized proposal head | off |
 | `--default-max-tokens N` | output limit when omitted by a request | `8192` |
 | `--default-thinking-budget N` | positive thinking cap inherited by thinking-enabled requests | unset |
@@ -976,7 +980,9 @@ Aborted planning attempts are not published.
 `request_done.timings_seconds` contains `prepare`, `ttft`, `vision`, `prefill`, `decode`, and `total`
 as full-precision JSON numbers. Its `speculative` object contains `backend`, `draft_window`, `rounds`,
 `drafted_tokens`, `accepted_tokens`, `fallback_steps`, and `accepted_per_position`. Rates can be
-derived downstream from raw token counts and seconds instead of rounded stderr strings.
+derived downstream from raw token counts and seconds instead of rounded stderr strings. An adaptive
+MTP request also carries `adaptive_speculative` with `rounds_per_window` (rounds served at each
+verification width, indexed from width one) and `window_transitions`. A fixed draft window omits it.
 
 For `server_start.memory`, `workspace.capacity_bytes` is the only physical workspace allocation.
 When Vision is enabled, `vision_workspace` reports the aggregate prompt and maximum-item token

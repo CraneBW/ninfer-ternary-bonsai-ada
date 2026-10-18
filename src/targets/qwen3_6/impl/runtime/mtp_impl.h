@@ -69,16 +69,21 @@ void mtp_bridge_and_propose(PrefillContext& state, const Tensor& next_token,
     }
 }
 
-auto mtp_decode_batch_body(MtpBatchContext& state, std::int32_t batch_size, std::uint32_t k,
+auto mtp_decode_batch_body(MtpBatchContext& state, std::int32_t batch_size,
+                           std::uint32_t verify_window, std::uint32_t draft_window,
                            MtpCausalAttentionEnvelopes envelopes) {
-    return [&state, batch_size, k, envelopes] {
+    return [&state, batch_size, verify_window, draft_window, envelopes] {
         if (batch_size <= 0 || batch_size > static_cast<std::int32_t>(kMaximumConcurrency) ||
-            k == 0 || k > kMtpDecodeMaximumDrafts) {
+            verify_window == 0 || verify_window > draft_window ||
+            draft_window > kMtpDecodeMaximumDrafts) {
             throw std::logic_error("MTP decode batch state is incomplete");
         }
 
         qwen3_6::MtpDecodeState& frame = state.frame;
-        const std::int32_t width       = static_cast<std::int32_t>(k) + 1;
+        const std::int32_t width       = static_cast<std::int32_t>(verify_window) + 1;
+        if (frame.current_drafts.ne[0] != static_cast<std::int32_t>(verify_window)) {
+            throw std::logic_error("MTP decode frame does not match the round's verification width");
+        }
         CUDA_CHECK(cudaMemcpyAsync(frame.ingress.data, &state.host_ingress,
                                    sizeof(qwen3_6::MtpDecodeIngress), cudaMemcpyHostToDevice,
                                    state.execution.device.stream));
@@ -152,13 +157,21 @@ auto mtp_decode_batch_body(MtpBatchContext& state, std::int32_t batch_size, std:
         }
 
         {
+            // The round proposes only what the next round can verify: an adaptive round verifies
+            // fewer drafts than the draft window, so it also proposes fewer. Running the full
+            // draft window here would keep the autoregressive steps of a fixed-width round and
+            // give back the saving the narrower verification bought. One step of growth is
+            // enough for the controller's normal widening rule; a confident probe that jumps two
+            // drafts verifies the shorter proposal it has.
+            const std::uint32_t proposal_drafts = std::min(draft_window, verify_window + 1U);
             nvtx::ScopedRange draft_range(nvtx::Name::DecodeMtpDraft, nvtx::Category::Mtp,
-                                          static_cast<std::uint64_t>(k) * batch_size);
-            ops::mtp_prepare_next_round(verify_ids, anchors, accepted, frontiers, budgets,
-                                        licensed_counts, rope_deltas, alignment_ids, next_extents,
-                                        ar_positions, ar_rope_positions, ar_valid_columns,
-                                        static_cast<std::int32_t>(state.text_cache.max_context()),
-                                        state.execution.device.stream);
+                                          static_cast<std::uint64_t>(proposal_drafts) * batch_size);
+            ops::mtp_prepare_next_round(
+                verify_ids, anchors, accepted, frontiers, budgets, licensed_counts, rope_deltas,
+                alignment_ids, next_extents, ar_positions, ar_rope_positions, ar_valid_columns,
+                static_cast<std::int32_t>(proposal_drafts),
+                static_cast<std::int32_t>(state.text_cache.max_context()),
+                state.execution.device.stream);
             card.mtp_forward_decode_batch(alignment_ids, target_hidden, target_positions,
                                           target_rope, licensed_counts, mtp_rows, envelopes.batch,
                                           alignment_hidden);
@@ -168,7 +181,7 @@ auto mtp_decode_batch_body(MtpBatchContext& state, std::int32_t batch_size, std:
             Tensor proposal_logits = frame.proposal_logits.slice(1, 0, batch_size);
             Tensor draft0          = next_drafts.slice(1, 0, 1).view({batch_size});
             card.mtp_propose_batch(ar_hidden, proposal_logits, draft0);
-            for (std::uint32_t step = 0; step + 1 < k; ++step) {
+            for (std::uint32_t step = 0; step + 1 < proposal_drafts; ++step) {
                 Tensor previous =
                     next_drafts.slice(1, static_cast<std::int32_t>(step), 1).view({batch_size});
                 Tensor next =
@@ -197,16 +210,18 @@ auto mtp_decode_batch_body(MtpBatchContext& state, std::int32_t batch_size, std:
     };
 }
 
-void capture_mtp_decode_batch(MtpBatchContext& state, std::int32_t batch_size, std::uint32_t k,
+void capture_mtp_decode_batch(MtpBatchContext& state, std::int32_t batch_size,
+                              std::uint32_t verify_window, std::uint32_t draft_window,
                               MtpCausalAttentionEnvelopes envelopes,
                               DecodeGraphDefinition& definition) {
-    auto body = mtp_decode_batch_body(state, batch_size, k, envelopes);
+    auto body = mtp_decode_batch_body(state, batch_size, verify_window, draft_window, envelopes);
     capture_graph(state, definition, body);
 }
 
-void mtp_decode_batch(MtpBatchContext& state, std::int32_t batch_size, std::uint32_t k,
-                      MtpCausalAttentionEnvelopes envelopes, DecodeGraphExecutable* executable) {
-    auto body = mtp_decode_batch_body(state, batch_size, k, envelopes);
+void mtp_decode_batch(MtpBatchContext& state, std::int32_t batch_size, std::uint32_t verify_window,
+                      std::uint32_t draft_window, MtpCausalAttentionEnvelopes envelopes,
+                      DecodeGraphExecutable* executable) {
+    auto body = mtp_decode_batch_body(state, batch_size, verify_window, draft_window, envelopes);
     run_prepared(state, executable, body);
 }
 

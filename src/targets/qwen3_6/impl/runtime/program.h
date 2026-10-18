@@ -12,6 +12,7 @@
 
 #include "targets/qwen3_6/impl/runtime/layouts.h"
 #include "targets/qwen3_6/impl/runtime/dflash_context.h"
+#include "targets/qwen3_6/impl/runtime/mtp_adaptive.h"
 #include "targets/qwen3_6/impl/runtime/host_kv_extent_store.h"
 #include "targets/qwen3_6/impl/runtime/logical_kv_store.h"
 #include "targets/qwen3_6/impl/runtime/state_image_store.h"
@@ -352,6 +353,9 @@ struct PendingCandidate {
     std::uint32_t base_S        = 0;
     std::uint32_t prompt_tokens = 0;
     std::uint32_t produced      = 0;
+    // Width the producing round packed its GDN replay records with. A speculative round can verify
+    // fewer columns than the draft window, and the fold has to read the same row stride.
+    std::uint32_t record_width = 1;
 };
 
 enum class Lifecycle : std::uint8_t {
@@ -397,6 +401,8 @@ struct DecodeGraphProfile {
     std::uint32_t batch_size             = 1;
     std::uint32_t min_execution_frontier = 0;
     std::uint32_t max_execution_frontier = 0;
+    // MTP verification width this definition is captured for (0 for the fixed-width backends).
+    std::uint32_t verify_window          = 0;
     std::uint32_t topology_class         = 0;
     DecodeGraphDefinition definition;
 };
@@ -487,6 +493,8 @@ struct RequestControl {
     ops::SamplingConfig sampling_host;
     GenerationTimings timings;
     SpeculativeStats speculative_stats;
+    // Per-request survival evidence feeding the adaptive MTP width controller.
+    MtpAdaptiveSignal mtp_signal;
     detail::PhysicalResources active_resources;
     detail::PhysicalResources optional_resources;
     bool publish_continuation = true;
@@ -664,6 +672,9 @@ public:
     const std::uint32_t shared_prefix_capacity;
     const std::uint32_t prefill_chunk;
     const std::uint32_t draft_window;
+    // Adaptive MTP verifies a per-round width inside [3, draft_window]; a fixed round always
+    // verifies the full window.
+    const bool adaptive_mtp;
     const SpeculativeBackend speculative_backend;
     const KvCacheStorage kv_storage;
     const ProposalHead proposal_head;
@@ -692,6 +703,8 @@ public:
     std::optional<GdnReplayRecords> replay_records;
     std::optional<ops::GdnReplayFoldPlan> replay_fold;
     std::optional<DFlashPersistentState> dflash;
+    // Present only for adaptive MTP: one controller owns the batch's verification width.
+    std::optional<MtpAdaptiveBatchController> mtp_controller;
     qwen3_6::RoundState io;
     Tensor prefill_hidden;
     std::optional<Tensor> score_hidden;
