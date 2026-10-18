@@ -468,6 +468,7 @@ if(NINFER_BUILD_SERVE)
     serve/translate.cpp
     serve/generation_service.cpp
     serve/request_events.cpp
+    serve/serve_metrics.cpp
     serve/operational_log.cpp
     serve/request_log.cpp
     serve/http_server.cpp

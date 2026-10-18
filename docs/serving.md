@@ -54,6 +54,8 @@ omitted at startup.
 | Method and path | Behavior |
 |---|---|
 | `GET /health` | Engine readiness |
+| `GET /metrics` | Prometheus text exposition of serving, context-cache, KVMem, and capture-skip counters |
+| `GET /slots` | JSON array of in-flight requests |
 | `GET /v1/models` | configured OpenAI model alias and effective `max_model_len` |
 | `GET /v1/models/{id}` | lookup of the configured alias and effective `max_model_len` |
 | `POST /v1/chat/completions` | OpenAI-style chat generation |
@@ -68,6 +70,14 @@ omitted at startup.
 `GET /health` returns HTTP 200 with `{"status":"ok"}` while the Engine can accept work. After an
 Engine-wide failure it returns HTTP 503 with `{"status":"unavailable"}`. Temporary queue
 saturation does not make the Engine unavailable. The endpoint remains unauthenticated.
+
+`GET /metrics` exposes the same counters the server logs, in the Prometheus text format. The
+`llamacpp:` prefix keeps the usual prompt, generation, and queue counters compatible with existing
+dashboards; `ninfer:` counters cover context-cache occupancy and reuse, KVMem plans, compactions,
+stage-in/stage-out blocks, scored blocks, and the working-set window, and `ninfer:capture_skips`
+breaks skipped captures down by reason. `GET /slots` lists the requests the Engine is currently
+processing, with protocol, model, prompt-token count, stream mode, and elapsed time. Neither endpoint
+reads or changes the request log, and both remain unauthenticated.
 
 Every OpenAI-compatible response carries a unique `x-request-id` header, including streaming and
 error responses. Anthropic endpoints use their separate `request-id` contract.
@@ -740,7 +750,8 @@ curl http://127.0.0.1:8080/v1/messages/count_tokens \
 ## Authentication and CORS
 
 Pass `--api-key VALUE` to require the same value as an OpenAI bearer token or Anthropic
-`x-api-key` header. `GET /health` and CORS preflight requests remain unauthenticated.
+`x-api-key` header. `GET /health`, `GET /metrics`, `GET /slots`, and CORS preflight requests remain
+unauthenticated.
 
 ```bash
 curl http://127.0.0.1:8080/v1/models \

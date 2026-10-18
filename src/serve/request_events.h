@@ -23,6 +23,7 @@ struct RequestLogContext {
     ToolChoice tool_choice;
     bool has_tool_history = false;
     bool enable_thinking  = true;
+    int prompt_tokens     = 0;
     std::optional<std::uint32_t> thinking_budget;
     std::optional<RequestedReasoningEffort> requested_reasoning_effort;
     std::optional<ninfer::ReasoningEffort> resolved_reasoning_effort;

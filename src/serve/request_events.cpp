@@ -27,6 +27,7 @@ RequestLogContext make_request_log_context(std::uint64_t id, std::string protoco
     context.preserve_thinking                  = prepared.preserve_thinking;
     context.preserve_thinking_semantic_change  = metadata.preserve_thinking_semantic_change;
     context.sampling                           = prepared.sampling;
+    context.prompt_tokens                      = prepared.prompt_tokens;
     context.acquisition_seconds                = prepared.acquisition_seconds;
     context.preparation                        = prepared.preparation;
     return context;

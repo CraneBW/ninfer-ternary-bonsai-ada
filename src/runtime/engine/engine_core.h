@@ -1244,7 +1244,8 @@ private:
                             ? EngineRequestState::ControlReady
                             : EngineRequestState::DecodeReady;
                     if (terminal_in_batch) {
-                        instance_.program->skip_capture(std::move(*committed.captures[row]));
+                        instance_.program->skip_capture(std::move(*committed.captures[row]),
+                                                        CaptureSkipReason::Terminal);
                         request->model_state = post_capture_state;
                     } else {
                         reserve_active_capture(request, std::move(*committed.captures[row]),

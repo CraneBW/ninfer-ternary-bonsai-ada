@@ -1027,7 +1027,11 @@ public:
         return false;
     }
 
-    void skip_capture(FakeCaptureOffer&&) { ++skipped_captures; }
+    void skip_capture(FakeCaptureOffer&&, ninfer::CaptureSkipReason reason =
+                                                 ninfer::CaptureSkipReason::Unspecified) {
+        ++skipped_captures;
+        last_skip_reason = reason;
+    }
 
     [[nodiscard]] ContextTransactionReserveStatus
     reserve_active_capture(FakeCaptureOffer&&, const FakeSharedPrefixHandle*,
@@ -1147,6 +1151,7 @@ public:
     std::uint64_t finish_calls                = 0;
     std::uint64_t abort_calls                 = 0;
     std::uint64_t skipped_captures            = 0;
+    ninfer::CaptureSkipReason last_skip_reason = ninfer::CaptureSkipReason::Unspecified;
     std::size_t pressure_target_count_peak    = 0;
     std::uint32_t finish_frontier             = 16;
     std::uint32_t started_source_id           = 0;
@@ -3198,6 +3203,7 @@ void test_terminal_settlement_waits_for_open_resource_transaction() {
         manager.reserve_active_capture(program, active.lane, FakeCaptureOffer{.id = 9}, true, {});
     require(capture == FakeManager::ActiveCaptureReserveResult::Skipped &&
                 program.skipped_captures == 1 &&
+                program.last_skip_reason == ninfer::CaptureSkipReason::TransactionBusy &&
                 manager.context_transaction_kind() ==
                     ninfer::runtime::ContextTransactionKind::Materialization,
             "optional capture was not skipped behind the open materialization");

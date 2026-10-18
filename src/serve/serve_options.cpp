@@ -131,7 +131,7 @@ std::string serve_usage_text(const char* argv0) {
            "content mid-generation; a pool that cannot afford it clamps it down\n"
            "       --no-prefix-reuse disables compatible-prefix caching (enabled by default)\n"
            "       context cache defaults: device-state=max-concurrency, private=2x concurrency, "
-           "shared=max(max-concurrency,4), anchors=2; Host state=8 slots, Host KV=8192 MiB\n"
+           "shared=max(max-concurrency,4), anchors=2; Host state=max(8, 2x max-concurrency) slots, Host KV=8192 MiB\n"
            "       --device-state-slots is extra checkpoint capacity beyond active lanes; "
            "--host-kv-mib uses MiB\n"
            "       --default-thinking-budget caps model-origin thinking for enabled requests; "

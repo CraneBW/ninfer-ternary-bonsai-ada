@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -1088,9 +1089,100 @@ struct RuntimeHostWorkStats {
     std::uint64_t stats_publication_invocations = 0;
 };
 
+// Why the context cache declined to publish a prompt frontier. The scheduler skips a capture
+// when it cannot admit one; these counts keep that decision observable instead of hiding it in
+// an aggregate skip count.
+enum class CaptureSkipReason : std::uint8_t {
+    Cancelled,
+    NothingToPublish,
+    InvalidPressure,
+    PhysicalPeak,
+    TransactionBusy,
+    PrivateBaselineUnavailable,
+    NoAdmissiblePlan,
+    Terminal,
+    Unspecified,
+    Count,
+};
+
+[[nodiscard]] inline constexpr const char*
+capture_skip_reason_name(CaptureSkipReason reason) noexcept {
+    switch (reason) {
+    case CaptureSkipReason::Cancelled:
+        return "cancelled";
+    case CaptureSkipReason::NothingToPublish:
+        return "nothing_to_publish";
+    case CaptureSkipReason::InvalidPressure:
+        return "invalid_pressure";
+    case CaptureSkipReason::PhysicalPeak:
+        return "physical_peak";
+    case CaptureSkipReason::TransactionBusy:
+        return "transaction_busy";
+    case CaptureSkipReason::PrivateBaselineUnavailable:
+        return "private_baseline_unavailable";
+    case CaptureSkipReason::NoAdmissiblePlan:
+        return "no_admissible_plan";
+    case CaptureSkipReason::Terminal:
+        return "terminal";
+    case CaptureSkipReason::Unspecified:
+        return "unspecified";
+    case CaptureSkipReason::Count:
+        break;
+    }
+    return "unknown";
+}
+
+struct CaptureSkipStats {
+    static constexpr std::size_t kReasonCount =
+        static_cast<std::size_t>(CaptureSkipReason::Count);
+    std::array<std::uint64_t, kReasonCount> by_reason{};
+    std::uint64_t total = 0;
+
+    void note(CaptureSkipReason reason) noexcept {
+        const std::size_t index = static_cast<std::size_t>(reason);
+        if (index < by_reason.size()) { ++by_reason[index]; }
+        ++total;
+    }
+
+    [[nodiscard]] std::uint64_t count(CaptureSkipReason reason) const noexcept {
+        const std::size_t index = static_cast<std::size_t>(reason);
+        return index < by_reason.size() ? by_reason[index] : 0;
+    }
+};
+
+// KVMem residency and retrieval evidence. The block counters are lifetime totals; window_tokens
+// is the most recent successful compaction's traffic (the newest window across the two KV address
+// spaces), and host_bytes is the arena those evicted blocks occupy.
+struct KvMemUsage {
+    std::uint64_t plans            = 0;
+    std::uint64_t compactions      = 0;
+    std::uint64_t compact_skips    = 0;
+    std::uint64_t stage_in_blocks  = 0;
+    std::uint64_t stage_out_blocks = 0;
+    std::uint64_t scoreable_blocks = 0;
+    std::uint64_t zero_score_blocks = 0;
+    std::uint32_t window_tokens     = 0;
+    std::size_t host_bytes          = 0;
+
+    void merge(const KvMemUsage& other) noexcept {
+        plans += other.plans;
+        compactions += other.compactions;
+        compact_skips += other.compact_skips;
+        stage_in_blocks += other.stage_in_blocks;
+        stage_out_blocks += other.stage_out_blocks;
+        scoreable_blocks += other.scoreable_blocks;
+        zero_score_blocks += other.zero_score_blocks;
+        if (other.window_tokens > window_tokens) { window_tokens = other.window_tokens; }
+        host_bytes += other.host_bytes;
+    }
+};
+
 // Monotonic execution counters, boundary-consistent current gauges, and explicitly named last
 // decision observations. Consumers derive interval counters by subtracting two snapshots.
 struct RuntimeStats {
+    // Context-cache residency evidence and admission outcomes.
+    KvMemUsage kvmem;
+    CaptureSkipStats capture_skips;
     RuntimeHostWorkStats host_work;
     // Actual prompt tokens evaluated by prefill; reused checkpoint-prefix tokens are excluded.
     std::uint64_t computed_prefill_tokens = 0;

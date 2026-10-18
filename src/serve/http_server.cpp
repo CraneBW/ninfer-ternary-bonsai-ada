@@ -231,6 +231,7 @@ HttpServer::HttpServer(ServeOptions options, std::shared_ptr<spdlog::logger> log
 
 HttpServer::RequestLifecycle::RequestLifecycle(HttpServer& owner, RequestLogContext context)
     : owner_(&owner), context_(std::move(context)) {
+    owner_->metrics_.begin_request(context_.id, context_);
     owner_->record_request_start(context_);
 }
 
@@ -240,7 +241,9 @@ bool HttpServer::RequestLifecycle::claim(State terminal) noexcept {
 }
 
 void HttpServer::RequestLifecycle::done(const GenerationOutcome& outcome) {
-    if (claim(State::Done)) { owner_->record_request_done(context_, outcome); }
+    if (!claim(State::Done)) { return; }
+    owner_->metrics_.record(outcome);
+    owner_->record_request_done(context_, outcome);
 }
 
 void HttpServer::RequestLifecycle::failure(const RequestFailure& failure) {
@@ -352,7 +355,8 @@ void HttpServer::register_routes() {
 
     server_.set_pre_routing_handler([this](const httplib::Request& req, httplib::Response& res) {
         ensure_openai_request_id(req, res);
-        if (options_.api_key.empty() || req.path == "/health" || req.method == "OPTIONS") {
+        if (options_.api_key.empty() || req.path == "/health" || req.path == "/metrics" ||
+            req.path == "/slots" || req.method == "OPTIONS") {
             return httplib::Server::HandlerResponse::Unhandled;
         }
         // Accept both the OpenAI-style bearer token and the Anthropic-style
@@ -431,6 +435,10 @@ void HttpServer::register_routes() {
         res.set_content(nlohmann::json{{"status", available ? "ok" : "unavailable"}}.dump(),
                         "application/json");
     });
+    server_.Get("/metrics",
+                [this](const httplib::Request&, httplib::Response& res) { handle_metrics(res); });
+    server_.Get("/slots",
+                [this](const httplib::Request&, httplib::Response& res) { handle_slots(res); });
     server_.Get("/v1/models", [this](const httplib::Request& req, httplib::Response& res) {
         handle_models(req, res);
     });
@@ -475,6 +483,25 @@ void HttpServer::register_routes() {
     server_.Post("/v1/messages", [this](const httplib::Request& req, httplib::Response& res) {
         handle_messages(req, res);
     });
+}
+
+void HttpServer::handle_metrics(httplib::Response& res) const {
+    if (service_ == nullptr) {
+        res.status = 503;
+        res.set_content("service unavailable\n", "text/plain; version=0.0.4; charset=utf-8");
+        return;
+    }
+    res.set_content(metrics_.render(service_->runtime_stats(), service_->engine_options()),
+                    "text/plain; version=0.0.4; charset=utf-8");
+}
+
+void HttpServer::handle_slots(httplib::Response& res) const {
+    if (service_ == nullptr) {
+        res.status = 503;
+        res.set_content(R"({"error":"service unavailable"})", "application/json");
+        return;
+    }
+    res.set_content(metrics_.render_slots_json(), "application/json");
 }
 
 void HttpServer::handle_models(const httplib::Request&, httplib::Response& res) const {

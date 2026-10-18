@@ -5,6 +5,7 @@
 #include "core/paged_kv_cache.h"
 #include "kvmem/kvmem_blocks.h"
 #include "kvmem/kvmem_bridge.h"
+#include "ninfer/types.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -2161,7 +2162,12 @@ private:
             std::fprintf(stderr, "KVMEM_TRACE score_failed %s\n", error.what());
             return;
         }
-        for (std::uint32_t id = 0; id < n; ++id) { repo.add_scores(id, scores[id], 0.0); }
+        for (std::uint32_t id = 0; id < n; ++id) {
+            repo.add_scores(id, scores[id], 0.0);
+            if (pages[id] < 0) { continue; }
+            ++kvmem_scoreable_blocks_;
+            if (scores[id] == 0.0F) { ++kvmem_zero_score_blocks_; }
+        }
         if (std::getenv("NINFER_KVMEM_TRACE") != nullptr) {
             for (std::uint32_t id = 0; id < n; ++id) {
                 std::fprintf(stderr, "KVMEM_TRACE score id=%u page=%d pos=%d retrieval=%.5f\n", id,
@@ -2212,6 +2218,7 @@ public:
                                  page, references, budget_tokens,
                                  static_cast<unsigned long long>(ledger_tokens));
                 }
+                ++kvmem_compact_skips_;
                 return 0;
             }
         }
@@ -2435,6 +2442,9 @@ public:
             repo.set_tier(rm.block_id, ninfer::kvmem::KvTier::Gpu);
         }
         kvmem_reuse_floors_[index] = reuse_floor_slots;
+        kvmem_stage_out_blocks_ += plan.stage_out.size();
+        kvmem_stage_in_blocks_ += plan.stage_in.size();
+        kvmem_window_tokens_ = kv_window;
         ++kvmem_compactions_;
         return kv_window;
     }
@@ -2520,6 +2530,22 @@ public:
         return kvmem_query_.valid() ? &kvmem_query_ : nullptr;
     }
 
+    // Read-only diagnostics for GET /metrics: lifetime compaction/retrieval counters and the last
+    // window's residency. A store that was never enabled reports zeroes.
+    [[nodiscard]] KvMemUsage kvmem_usage() const noexcept {
+        KvMemUsage usage;
+        usage.plans             = kvmem_plans_;
+        usage.compactions       = kvmem_compactions_;
+        usage.compact_skips     = kvmem_compact_skips_;
+        usage.stage_in_blocks   = kvmem_stage_in_blocks_;
+        usage.stage_out_blocks  = kvmem_stage_out_blocks_;
+        usage.scoreable_blocks  = kvmem_scoreable_blocks_;
+        usage.zero_score_blocks = kvmem_zero_score_blocks_;
+        usage.window_tokens     = kvmem_window_tokens_;
+        usage.host_bytes        = kvmem_host_arena_ ? kvmem_host_arena_->occupied_bytes() : 0;
+        return usage;
+    }
+
 private:
     bool kvmem_enabled_ = false;
     std::uint32_t kvmem_budget_ = 0;  // NINFER_KVMEM_BUDGET tokens; 0 = unbounded
@@ -2539,8 +2565,14 @@ private:
     ninfer::kvmem::KvmemQueryCapture kvmem_query_{};
     // Per address: the lowest window slot a resumed request may continue from.
     std::vector<std::uint32_t> kvmem_reuse_floors_;
-    std::uint64_t kvmem_plans_       = 0;
-    std::uint64_t kvmem_compactions_ = 0;
+    std::uint64_t kvmem_plans_             = 0;
+    std::uint64_t kvmem_compactions_       = 0;
+    std::uint64_t kvmem_compact_skips_     = 0;
+    std::uint64_t kvmem_stage_in_blocks_   = 0;
+    std::uint64_t kvmem_stage_out_blocks_  = 0;
+    std::uint64_t kvmem_scoreable_blocks_  = 0;
+    std::uint64_t kvmem_zero_score_blocks_ = 0;
+    std::uint32_t kvmem_window_tokens_     = 0;
 
     LogicalKVPageStore* pages_    = nullptr;
     KVExecutionTablePool* tables_ = nullptr;

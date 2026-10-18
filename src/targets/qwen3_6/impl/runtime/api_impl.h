@@ -473,8 +473,8 @@ bool Program<Variant>::shared_capture_matches(const CaptureOffer<Variant>& offer
 }
 
 template <>
-void Program<Variant>::skip_capture(CaptureOffer<Variant>&& offer) {
-    impl_->skip_capture(std::move(offer));
+void Program<Variant>::skip_capture(CaptureOffer<Variant>&& offer, CaptureSkipReason reason) {
+    impl_->skip_capture(std::move(offer), reason);
 }
 
 template <>
@@ -572,6 +572,16 @@ runtime::ProgramResourceRevision Program<Variant>::resource_revision() const noe
 template <>
 PhysicalUsageSnapshot Program<Variant>::physical_usage() const noexcept {
     return impl_->physical_usage();
+}
+
+template <>
+KvMemUsage Program<Variant>::kvmem_usage() const noexcept {
+    return impl_->kvmem_usage();
+}
+
+template <>
+CaptureSkipStats Program<Variant>::capture_skip_stats() const noexcept {
+    return impl_->capture_skip_stats();
 }
 
 template <>

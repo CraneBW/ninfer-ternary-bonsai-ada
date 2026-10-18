@@ -896,7 +896,8 @@ public:
         std::span<const runtime::PlanningOwnerId> shared_owner_ids);
     [[nodiscard]] bool shared_capture_matches(const CaptureOffer<Variant>& offer,
                                               const SharedPrefixHandle<Variant>& shared) const;
-    void skip_capture(CaptureOffer<Variant>&& offer);
+    void skip_capture(CaptureOffer<Variant>&& offer,
+                      CaptureSkipReason reason = CaptureSkipReason::Unspecified);
     [[nodiscard]] runtime::ContextTransactionReserveStatus reserve_active_capture(
         CaptureOffer<Variant>&& offer, const SharedPrefixHandle<Variant>* exact_shared,
         const SharedPrefixHandle<Variant>* replacement,
@@ -935,6 +936,8 @@ public:
     isolated_request_feasible(const RequestBasePlan<Variant>& base) const noexcept;
     [[nodiscard]] runtime::ProgramResourceRevision resource_revision() const noexcept;
     [[nodiscard]] PhysicalUsageSnapshot physical_usage() const noexcept;
+    [[nodiscard]] KvMemUsage kvmem_usage() const noexcept;
+    [[nodiscard]] CaptureSkipStats capture_skip_stats() const noexcept;
     [[nodiscard]] MemorySummary memory_summary() const noexcept;
     void reset_memory_peaks() noexcept;
 

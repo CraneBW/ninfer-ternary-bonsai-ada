@@ -7933,9 +7933,10 @@ ProgramImplCore::make_capture_physical_candidate(const CaptureAssessment& assess
     return details;
 }
 
-void ProgramImplCore::skip_capture(CaptureOffer&& offer) {
+void ProgramImplCore::skip_capture(CaptureOffer&& offer, CaptureSkipReason reason) {
     if (!valid_capture_offer(offer)) { throw std::logic_error("capture offer is not skippable"); }
     const std::uint32_t lane = ContractAccess::lane(offer).value;
+    capture_skips_.note(reason);
     ContractAccess::consume(offer);
     RequestControl::Prefill& prefill = *requests[lane].prefill;
     prefill.pending_capture_offer    = 0;
@@ -7977,13 +7978,13 @@ runtime::ContextTransactionReserveStatus ProgramImplCore::reserve_active_capture
         throw std::logic_error("capture transaction is not reservable");
     }
     if (cancellation.requested()) {
-        skip_capture(std::move(offer));
+        skip_capture(std::move(offer), CaptureSkipReason::Cancelled);
         return runtime::ContextTransactionReserveStatus::Aborted;
     }
     const CaptureAssessment assessment = inspect_capture(
         offer, exact_shared, replacement, private_replacement, permit_shared_publication);
     if (!assessment.publishes_private && !assessment.publishes_shared) {
-        skip_capture(std::move(offer));
+        skip_capture(std::move(offer), CaptureSkipReason::NothingToPublish);
         return runtime::ContextTransactionReserveStatus::Aborted;
     }
     const CapturePressureCandidateImpl* pressure_details =
@@ -7993,11 +7994,11 @@ runtime::ContextTransactionReserveStatus ProgramImplCore::reserve_active_capture
          pressure_details->summary.prompt_tokens != assessment.frontier ||
          pressure_details->blocked_host_allocation_bytes != 0 ||
          !physical_peak_fits(pressure_details->demand.physical_peak_additional))) {
-        skip_capture(std::move(offer));
+        skip_capture(std::move(offer), CaptureSkipReason::InvalidPressure);
         return runtime::ContextTransactionReserveStatus::Aborted;
     }
     if (!pressure && !assessment.physically_feasible) {
-        skip_capture(std::move(offer));
+        skip_capture(std::move(offer), CaptureSkipReason::PhysicalPeak);
         return runtime::ContextTransactionReserveStatus::Aborted;
     }
 
@@ -9705,6 +9706,13 @@ qwen3_6::PhysicalUsageSnapshot ProgramImplCore::physical_usage() const noexcept 
         .device_backend_kv_pages = usage.device.backend_kv_pages,
         .host_kv_bytes           = usage.host.kv_bytes,
     };
+}
+
+KvMemUsage ProgramImplCore::kvmem_usage() const noexcept {
+    KvMemUsage usage;
+    if (text_kv_addresses) { usage = text_kv_addresses->kvmem_usage(); }
+    if (backend_kv_addresses) { usage.merge(backend_kv_addresses->kvmem_usage()); }
+    return usage;
 }
 
 void ProgramImplCore::start_sequence(std::uint32_t lane, SequenceState& sequence,

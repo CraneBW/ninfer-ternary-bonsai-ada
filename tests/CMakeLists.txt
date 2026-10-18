@@ -209,6 +209,9 @@ ninfer_add_test(ninfer_serve_options_test
 ninfer_add_test(ninfer_request_log_test
   SOURCES test_request_log.cpp
   LIBRARIES ninfer_serve)
+ninfer_add_test(ninfer_serve_metrics_test
+  SOURCES test_serve_metrics.cpp
+  LIBRARIES ninfer_serve)
 ninfer_add_test(ninfer_host_timing_test
   SOURCES test_host_timing.cpp
   LIBRARIES ninfer_core)

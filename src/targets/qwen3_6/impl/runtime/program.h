@@ -597,7 +597,8 @@ public:
                              runtime::CheckpointRef checkpoint) const;
     [[nodiscard]] bool shared_capture_matches(const CaptureOffer& offer,
                                               const SharedPrefixHandle& shared) const;
-    void skip_capture(CaptureOffer&& offer);
+    void skip_capture(CaptureOffer&& offer,
+                      CaptureSkipReason reason = CaptureSkipReason::Unspecified);
     [[nodiscard]] runtime::ContextTransactionReserveStatus
     reserve_active_capture(CaptureOffer&& offer, const SharedPrefixHandle* exact_shared,
                            const SharedPrefixHandle* replacement,
@@ -635,6 +636,10 @@ public:
     }
 
     [[nodiscard]] qwen3_6::PhysicalUsageSnapshot physical_usage() const noexcept;
+
+    // Read-only diagnostics for GET /metrics. Not part of the accounting inputs above.
+    [[nodiscard]] KvMemUsage kvmem_usage() const noexcept;
+    [[nodiscard]] CaptureSkipStats capture_skip_stats() const noexcept { return capture_skips_; }
 
     [[nodiscard]] MemorySummary memory_summary() const noexcept;
 
@@ -723,6 +728,7 @@ private:
     }
 
     runtime::ProgramResourceRevision resource_revision_{.value = 1};
+    CaptureSkipStats capture_skips_;
     std::uint32_t pressure_planning_generation_ = 0;
     bool pressure_planning_active_              = false;
 

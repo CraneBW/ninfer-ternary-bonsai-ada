@@ -507,7 +507,7 @@ public:
             throw std::logic_error("capture observes inconsistent transaction ownership");
         }
         if (program_transaction) {
-            program.skip_capture(std::move(offer));
+            program.skip_capture(std::move(offer), CaptureSkipReason::TransactionBusy);
             return ActiveCaptureReserveResult::Skipped;
         }
         rebuild_prefix_index();
@@ -544,7 +544,8 @@ public:
         }
         if (exact_shared != nullptr) {
             if (!private_baseline.publishes_private || !private_baseline.physically_feasible) {
-                program.skip_capture(std::move(offer));
+                program.skip_capture(std::move(offer),
+                                     CaptureSkipReason::PrivateBaselineUnavailable);
                 return ActiveCaptureReserveResult::Skipped;
             }
             transaction_.template emplace<ActiveCaptureRecord>(ActiveCaptureRecord{
@@ -815,7 +816,7 @@ public:
 
         if (!selected) {
             if (!private_baseline.publishes_private || !private_baseline.physically_feasible) {
-                program.skip_capture(std::move(offer));
+                program.skip_capture(std::move(offer), CaptureSkipReason::NoAdmissiblePlan);
                 return ActiveCaptureReserveResult::Skipped;
             }
             transaction_.template emplace<ActiveCaptureRecord>(ActiveCaptureRecord{
@@ -1130,6 +1131,14 @@ public:
         out.shared_active_references = shared_references > std::numeric_limits<std::uint32_t>::max()
                                            ? std::numeric_limits<std::uint32_t>::max()
                                            : static_cast<std::uint32_t>(shared_references);
+        // Diagnostics are optional on the Program contract so test doubles stay minimal.
+        if constexpr (requires(const Program& p) {
+                          p.kvmem_usage();
+                          p.capture_skip_stats();
+                      }) {
+            out.kvmem         = program.kvmem_usage();
+            out.capture_skips = program.capture_skip_stats();
+        }
     }
 
     [[nodiscard]] CatalogState catalog_state(std::uint32_t slot) const noexcept {
