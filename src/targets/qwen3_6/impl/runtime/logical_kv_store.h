@@ -151,6 +151,7 @@ public:
           destination_(other.destination_), frontier_(other.frontier_),
           full_pages_(other.full_pages_), tail_columns_(other.tail_columns_),
           requested_entitlement_(other.requested_entitlement_),
+          device_claim_(other.device_claim_),
           page_reservation_(std::move(other.page_reservation_)), row_(std::move(other.row_)),
           tail_destination_(other.tail_destination_),
           staged_tail_release_(other.staged_tail_release_),
@@ -168,13 +169,13 @@ private:
     KVPrefixForkReservation(KVAddressSpaceStore& owner, KVAddressSpaceHandle source,
                             KVAddressSpaceHandle destination, std::uint32_t frontier,
                             std::uint32_t full_pages, std::uint32_t tail_columns,
-                            std::uint32_t requested_entitlement,
+                            std::uint32_t requested_entitlement, std::uint32_t device_claim,
                             DeviceKVPageReservation&& page_reservation, KVExecutionRowLease&& row,
                             std::optional<LogicalKVPageHandle> tail_destination,
                             bool staged_tail_release) noexcept
         : owner_(&owner), source_(source), destination_(destination), frontier_(frontier),
           full_pages_(full_pages), tail_columns_(tail_columns),
-          requested_entitlement_(requested_entitlement),
+          requested_entitlement_(requested_entitlement), device_claim_(device_claim),
           page_reservation_(std::move(page_reservation)), row_(std::move(row)),
           tail_destination_(tail_destination), staged_tail_release_(staged_tail_release) {}
 
@@ -185,6 +186,9 @@ private:
     std::uint32_t full_pages_            = 0;
     std::uint32_t tail_columns_          = 0;
     std::uint32_t requested_entitlement_ = 0;
+    // A host-backed address space may hold a logical entitlement larger than the device page pool.
+    // The fork only reserves pages inside that device claim; the rest of the prefix stays Host-backed.
+    std::uint32_t device_claim_        = 0;
     DeviceKVPageReservation page_reservation_;
     std::optional<KVExecutionRowLease> row_;
     std::optional<LogicalKVPageHandle> tail_destination_;
@@ -1125,6 +1129,16 @@ public:
         const std::uint32_t page_size    = static_cast<std::uint32_t>(kPagedKVPageSize);
         const std::uint32_t full_pages   = frontier / page_size;
         const std::uint32_t tail_columns = frontier % page_size;
+        // The fork shares the leading full pages and only reserves its own tail window. A host-backed
+        // source can carry a logical entitlement larger than the device pool, so the reservation has
+        // to stop at the device claim or it asks the pool for pages that live on the Host tier.
+        const std::uint32_t device_claim = device_claim_pages(entitlement);
+        if (device_claim < required_pages) {
+            throw std::invalid_argument("KV retained-prefix device claim cannot hold the prefix");
+        }
+        if (staged_tail_release && device_claim <= full_pages) {
+            throw std::invalid_argument("KV retained-prefix device claim cannot hold the staged tail");
+        }
         if (staged_tail_release && tail_columns == 0) {
             throw std::invalid_argument("staged KV prefix fork has no partial tail");
         }
@@ -1138,9 +1152,10 @@ public:
             }
         }
 
+        const std::uint32_t reserved_pages =
+            staged_tail_release ? 1U : device_claim > full_pages ? device_claim - full_pages : 0U;
         DeviceKVPageReservation reservation = pages_->physical_pool().make_empty_reservation();
-        pages_->physical_pool().resize_reservation(
-            reservation, staged_tail_release ? 1U : entitlement - full_pages);
+        pages_->physical_pool().resize_reservation(reservation, reserved_pages);
         KVExecutionRowLease row = tables_->acquire(execution_row);
         std::optional<LogicalKVPageHandle> tail_destination;
         if (tail_columns != 0) {
@@ -1150,7 +1165,7 @@ public:
             pages_->pin_source(membership(source, page));
         }
         return KVPrefixForkReservation(*this, source_handle, destination_handle, frontier,
-                                       full_pages, tail_columns, entitlement,
+                                       full_pages, tail_columns, entitlement, device_claim,
                                        std::move(reservation), std::move(row), tail_destination,
                                        staged_tail_release);
     }
@@ -1211,7 +1226,8 @@ public:
             throw std::logic_error("KV prefix-fork retained tail was not moved to Host");
         }
         const std::uint32_t required_pages = pages_for_tokens(fork.frontier_);
-        const std::uint32_t growth         = fork.requested_entitlement_ - required_pages;
+        const std::uint32_t growth =
+            fork.device_claim_ > required_pages ? fork.device_claim_ - required_pages : 0U;
         pages_->physical_pool().resize_reservation(fork.page_reservation_, growth);
     }
 
@@ -1220,7 +1236,8 @@ public:
         Address& source                    = require(fork.source_);
         Address& destination               = require(fork.destination_);
         const std::uint32_t required_pages = pages_for_tokens(fork.frontier_);
-        const std::uint32_t growth         = fork.requested_entitlement_ - required_pages;
+        const std::uint32_t growth =
+            fork.device_claim_ > required_pages ? fork.device_claim_ - required_pages : 0U;
         if (!fork.row_ || destination.active || destination.row ||
             destination.reservation.valid() || destination.page_count != 0 ||
             fork.page_reservation_.pages() != growth) {
@@ -1264,7 +1281,10 @@ public:
         }
         destination.page_count         = required_pages;
         destination.committed_frontier = fork.frontier_;
-        destination.reservation        = std::move(fork.page_reservation_);
+        // Mirror commit_activation: the logical bound survives even when the device claim is smaller.
+        destination.logical_entitlement =
+            fork.requested_entitlement_ > fork.device_claim_ ? fork.requested_entitlement_ : 0U;
+        destination.reservation = std::move(fork.page_reservation_);
         destination.row.emplace(std::move(*fork.row_));
         fork.row_.reset();
         destination.active = true;
@@ -1793,6 +1813,19 @@ public:
         return std::max(entitlement(address), address.logical_entitlement);
     }
 
+    // Leading pages this address shares with another view (a retained shared prefix or a
+    // snapshot continuation). KVMem has to pin them: re-phasing a page moves it for every view.
+    // The run starts at page zero because prefix forks publish the shared prefix first.
+    [[nodiscard]] std::uint32_t kvmem_shared_prefix_pages(KVAddressSpaceHandle handle) const {
+        const Address& address = require(handle);
+        std::uint32_t pages    = 0;
+        while (pages < address.page_count &&
+               pages_->address_references(membership(address, pages)) > 1) {
+            ++pages;
+        }
+        return pages;
+    }
+
     [[nodiscard]] bool kvmem_enabled() const noexcept { return kvmem_enabled_; }
 
     [[nodiscard]] std::uint32_t committed_frontier(KVAddressSpaceHandle handle) const {
@@ -2009,8 +2042,17 @@ private:
     // the logical entitlement when the host tier backs the rest of the address space, and
     // only the claim is reserved; wherever the pool already covers the context the clamp is
     // inert and the claim is the entitlement itself.
+    //
+    // KVMem caps the claim at the retained window budget, not the pool. The window is what
+    // the address actually keeps resident, and admission sums claims across lanes: claiming
+    // the whole pool would let one long request reserve every page and keep every other
+    // KVMem lane out even though the compaction window leaves room for it.
     [[nodiscard]] std::uint32_t device_claim_pages(std::uint32_t entitlement) const noexcept {
-        return std::min(entitlement, pages_->physical_pool().capacity_pages());
+        std::uint32_t claim = std::min(entitlement, pages_->physical_pool().capacity_pages());
+        if (kvmem_enabled_ && kvmem_budget_ != 0) {
+            claim = std::min(claim, kvmem_budget_ / static_cast<std::uint32_t>(kPagedKVPageSize));
+        }
+        return claim;
     }
 
     [[nodiscard]] LogicalKVPageHandle& membership(Address& address, std::uint32_t page) noexcept {
@@ -2257,7 +2299,7 @@ public:
     std::uint32_t kvmem_compact(KVAddressSpaceHandle handle, std::uint32_t budget_tokens,
                                 cudaStream_t stream = nullptr,
                                 std::vector<std::uint32_t> mandatory_ids = {},
-                                bool sink_only = false) {
+                                bool sink_only = false, std::uint32_t pinned_prefix_pages = 0) {
         if (!kvmem_enabled_) { return 0; }
         Address& address = require(handle);
         const std::size_t index = static_cast<std::size_t>(&address - addresses_.data());
@@ -2272,30 +2314,51 @@ public:
         const std::uint64_t ledger_tokens =
             static_cast<std::uint64_t>(repo.block_count()) * kPagedKVPageSize;
         if (budget_tokens == 0 || ledger_tokens <= budget_tokens) { return 0; }
+        if (pinned_prefix_pages > address.page_count) {
+            throw std::invalid_argument("KVMem pinned prefix exceeds the mapped KV pages");
+        }
         for (std::uint32_t page = 0; page < address.page_count; ++page) {
             const std::uint32_t references = pages_->address_references(membership(address, page));
-            if (references != 1) {
+            // The shared prefix stays at fixed slots and may be referenced by other views. The
+            // remainder of the address must be privately owned, otherwise its phases cannot move.
+            if (references == 0 || (page >= pinned_prefix_pages && references != 1)) {
                 // A page this address shares with another view cannot move: its phases are
-                // baked for the other view's slots too. The caller is expected to have gated
-                // this out; the trace names the page that blocked the compaction.
+                // baked for the other view's slots too. The trace names the page that blocked
+                // the compaction.
                 if (std::getenv("NINFER_KVMEM_TRACE") != nullptr) {
                     std::fprintf(stderr,
                                  "KVMEM_TRACE compact_skip shared page=%u references=%u "
-                                 "budget=%u ledger=%llu\n",
-                                 page, references, budget_tokens,
+                                 "pinned=%u budget=%u ledger=%llu\n",
+                                 page, references, pinned_prefix_pages, budget_tokens,
                                  static_cast<unsigned long long>(ledger_tokens));
                 }
                 ++kvmem_compact_skips_;
                 return 0;
             }
         }
+        const std::uint32_t pinned_blocks = pinned_prefix_pages;
+        const std::uint32_t budget_blocks = budget_tokens / kPagedKVPageSize;
         DeviceKVPagePool& pool = pages_->physical_pool();
+        if (pinned_blocks > repo.block_count()) {
+            throw std::logic_error("KVMem pinned prefix exceeds the block ledger");
+        }
+        if (pinned_blocks > budget_blocks) {
+            throw std::invalid_argument(
+                "KVMem compaction budget cannot hold the pinned shared prefix");
+        }
+        const std::uint32_t private_blocks = budget_blocks - pinned_blocks;
+        if (!sink_only && private_blocks < kMinimumWindowPages) {
+            throw std::invalid_argument(
+                "KVMem window budget cannot retain the shared prefix and a private window: "
+                "pinned_pages=" + std::to_string(pinned_blocks) +
+                " budget_pages=" + std::to_string(budget_blocks) +
+                " minimum_private_pages=" + std::to_string(kMinimumWindowPages));
+        }
 
         // ---- plan through K0 ----
         ninfer::kvmem::KvSelectConfig cfg;
         cfg.block_tokens  = kPagedKVPageSize;
         cfg.budget_tokens = budget_tokens;
-        const std::uint32_t budget_blocks = budget_tokens / kPagedKVPageSize;
         ninfer::kvmem::KvSelection sel;
         if (sink_only) {
             // Round-boundary mode: keep the oldest head, evict the tail. The
@@ -2310,7 +2373,23 @@ public:
                     "KVMem compaction budget must span at least four pages "
                     "(sink/recent/middle)");
             }
-            if (budget_tokens < kAutoBandFloorTokens) {
+            if (pinned_blocks != 0) {
+                // The shared prefix already is the sink: it cannot move, so the private bands
+                // only need one sink page and a recent tail. The old bands are computed from
+                // the whole budget and would leave too little room for retrieval otherwise.
+                cfg.sink_tokens   = kPagedKVPageSize;
+                cfg.recent_tokens = std::max<std::uint32_t>(1, private_blocks / 4) *
+                                    kPagedKVPageSize;
+                std::vector<std::uint32_t> selection_mandatory;
+                selection_mandatory.reserve(mandatory_ids.size() + pinned_blocks);
+                for (const std::uint32_t id : mandatory_ids) {
+                    if (id < repo.block_count()) { selection_mandatory.push_back(id); }
+                }
+                for (std::uint32_t id = 0; id < pinned_blocks; ++id) {
+                    selection_mandatory.push_back(id);
+                }
+                mandatory_ids = std::move(selection_mandatory);
+            } else if (budget_tokens < kAutoBandFloorTokens) {
                 // Explicit bands: the auto clamps (sink 1024..2048, recent
                 // 4096..16384) do not fit a budget below their floor, and the
                 // selection refuses to plan rather than shrink them. Keep one
@@ -2322,6 +2401,14 @@ public:
             }
             kvmem_score_window(index, pool, stream);
             sel = repo.preview_select(cfg, std::move(mandatory_ids));  // K3 ranks the middle
+        }
+        if (pinned_blocks != 0) {
+            for (std::uint32_t id = 0; id < pinned_blocks; ++id) {
+                if (std::find(sel.block_ids.begin(), sel.block_ids.end(), id) ==
+                    sel.block_ids.end()) {
+                    throw std::logic_error("KVMem compaction dropped a pinned shared prefix block");
+                }
+            }
         }
         ninfer::kvmem::KvWindowPlan plan = repo.set_selection(sel, cfg);
         const std::uint32_t window_tokens = static_cast<std::uint32_t>(plan.total_window_tokens);
@@ -2393,9 +2480,7 @@ public:
             if (block_hosts.size() <= id) { block_hosts.resize(id + 1); }
             std::optional<HostKVAllocation> slot =
                 kvmem_host_arena_->allocate(kvmem_host_layout_, 1);
-            if (!slot) {
-                throw std::runtime_error("KVMem host arena exhausted (SSD tier is K4)");
-            }
+            if (!slot) { throw std::runtime_error("KVMem host arena exhausted (SSD tier is K4)"); }
             block_hosts[id] = std::move(*slot);
             DeviceKVPageHandle ph = pages_->physical(block_pages[id]);
             pool.copy_to_host(std::span<const DeviceKVPageHandle>(&ph, 1),
@@ -2531,7 +2616,8 @@ public:
         const std::uint64_t ledger_tokens =
             static_cast<std::uint64_t>(repo.block_count()) * kPagedKVPageSize;
         if (ledger_tokens <= kvmem_budget_) { return 0; }
-        return kvmem_compact(handle, kvmem_budget_, stream, {}, false);
+        const std::uint32_t pinned_prefix_pages = kvmem_shared_prefix_pages(handle);
+        return kvmem_compact(handle, kvmem_budget_, stream, {}, false, pinned_prefix_pages);
     }
 
     [[nodiscard]] std::uint32_t kvmem_budget_tokens() const noexcept { return kvmem_budget_; }
@@ -2552,12 +2638,17 @@ public:
                                            cudaStream_t stream = nullptr) {
         if (!kvmem_enabled_ || kvmem_gen_reserve_ == 0) { return 0; }
         const std::uint32_t pool_pages   = pages_->physical_pool().capacity_pages();
+        // The window budget, not the pool, bounds generation: a lane is charged its window
+        // at admission, so letting decode grow back to the pool would overrun that claim.
+        const std::uint32_t window_pages = std::min(
+            pool_pages, kvmem_budget_ / static_cast<std::uint32_t>(kPagedKVPageSize));
         const std::uint32_t reserve_pages =
             kvmem_gen_reserve_ / static_cast<std::uint32_t>(kPagedKVPageSize);
-        if (reserve_pages + kMinimumWindowPages > pool_pages) { return 0; }
+        if (reserve_pages + kMinimumWindowPages > window_pages) { return 0; }
         const std::uint32_t budget_tokens =
-            (pool_pages - reserve_pages) * static_cast<std::uint32_t>(kPagedKVPageSize);
-        return kvmem_compact(handle, budget_tokens, stream, {}, false);
+            (window_pages - reserve_pages) * static_cast<std::uint32_t>(kPagedKVPageSize);
+        const std::uint32_t pinned_prefix_pages = kvmem_shared_prefix_pages(handle);
+        return kvmem_compact(handle, budget_tokens, stream, {}, false, pinned_prefix_pages);
     }
 
     // KVMem K1b: the lowest window slot a compacted address may be resumed from, in the slots of

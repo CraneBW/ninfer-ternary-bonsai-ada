@@ -282,8 +282,16 @@ RequestBasePlan ProgramImplCore::plan_request(const PreparedPromptData& prompt,
     std::uint32_t root_device_kv_pages = base->text_kv_page_entitlement;
     std::size_t root_host_kv_bytes     = 0;
     if (host_backed_kv) {
-        const std::uint32_t device_budget_pages =
-            text_kv_pages->physical_pool().capacity_pages();
+        std::uint32_t device_budget_pages = text_kv_pages->physical_pool().capacity_pages();
+        // KVMem keeps only its compaction window resident; the rest lives in the host tier.
+        // Charging the admission for the whole pool would make two windows mutually
+        // exclusive even when the pool holds both of them beside the shared prefix.
+        if (text_kv_addresses->kvmem_enabled() && text_kv_addresses->kvmem_budget_tokens() != 0) {
+            device_budget_pages = std::min(
+                device_budget_pages,
+                text_kv_addresses->kvmem_budget_tokens() /
+                    static_cast<std::uint32_t>(kPagedKVPageSize));
+        }
         root_device_kv_pages = std::min(base->text_kv_page_entitlement, device_budget_pages);
         root_host_kv_bytes =
             static_cast<std::size_t>(base->text_kv_page_entitlement - root_device_kv_pages) *

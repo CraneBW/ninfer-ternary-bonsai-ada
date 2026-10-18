@@ -7417,9 +7417,10 @@ std::uint32_t ProgramImplCore::kvmem_reclaim_generation(SequenceState& sequence)
     const std::uint32_t next_pages =
         kv_pages_for_frontier(sequence.execution_frontier + 1U);
     if (reserve_tokens == 0 || next_pages <= pool_pages) { return 0; }
-    // A speculative batch, a published endpoint and a shared prefix pin this lineage's KV
-    // geometry: their views name the pages by slot, so a reclaim would move KV those views
-    // already read. NOTE the deliberate exclusion of `rewrite_checkpoint`: a prefix-cache
+    // A speculative batch and a published endpoint pin this lineage's KV geometry: their views
+    // name the pages by slot, so a reclaim would move KV those views already read. A retained
+    // shared prefix is pinned page by page instead, so a reclaim may repack the private suffix
+    // behind it. NOTE the deliberate exclusion of `rewrite_checkpoint`: a prefix-cache
     // checkpoint also carries a KV requirement, but that requirement is written at completion
     // (`set_checkpoint_requirement` in the finish path, after the round-boundary compaction),
     // so nothing has named this geometry yet while the request is still decoding. A later
@@ -7428,8 +7429,7 @@ std::uint32_t ProgramImplCore::kvmem_reclaim_generation(SequenceState& sequence)
     // that lost its middle costs a cache miss rather than a wrong read. Gating on it here would
     // block every reclaim for a prefix-caching request, i.e. all of them.
     const bool pinned = speculative_backend != SpeculativeBackend::None ||
-                        sequence.endpoint_valid ||
-                        !sequence.shared_prefix_references.empty();
+                        sequence.endpoint_valid;
     if (pinned) {
         if (std::getenv("NINFER_KVMEM_TRACE") != nullptr) {
             std::fprintf(stderr,
@@ -7587,10 +7587,15 @@ ProgramImplCore::inspect_capture(const CaptureOffer& offer, const SharedPrefixHa
     const RequestControl::Prefill& prefill = *requests[lane].prefill;
     const CaptureGroup& group              = prefill.capture_groups[prefill.next_capture];
     if (!group.identity) { throw std::logic_error("capture identity backing is missing"); }
+    // A shared stable prefix promises KV for every ledger slot up to its frontier, so it can only
+    // be published while the lineage still covers the whole ledger. Once KVMem has compacted the
+    // lineage the KV address space is a window with a negative kv_offset: its pages describe the
+    // tail only, and a consumer would inherit a prefix whose KV requirement exceeds the mapping.
+    const bool covers_ledger = !group.shared || active_sequence(lane).kv_offset == 0;
     const bool publish_private =
         group.rewrite.has_value() ||
         (group.long_anchor && context_cache.max_long_anchors_per_continuation.value_or(0) != 0);
-    const bool publish_shared = group.shared && permit_shared_publication &&
+    const bool publish_shared = group.shared && permit_shared_publication && covers_ledger &&
                                 exact_shared == nullptr && shared_prefix_capacity != 0;
 
     CaptureAssessment assessment;
@@ -8489,7 +8494,11 @@ ActiveCaptureResult ProgramImplCore::publish_active_capture(ActiveCaptureTransac
                                                         : prefill.initial_mtp_extent - 1U))
             : speculative_backend == SpeculativeBackend::DFlash ? prefill.prompt_tokens
                                                                 : 0U;
-        ensure_sequence_kv_mapped(sequence, prefill.prompt_tokens, backend_materialized);
+        // The published bundle describes the live (possibly KVMem-compacted) address space, so
+        // its coverage is named in window-relative slots, exactly like the prefill piece loop.
+        ensure_sequence_kv_mapped(
+            sequence, kv_tokens(sequence.kv_offset, prefill.prompt_tokens),
+            backend_materialized == 0 ? 0U : kv_tokens(sequence.kv_offset, backend_materialized));
     }
 
     detail::PhysicalResources removed = transaction.capacity_preparation_removed;
@@ -10230,8 +10239,16 @@ void ProgramImplCore::start_sequence(std::uint32_t lane, SequenceState& sequence
         // needs the room. Where the pool already covers the prompt -- and on every configuration
         // without a device budget -- the whole prompt is mapped here exactly as before.
         const std::uint32_t prompt_kv_frontier = kv_tokens(kv_offset, prompt_tokens);
-        if (kv_pages_for_frontier(prompt_kv_frontier) <=
-            text_kv_pages->physical_pool().capacity_pages()) {
+        // A KVMem budget is the real ceiling on resident text pages: mapping past it would make
+        // the very first compaction throw, before the chunk loop can offload a window.
+        std::uint32_t setup_device_pages = text_kv_pages->physical_pool().capacity_pages();
+        if (text_kv_addresses->kvmem_enabled() && text_kv_addresses->kvmem_budget_tokens() != 0) {
+            setup_device_pages =
+                std::min(setup_device_pages,
+                         static_cast<std::uint32_t>(text_kv_addresses->kvmem_budget_tokens() /
+                                                    kPagedKVPageSize));
+        }
+        if (kv_pages_for_frontier(prompt_kv_frontier) <= setup_device_pages) {
             ensure_sequence_kv_mapped(sequence, prompt_kv_frontier, backend_materialized);
         } else if (!text_kv_addresses->kvmem_enabled()) {
             // Speculation is not excluded here: the draft tier keeps its own KV resident at full
@@ -11876,15 +11893,21 @@ ProgramImplCore::advance_prefill(SequenceState& sequence, RequestControl& reques
             // at a time and hands the window-external pages to the host tier before the next piece
             // needs the room. The piece is capped to leave the minimum compaction window, and
             // wherever the pool already covers the prompt this collapses to the configured chunk.
-            const std::uint32_t pool_pages = text_kv_pages->physical_pool().capacity_pages();
+            // KVMem keeps a window, not the whole prompt, so the mapping has to switch to
+            // piece-by-piece mode as soon as the prompt outgrows that window -- even when the
+            // physical pool is larger. The alternative, mapping up to the pool, would commit
+            // past the device claim the admission and the compaction budget agree on.
+            const std::uint32_t kvmem_window_pages =
+                text_kv_addresses->kvmem_budget_tokens() /
+                static_cast<std::uint32_t>(kPagedKVPageSize);
             // The prompt's own length decides this, not the window-relative frontier it maps to:
-            // after the first offload the compacted frontier sits inside the pool, and reading
+            // after the first offload the compacted frontier sits inside the window, and reading
             // the decision off that would switch the mapping back off for every remaining piece
             // -- which then commit past the pages the window holds.
             const bool chunked_kv_prefill =
-                text_kv_addresses->kvmem_enabled() &&
-                kv_pages_for_frontier(staged.prompt_tokens) > pool_pages;
-            const std::uint32_t piece_cap = kvmem_prefill_piece_cap(pool_pages);
+                text_kv_addresses->kvmem_enabled() && kvmem_window_pages != 0 &&
+                kv_pages_for_frontier(staged.prompt_tokens) > kvmem_window_pages;
+            const std::uint32_t piece_cap = kvmem_prefill_piece_cap(kvmem_window_pages);
             // Move the window-external pages to Host so the incoming piece fits the pool. The
             // retained window is the configured budget, narrowed only as far as the piece needs.
             const auto kvmem_offload = [&](std::uint32_t incoming_tokens) {
@@ -11894,18 +11917,17 @@ ProgramImplCore::advance_prefill(SequenceState& sequence, RequestControl& reques
                 // outside the piece's reach offloaded.
                 const std::uint32_t target = kv_pages_for_frontier(
                     kv_tokens(sequence.kv_offset, staged.cursor + incoming_tokens));
-                if (target <= pool_pages) { return; }
-                if (sequence.rewrite_checkpoint.valid || sequence.endpoint_valid ||
-                    !sequence.shared_prefix_references.empty()) {
+                if (target <= kvmem_window_pages) { return; }
+                if (sequence.rewrite_checkpoint.valid || sequence.endpoint_valid) {
                     throw std::runtime_error(
                         "KVMem prefill needs to offload KV pages, but this sequence's KV geometry "
                         "is fixed");
                 }
                 const std::uint32_t needed = kv_pages_for_frontier(incoming_tokens);
-                if (pool_pages < needed + KVAddressSpaceStore::kMinimumWindowPages) {
+                if (kvmem_window_pages < needed + KVAddressSpaceStore::kMinimumWindowPages) {
                     throw std::invalid_argument(
-                        "the KV device pool cannot hold one prefill piece beside the minimum KVMem "
-                        "window: raise --kv-device-tokens or lower --prefill-chunk");
+                        "the KVMem window cannot hold one prefill piece beside the minimum window: "
+                        "raise --kvmem-budget or lower --prefill-chunk");
                 }
                 const std::uint32_t logical = text_kv_addresses->mapping_limit(sequence.kv->text);
                 // The retained window is the configured budget, narrowed only as far as the
@@ -11913,17 +11935,22 @@ ProgramImplCore::advance_prefill(SequenceState& sequence, RequestControl& reques
                 // leaves nothing for a speculative batch, whose draft window is mapped ahead of
                 // the batch and cannot reclaim while it is being prepared.
                 const std::uint32_t room =
-                    (pool_pages - needed) * static_cast<std::uint32_t>(kPagedKVPageSize);
+                    (kvmem_window_pages - needed) * static_cast<std::uint32_t>(kPagedKVPageSize);
                 const std::uint32_t configured =
                     text_kv_addresses->kvmem_window_edge(staged.prompt_tokens);
                 const std::uint32_t budget =
                     configured == 0 ? room : std::min(configured, room);
-                const std::uint32_t window =
-                    text_kv_addresses->kvmem_compact(sequence.kv->text, budget, device.stream);
+                // A retained shared prefix stays at its baked slots: moving it would re-phase
+                // pages other sequences read through their own frontiers. Only the private
+                // suffix may be repacked behind it.
+                const std::uint32_t pinned_prefix_pages =
+                    text_kv_addresses->kvmem_shared_prefix_pages(sequence.kv->text);
+                const std::uint32_t window = text_kv_addresses->kvmem_compact(
+                    sequence.kv->text, budget, device.stream, {}, false, pinned_prefix_pages);
                 if (window == 0) {
                     throw std::runtime_error(
                         "KVMem prefill offload could not move the window-external KV pages: a KV "
-                        "page is shared");
+                        "page outside the retained shared prefix is shared");
                 }
                 // The draft tier compacts with the text tier, on the same budget. Leaving it
                 // whole is not an option: the two addresses then describe different windows, and
@@ -11932,8 +11959,11 @@ ProgramImplCore::advance_prefill(SequenceState& sequence, RequestControl& reques
                 // page pool (sized for the whole logical context), so this costs it the same
                 // re-phasing the text pages get, not a second eviction budget.
                 if (sequence.kv->backend) {
+                    const std::uint32_t draft_pinned_prefix_pages =
+                        backend_kv_addresses->kvmem_shared_prefix_pages(*sequence.kv->backend);
                     const std::uint32_t draft_window = backend_kv_addresses->kvmem_compact(
-                        *sequence.kv->backend, budget, device.stream);
+                        *sequence.kv->backend, budget, device.stream, {}, false,
+                        draft_pinned_prefix_pages);
                     if (draft_window != window) {
                         throw std::runtime_error(
                             "KVMem prefill offload compacted the draft window to a different "

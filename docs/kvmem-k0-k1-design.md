@@ -154,7 +154,9 @@ frontier 一一对应，且 checkpoints 的 StateImage 必须真的处于那个 
 **验收**（RTX 3060 Ti / PTQ1_0 / int8 KV / `NINFER_KVMEM=1 NINFER_KVMEM_BUDGET=512`
 `--max-shared-prefixes 0`）：三轮对话 `cache` = 1297/1328（97%），TTFT 1.2s；5 个 KVMem
 单测 + 默认路径冒烟为回归基线。KVMem 关闭时默认路径同样复用整段 turn-closure 前缀
-（97%，TTFT 1.2s）。
+（97%，TTFT 1.2s）。共享稳定前缀最初只能靠 `--max-shared-prefixes 0` 绕开；第五步已让前缀
+页 pin 在窗口前部并计入预算（见 `docs/kvmem-capacity-decoupling.md` 第五步），
+2/4 个并发 98.8K 会话复用 28.2K 前缀的实测都在那里。
 
 ## 7. K3：查询信号（检索打分已实现）
 

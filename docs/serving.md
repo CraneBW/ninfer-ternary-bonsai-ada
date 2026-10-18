@@ -848,10 +848,26 @@ that much room is free again -- generation then continues until it fills the hea
 the knob trades the amplitude of a reclaim for how often one runs. A reserve the pool cannot
 afford is clamped to the room it actually has, and a pool that only spans the window reserves
 nothing (no reclaim runs; a generation longer than the window fails with an error naming the
-pool). Two limits come with it: a reclaim moves KV, so it is skipped while a shared KV page, a
-published endpoint or a speculative batch pins the sequence's geometry, and a lineage whose KV
-was reclaimed mid-generation may no longer serve a compatible-prefix resume -- the next turn
-then re-prefills instead of hitting the cache.
+pool). Two limits come with it: a reclaim moves KV, so it is skipped while a published endpoint or a
+speculative batch pins the sequence's geometry (a shared stable prefix does not block it -- the
+prefix is pinned inside the window instead), and a lineage whose KV was reclaimed mid-generation
+may no longer serve a compatible-prefix resume -- the next turn then re-prefills instead of
+hitting the cache.
+
+A shared stable prefix is pinned at the front of the KVMem window and counted in the budget, so
+`--kvmem-budget` must hold the prefix plus at least a minimum private window (a prefix plus four
+pages, at the smallest); a budget too small for both aborts at startup instead of silently
+dropping the prefix. A consumer of the prefix maps its private tail piece by piece against the
+same window, and a lineage that has already been compacted no longer publishes itself as a
+shared prefix -- its KV addresses describe a window, not the whole ledger a consumer would
+promise to inherit.
+
+The KVMem host tier is one arena per process, sized from the logical page capacity of the
+context: the device pages plus the pages `--host-kv-mib` buys, capped at `--max-context/64`.
+Concurrent long sessions draw parked middle blocks from that one arena, so raise
+`--max-context` and `--host-kv-mib` together when many sessions each park a large middle;
+admission still accounts only the engine's continuation Host KV, so a mix that outgrows the
+KVMem arena fails during compaction rather than by queueing.
 
 Context-cost coefficients resolve once at startup from generic defaults, matching compiled values,
 and optional transfer or artifact-prefill entries from `--context-cost-presets FILE`. A malformed

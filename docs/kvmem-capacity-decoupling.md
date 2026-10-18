@@ -135,6 +135,56 @@ sink/recent/检索命中块。
 `program_impl.h::kvmem_reclaim_generation` / `logical_kv_store.h::kvmem_compact_generation`，
 实测与取舍见 `HANDOVER-kvmem.md` 第十节（含与第 4.3 节早退闸的有意偏离）。
 
+### 第五步：共享稳定前缀与多会话（已落地）
+
+共享稳定前缀（`--max-shared-prefixes`）打破了前面的三个前提：前缀页被多个地址共享、复用者
+从 `frontier` 续写、捕获发布按 prompt 前沿建映射。改动分五处：
+
+- **prefix fork 的设备预留按 device claim 封顶**（`logical_kv_store.h` 的
+  `KVPrefixForkReservation::device_claim_`）：宿主持有的前缀被 fork 时不再用
+  `requested_entitlement - required_pages` 重设预留（118K 请求会因此在
+  `publish_materialization_transfers` 里 `bad_alloc`），而是用
+  `min(entitlement, 池页数, --kvmem-budget/64)` 减去已映射部分；`commit_prefix_fork`
+  同时把逻辑 entitlement 记到同一个封顶值。
+- **前缀页 pin 在窗口前部**：`kvmem_shared_prefix_pages()` 数出地址开头连续的引用计数大于 1
+  的页；`kvmem_compact(..., pinned_prefix_pages)` 把它们计入窗口预算并强制保留，只拒绝
+  pin 区间之外的共享页。预算容不下「pinned + 最小私有窗口」时启动即报
+  `KVMem window budget cannot retain the shared prefix and a private window`。
+- **admission 按 KVMem 窗口记账**：`device_claim_pages()` 与 `request_plan_impl.h` 的 root
+  demand 都以 `--kvmem-budget/64` 封顶；`begin` 在 prompt 超过窗口时不再一次 ensure 整个
+  prompt（否则首个压实之前就 `Paged KV materialization exceeds reserved capacity`），改由分片
+  prefill 逐块映射并压实。
+- **捕获发布用窗口相对前沿**：`publish_active_capture` 用
+  `kv_tokens(sequence.kv_offset, prefill.prompt_tokens)` 建映射；共享前缀只在 lineage 仍覆盖
+  整条账本（`kv_offset == 0`）时发布，压实后的 lineage 跳过并记
+  `capture_skips{reason="no_admissible_plan"}`，不再让消费者继承一个 KV 需求超出映射的前缀
+  （原报错 `checkpoint KV requirement exceeds its address space`）。
+- **生成期回收不再被共享页挡住**：`kvmem_reclaim_generation` 只在 endpoint 或投机批次
+  pin 住几何时跳过，共享前缀因为 pin 在窗口内而可以一起换出。
+
+**实测**（`--kv-dtype int8`，device 65,536 token，`--kvmem-budget 36864`，
+`--kvmem-gen-reserve 4096`，`--max-context 262144`，`--host-kv-mib 7168`，
+`--pending-timeout-ms 240000`，seed 共享前缀 28,197 token，私有答案在 prompt 末尾）：
+
+| 并发 | 结果 | wall |
+|---|---|---|
+| 2 × 98,831 | `ORCHID-731` / `VIOLET-284` | 82.9 s / 47.3 s |
+| 4 × 98,831 | `ORCHID-731` / `VIOLET-284` / `AMBER-905` / `CEDAR-618` | 123.6 / 45.9 / 157.3 / 83.6 s |
+| 4 × 51,524 | 四码全对 | 18.2–52.6 s |
+
+4 × 98,831 结束时 device main KV 占 986/1,024 页（有界），host tier 用 7.8 GiB（arena 8.5 GiB），
+GPU 12.6 GiB；`stage_in_blocks_total` 为 0，换出的中段没有被召回。
+
+**边界**：host tier 是每进程一块 arena，容量 =
+`min(--max-context/64, device 页 + --host-kv-mib 折算页)`。`--max-context 131072` 时只有
+4.13 GiB，四个 98.8K 会话（各换出约 2 GiB）会以
+`KVMem host arena exhausted (SSD tier is K4)` 失败：host 容量是硬边界，必须把
+`--max-context` 与 `--host-kv-mib` 一起放大。admission 目前只统计程序级 Host KV，不统计
+KVMem 换出量，所以「放得下」是按设备页判的，超出 host tier 的混合会在压实中而不是排队中失败。
+另外共享前缀复用下本轮 mean-K 打分全为 0
+（`kvmem_zero_score_blocks_total == kvmem_scoreable_blocks_total`）：本组验收的私有答案在
+recent 窗口内、不经检索命中；共享前缀下的检索打分仍是待办。
+
 ## 5. 顺序与回退
 
 每一步一个提交，独立可回退。每步完成后跑：

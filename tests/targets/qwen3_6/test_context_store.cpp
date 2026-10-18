@@ -627,6 +627,78 @@ void test_kv_store(ninfer::DeviceContext& device) {
            "staged retained fork closes Device and Host ownership without leaks");
 }
 
+// A host-backed address space may carry a logical entitlement larger than the device page pool. The
+// shared prefix fork must reserve only inside that pool: the staged-release completion used to
+// resize to the whole logical entitlement and throw std::bad_alloc once the pool was full.
+void test_kv_store_host_backed_prefix_fork(ninfer::DeviceContext& device) {
+    ninfer::LayoutBuilder builder;
+    ninfer::DeviceKVPagePoolSpec page_spec{
+        .page_group_count = 3,
+        .geometry =
+            {
+                .page_tokens        = static_cast<std::uint32_t>(ninfer::kPagedKVPageSize),
+                .device_plane_order = ninfer::PagedKVPlaneOrder::PageMajor,
+                .planes = {{.dtype = ninfer::DType::BF16, .leading_extent = 8, .head_extent = 2}},
+            },
+    };
+    const ninfer::DeviceKVPagePoolLayout page_layout =
+        ninfer::plan_device_kv_page_pool(builder, page_spec);
+    const ninfer::KVExecutionTableLayout table_layout =
+        ninfer::plan_kv_execution_tables(builder, {.logical_page_capacity = 4, .table_rows = 2});
+    ninfer::DeviceArena arena(builder.finish(256));
+    const ninfer::DeviceSpan backing{arena.base(), arena.capacity()};
+    ninfer::DeviceKVPagePool physical_pages(backing, page_layout);
+    ninfer::KVExecutionTablePool physical_tables(backing, table_layout, physical_pages);
+    const ninfer::HostKVPageLayout host_layout =
+        ninfer::plan_host_kv_page_layout(physical_pages.geometry());
+    const std::array host_layouts{host_layout};
+    ninfer::HostKVArena host_arena(host_layout.page_stride * 4, host_layouts);
+    store::LogicalKVPageStore pages(physical_pages, physical_pages.capacity_pages() + 8U);
+    store::HostKVExtentStore extents(host_arena, 4);
+    store::KVAddressSpaceStore addresses(pages, physical_tables, 4, 4);
+
+    const auto source = addresses.create_active(3, 0);
+    expect(source.has_value(), "host-backed prefix source allocation");
+    addresses.ensure_mapped_to_tokens(*source, 65, device.stream);
+    device.synchronize();
+    addresses.commit_frontier(*source, 65);
+    addresses.set_checkpoint_requirement(*source, 65);
+    addresses.deactivate(*source);
+
+    const auto destination = addresses.create_inactive();
+    expect(destination.has_value(), "host-backed prefix fork destination allocation");
+    auto fork = addresses.prepare_prefix_fork(*source, *destination, 65, 4, 1, true);
+    expect(physical_pages.allocated_pages() == 3 && physical_pages.reserved_pages() == 0,
+           "host-backed staged fork fits the transient tail into the device pool");
+
+    const auto retained_tail = addresses.prefix_fork_tail_logical_source(fork);
+    physical_pages.copy_page(addresses.prefix_fork_tail_source(fork),
+                             addresses.prefix_fork_tail_destination(fork), device.transfer_stream);
+    const std::array tail_membership{retained_tail};
+    auto tail_backup = extents.prepare(pages, tail_membership);
+    expect(tail_backup.has_value(), "host-backed retained tail backup reservation");
+    physical_pages.copy_to_host(extents.device_sources(*tail_backup),
+                                extents.writable_view(*tail_backup), device.transfer_stream);
+    CUDA_CHECK(cudaStreamSynchronize(device.transfer_stream));
+    (void)extents.publish(std::move(*tail_backup));
+    addresses.settle_prefix_fork_tail_source(fork);
+    expect(pages.drop_device_replica(retained_tail),
+           "host-backed retained tail Device replica releases after backup");
+    addresses.complete_prefix_fork_after_tail_release(fork);
+    addresses.commit_prefix_fork(std::move(fork), device.stream);
+    expect(addresses.entitlement(*destination) == 3 &&
+               addresses.mapping_limit(*destination) == 4 &&
+               addresses.mapped_pages(*destination) == 2 &&
+               physical_pages.allocated_pages() == 2 && physical_pages.reserved_pages() == 1,
+           "host-backed staged fork completes inside the device claim and keeps its logical bound");
+
+    addresses.deactivate(*destination);
+    expect(addresses.release(*destination) && addresses.release(*source) &&
+               extents.release_unreferenced() == host_layout.page_stride && pages.occupied() == 0 &&
+               physical_pages.allocated_pages() == 0 && physical_pages.reserved_pages() == 0,
+           "host-backed staged fork closes Device and Host ownership without leaks");
+}
+
 } // namespace
 
 int main() {
@@ -642,6 +714,7 @@ int main() {
         ninfer::DeviceContext device(0);
         test_state_store(device);
         test_kv_store(device);
+        test_kv_store_host_backed_prefix_fork(device);
         device.synchronize();
     } catch (const std::exception& error) {
         std::cerr << "FAIL: unexpected exception: " << error.what() << '\n';
