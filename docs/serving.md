@@ -861,6 +861,17 @@ Backend pool and is consumed in physical page extents. `--no-prefix-reuse` selec
 mode and cannot be combined with any of the seven explicit context-cache capacity flags, including
 zero-valued flags.
 
+Sizing those pools is an operational decision rather than a fixed rule: a returning session can keep an
+endpoint StateImage, a turn-closure checkpoint, a response-replay checkpoint, and up to
+`--max-long-anchors-per-continuation` anchors alive, and the shared catalog holds its own snapshots.
+When the working set exceeds the slots, capture admission rejects new captures instead of displacing a
+retained checkpoint (only a replaceable long-anchor slot can be recycled in place), so a re-entering
+request keeps falling back to prefill. `throughput.context_cache.occupancy` (`device_state_slots`,
+`host_state_slots`) reports saturation and `throughput.context_cache.captures.completed` reports how
+many captures were admitted in the interval; both appear in the JSONL interval record. Raise
+`--device-state-slots` at the cost of Device memory, which shrinks the KV pool that
+`--kv-capacity auto` can size, or `--host-state-slots` at the cost of pinned Host memory.
+
 Run `./build/apps/ninfer-serve --help` for the exact option contract.
 
 Serve writes human-readable operational records to stderr using
