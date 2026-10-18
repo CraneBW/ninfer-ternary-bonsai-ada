@@ -11,7 +11,8 @@
 > MTP speculative decoding. A short tool call reaches 232 t/s, writing fiction 89; prefill
 > is 2.30k t/s on a 28k prompt. The full matrix — three tasks (pelican-on-a-bicycle SVG,
 > Chinese short story, tool call) × long/short context × with/without thinking — plus its
-> fixtures and raw data are in the repository; `git checkout kvmem` is this build.
+> fixtures and raw data are in the repository (`bench/fixtures/`); the default branch is
+> this build.
 
 ---
 
