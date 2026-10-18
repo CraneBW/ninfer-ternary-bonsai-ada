@@ -57,6 +57,12 @@ struct ContextAttentionExecutionEnvelope {
  * Those criteria apply to the registered geometries, tested extents, conformance matrix, and
  * target-representative activation range; they are not universal error bounds for arbitrary
  * adversarial BF16 tensors.
+ *
+ * The causal cached entries accept a temperature-corrected scale: an extended-context model may
+ * multiply the logits by an attention factor (YaRN does), which is the same operation as passing a
+ * larger scale because a launch applies `scale` multiplicatively to every q.k product. The
+ * accepted band is [1/sqrt(256), 2/sqrt(256)]; the oracle is evaluated with the scale the caller
+ * passes, so it still describes the launch exactly.
  */
 
 /**

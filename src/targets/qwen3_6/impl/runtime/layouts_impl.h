@@ -2,6 +2,7 @@
 #include "targets/qwen3_6/impl/runtime/layouts.h"
 #include "targets/qwen3_6/impl/runtime/vision_context.h"
 #include "targets/qwen3_6/impl/runtime/workspace_recipe.h"
+#include "targets/qwen3_6/impl/runtime/yarn.h"
 
 #include "core/device.h"
 #include "ninfer/ops/gated_delta_net.h"
@@ -263,7 +264,12 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
     const auto chunk  = static_cast<std::int32_t>(chunk_u32);
     const auto drafts = static_cast<std::int32_t>(plan.draft_window);
     const auto verify = drafts + 1;
-    const ops::CausalAttentionExecutionEnvelope text_envelope{1, plan.capacity};
+    // Attention reads the page pool, never the logical sequence ceiling: a YaRN-extended window
+    // can sit above the resident pool and above the kernels' visible-key resource limit. Sizing
+    // the attention scratch against the pool keeps an extended window from inflating (or
+    // rejecting) a workspace it can never fill.
+    const ops::CausalAttentionExecutionEnvelope text_envelope{
+        1, std::min(plan.capacity, plan.kv_capacity)};
 
     const auto matrix  = [](WorkspaceLayoutBuilder& layout, DType dtype, std::int32_t rows,
                            std::int32_t tokens) { (void)layout.alloc(dtype, {rows, tokens}); };
@@ -733,8 +739,13 @@ void validate_target_options(DeviceContext& device, const EngineOptions& options
                 "so pass --kvmem-budget explicitly");
         }
     }
-    if (options.max_context == 0 || options.max_context > Variant::maximum_context) {
-        throw std::invalid_argument("max_context exceeds the variant native context capacity");
+    // The native rotary window is the variant's trained context; YaRN stretches it up to
+    // kMaximumYarnScale times that window, and past it the positional resolution is too coarse to
+    // serve.
+    if (options.max_context == 0 ||
+        options.max_context > maximum_yarn_context(Variant::maximum_context)) {
+        throw std::invalid_argument(
+            "max_context exceeds the variant native context capacity scaled by YaRN (2x)");
     }
     if (options.prefill_chunk == 0 || options.prefill_chunk % kPrefillChunkAlignment != 0) {
         throw std::invalid_argument("prefill_chunk must be a nonzero multiple of 128");
@@ -832,6 +843,15 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
                                                            std::uint32_t main_page_groups) {
     if (main_page_groups == 0) {
         throw std::invalid_argument("Main KV physical page count must be positive");
+    }
+    // One attention call can only read what the pool holds, so a pool wider than the kernels'
+    // visible-key resource limit would fault somewhere inside the launch geometry. Refuse the
+    // pool instead: KVMem keeps the resident window well below this ceiling.
+    if (static_cast<std::uint64_t>(main_page_groups) * kPagedKVPageSize >
+        ops::kCausalAttentionMaximumVisibleKeys) {
+        throw std::invalid_argument(
+            "the KV device pool exceeds the attention visible-key resource limit: lower "
+            "--kv-device-tokens or shorten --max-context");
     }
     auto impl                 = std::make_unique<SequencePlanImpl>();
     impl->weights_profile     = inputs.weights_profile;

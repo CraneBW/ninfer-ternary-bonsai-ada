@@ -17,6 +17,17 @@ namespace {
 
 constexpr std::int32_t kHeadDim                      = 256;
 constexpr float kExpectedScale                       = 0.0625f;
+// A launch applies `scale` multiplicatively, so an extended-context caller may pass a
+// temperature-corrected scale (YaRN multiplies the logits by its attention factor). The band
+// above the model contract leaves room for that correction while still rejecting an unnormalized
+// projection: far above the band the Softmax saturates and the FP64 oracle no longer describes
+// the launch.
+constexpr float kMinimumScale                        = kExpectedScale;
+constexpr float kMaximumScale                        = 2.0F * kExpectedScale;
+
+bool scale_supported(float scale) {
+    return std::isfinite(scale) && scale >= kMinimumScale && scale <= kMaximumScale;
+}
 constexpr std::int32_t kMaximumVerifyTokens          = 16;
 constexpr std::int32_t kMaximumBatchSize             = 8;
 constexpr std::uint32_t kTwoChunkPromptVisibleKeys   = 512;
@@ -196,8 +207,8 @@ void validate_attention_tensors(const Tensor& q, const Tensor& positions, const 
     if (positions.dtype != DType::I32) {
         throw std::invalid_argument(std::string(op) + ": positions must be I32");
     }
-    if (!std::isfinite(scale) || std::abs(scale - kExpectedScale) > 1.0e-6f) {
-        throw std::invalid_argument(std::string(op) + ": scale must be 1/sqrt(256)");
+    if (!scale_supported(scale)) {
+        throw std::invalid_argument(std::string(op) + ": scale is outside the supported band");
     }
     const std::int32_t q_heads  = geometry.query_heads;
     const std::int32_t kv_heads = geometry.kv_heads;
@@ -230,8 +241,8 @@ void validate_batched_attention_tensors(const Tensor& q, const Tensor& positions
         (masked && valid_columns.dtype != DType::I32)) {
         throw std::invalid_argument(std::string(op) + ": batch metadata must be I32");
     }
-    if (!std::isfinite(scale) || std::abs(scale - kExpectedScale) > 1.0e-6f) {
-        throw std::invalid_argument(std::string(op) + ": scale must be 1/sqrt(256)");
+    if (!scale_supported(scale)) {
+        throw std::invalid_argument(std::string(op) + ": scale is outside the supported band");
     }
     const std::int32_t q_heads  = geometry.query_heads;
     const std::int32_t kv_heads = geometry.kv_heads;

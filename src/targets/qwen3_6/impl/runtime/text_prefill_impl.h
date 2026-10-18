@@ -43,6 +43,7 @@ void configure_text_card(TextContext& card, const ExecutionCore& execution,
     card.set_gdn_state_action(GdnStateAction::UpdateInPlace, nullptr);
     card.set_mtp_proposal_extent(mtp_proposal_extent);
     card.set_kvmem_query_capture(execution.kvmem_query);
+    card.set_attn_scale(execution.attn_scale);
     if (execution.proposal_head == ProposalHead::Full) {
         card.set_proposal_head(nullptr, nullptr, 0);
         return;

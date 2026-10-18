@@ -652,6 +652,9 @@ public:
     DeviceContext& device;
     const std::uint32_t capacity;
     const std::uint32_t kv_capacity;
+    // Attention dot-product scale, including the YaRN temperature multiplier when capacity
+    // exceeds the native rotary window.
+    const float attn_scale;
     // True when the physical page pool may sit below the logical context and host
     // memory backs the rest of the address space (the device-budget capacity policy).
     const bool host_backed_kv;

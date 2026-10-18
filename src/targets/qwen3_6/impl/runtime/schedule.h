@@ -42,6 +42,9 @@ struct ExecutionCore {
     // KVMem K3 retrieval query capture: null unless KVMem is enabled, in which
     // case a prefilling card stores the prompt's last-token query here.
     const ninfer::kvmem::KvmemQueryCapture* kvmem_query = nullptr;
+    // Attention dot-product scale: kAttnScale, or its YaRN-extended value once the Program's
+    // context exceeds the native rotary window.
+    float attn_scale = kAttnScale;
 };
 
 struct PrefillContext {

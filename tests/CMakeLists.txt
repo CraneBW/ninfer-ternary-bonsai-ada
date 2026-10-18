@@ -141,6 +141,8 @@ ninfer_add_test(ninfer_qwen3_6_state_image_layout_test
   LIBRARIES ninfer_engine ninfer_core)
 target_include_directories(ninfer_qwen3_6_state_image_layout_test PRIVATE
   ${PROJECT_SOURCE_DIR}/src/targets/qwen3_6/export)
+ninfer_add_test(ninfer_qwen3_6_yarn_test
+  SOURCES targets/qwen3_6/test_yarn.cpp)
 ninfer_add_test(ninfer_qwen3_6_context_store_test
   SOURCES targets/qwen3_6/test_context_store.cpp
   LIBRARIES ninfer_engine ninfer_core)

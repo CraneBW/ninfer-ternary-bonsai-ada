@@ -869,6 +869,23 @@ Concurrent long sessions draw parked middle blocks from that one arena, so raise
 admission still accounts only the engine's continuation Host KV, so a mix that outgrows the
 KVMem arena fails during compaction rather than by queueing.
 
+`--max-context` may exceed the model's native 262,144-token rotary window, up to twice it (524,288
+tokens). Past the native window the text RoPE divisors are published once at startup with the YaRN
+ramp: pairs whose wavelength exceeds the native window are divided by
+`F = max_context / 262144`, the boundary band is interpolated, and the attention dot-product scale
+is multiplied by `0.1*ln(F)+1`. A capacity inside the native window publishes nothing, so the
+native rotation stays bit-exact. The extension moves positions only, so the resource limits stay
+where they were: the attention kernels resolve at most 262,144 visible keys, which keeps the
+resident device KV pool (and the KVMem window) inside that visibility, and the logical page store
+must cover the whole `--max-context`, so `--kv-device-tokens` plus `--host-kv-mib` must buy
+`--max-context/64` pages (6,144 for 384K, 8,192 for 512K). Measured on one RTX 4070 Ti SUPER
+(16 GiB device, 30 GiB host): a 300K-token needle at `--max-context 393216` with a
+36,864-token KVMem window answered correctly (TTFT 185.7 s, 1,614 t/s prefill); the same
+213,666-token prompt answered correctly in 130.6 s at the native window and 140.4 s at 1.5x
+(prefill 1.64k vs 1.53k t/s, decode unchanged at ~51 t/s); a `--max-context 524288` server
+starts with 14.5 GiB of pinned Host KV and answers a short prompt, but that leaves only about
+6 GiB of host memory, so prefilling a full 512K window still needs a larger host.
+
 Context-cost coefficients resolve once at startup from generic defaults, matching compiled values,
 and optional transfer or artifact-prefill entries from `--context-cost-presets FILE`. A malformed
 file aborts startup; the operational context-cost record and JSONL `server_start` identify the

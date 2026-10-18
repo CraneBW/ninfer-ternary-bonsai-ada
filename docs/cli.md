@@ -246,7 +246,15 @@ Run `./build/apps/ninfer --help` for the exact option contract.
 
 ## Context and memory
 
-The registered model IDs have a native context limit of 262,144 tokens. The practical allocation
+The registered model IDs have a native context limit of 262,144 tokens. `--max-context` may
+extend it up to twice that window (524,288 tokens): past 262,144 the text RoPE divisors take the
+YaRN ramp and the attention dot-product scale takes the matching temperature multiplier, both
+resolved once at startup (a capacity inside the native window publishes nothing, so the native
+rotation stays bit-exact). Extension does not raise the attention kernels' 262,144-visible-key
+resource limit -- an extended window keeps its resident KV inside that visibility, which in
+practice means windowed continuation (`--kvmem`) or a device pool below the limit -- and the
+logical page store must still cover the whole `--max-context`, so `--kv-device-tokens` and
+`--host-kv-mib` together buy `--max-context/64` pages. The practical allocation
 on one RTX 5090 depends on the selected artifact, media workload, output budget, and KV-cache type.
 Artifact identity selects the weight profile;
 `--kv-dtype` selects runtime KV storage, and `--cache-type-k` / `--cache-type-v` select each side

@@ -4,6 +4,7 @@
 #include "targets/qwen3_6/impl/runtime/instance.h"
 #include "targets/qwen3_6/impl/runtime/program.h"
 #include "targets/qwen3_6/impl/runtime/rebuild_work.h"
+#include "targets/qwen3_6/impl/runtime/yarn.h"
 
 #include "core/nvtx.h"
 #include "core/startup.h"
@@ -11,6 +12,7 @@
 #include "ninfer/ops/gdn_replay.h"
 #include "ninfer/ops/linear.h"
 #include "ninfer/ops/prepare_ragged_prefix.h"
+#include "ninfer/ops/rope.h"
 #include "ninfer/ops/sampling.h"
 #include "ninfer/ops/scatter.h"
 #include "ninfer/ops/speculative_round.h"
@@ -762,6 +764,9 @@ void instantiate_graph_family(DecodeGraphFamily& family, const char* label, Devi
 ProgramImplCore::ProgramImplCore(const LoadedModelData& model_in, const SequencePlanImpl& plan,
                                  DeviceContext& device_in, const StartupObserver& startup_observer)
     : model(model_in), device(device_in), capacity(plan.capacity), kv_capacity(plan.kv_capacity),
+      attn_scale(kAttentionScale *
+                 compute_yarn_config(Variant::maximum_context, plan.capacity)
+                     .attn_temperature_multiplier),
       host_backed_kv(plan.host_backed_kv), max_concurrency(plan.max_concurrency),
       context_cache(plan.context_cache),
       continuation_capacity(normalized_private_capacity(plan.context_cache)),
@@ -1046,6 +1051,14 @@ ProgramImplCore::ProgramImplCore(const LoadedModelData& model_in, const Sequence
     }
     CUDA_CHECK(cudaMemsetAsync(token_counts.data, 0, token_counts.bytes(), device.stream));
     CUDA_CHECK(cudaMemsetAsync(sampling_config.data, 0, sampling_config.bytes(), device.stream));
+    // Publish the text RoPE divisors this Program rotates with. A capacity inside the native
+    // window publishes nothing, so the baked native table (and therefore the native rotation)
+    // stays untouched; an extended window installs the YaRN ramp that the rope kernel, the KVMem
+    // scorer and the KVMem re-phase all read.
+    {
+        const YarnConfig yarn = compute_yarn_config(Variant::maximum_context, capacity);
+        ops::set_text_rope_frequencies(yarn.scale_factor > 1.0F ? yarn.inv_freq.data() : nullptr);
+    }
     device.synchronize();
     if (use_cuda_graph) {
         StartupPhaseScope graph_phase(startup_observer, StartupPhase::CudaGraphPrepare);
@@ -1157,7 +1170,8 @@ std::vector<float> ProgramImplCore::causal_score(PreparedPromptData&& prompt,
             const std::uint32_t nominal = std::min(prefill_chunk, predictor_count - cursor);
             schedule::PrefillContext schedule_state{
                 {device, model, work, state_images->linear(), nullptr, io, prefill_hidden,
-                 prefill_chunk, proposal_head, text_kv_addresses->kvmem_query_capture()},
+                 prefill_chunk, proposal_head, text_kv_addresses->kvmem_query_capture(),
+                 attn_scale},
                 decoder->text_kv.execution_view(text_kv_addresses->execution_row(*address)),
                 {},
                 decoder->text_kv,
@@ -9158,7 +9172,7 @@ runtime::ExecutionTiming ProgramImplCore::append_forced_tokens(
                 schedule::PrefillContext schedule_state{
                     {device, model, work, state_images->linear(),
                      replay_records ? &*replay_records : nullptr, io, prefill_hidden, prefill_chunk,
-                     proposal_head, text_kv_addresses->kvmem_query_capture()},
+                     proposal_head, text_kv_addresses->kvmem_query_capture(), attn_scale},
                     text_kv_view(sequence),
                     mtp_kv_view(sequence),
                     decoder->text_kv,
@@ -11494,7 +11508,8 @@ void ProgramImplCore::prepare_graphs() {
                                        prefill_hidden,
                                        prefill_chunk,
                                        proposal_head,
-                                       text_kv_addresses->kvmem_query_capture()};
+                                       text_kv_addresses->kvmem_query_capture(),
+                                       attn_scale};
     };
 
     if (speculative_backend == SpeculativeBackend::None) {
@@ -11839,7 +11854,7 @@ ProgramImplCore::advance_prefill(SequenceState& sequence, RequestControl& reques
         schedule::PrefillContext schedule_state{
             {device, model, work, state_images->linear(),
              replay_records ? &*replay_records : nullptr, io, prefill_hidden, prefill_chunk,
-             proposal_head, text_kv_addresses->kvmem_query_capture()},
+             proposal_head, text_kv_addresses->kvmem_query_capture(), attn_scale},
             text_kv_view(sequence),
             mtp_kv_view(sequence),
             decoder->text_kv,

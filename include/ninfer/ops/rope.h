@@ -40,4 +40,11 @@ void rope(const Tensor& positions, int rotary_dim, float theta, Tensor& q, Tenso
 // from x; Q versus K role does not change the transformation.
 void rope(const Tensor& positions, int rotary_dim, float theta, Tensor& x, cudaStream_t stream);
 
+// Publishes the 32 split-half text RoPE divisors that every text-rope consumer reads: the rope
+// kernel, the KVMem block scorer (which un-rotates K before the mean-key cosine) and the KVMem
+// compaction re-phase. A null pointer restores the baked native table, so a Program whose context
+// fits the native window keeps the native rotation bit-exact. The table is one process-wide device
+// constant: programs of different context capacities must not be live in the same process.
+void set_text_rope_frequencies(const float* inv_freq_32);
+
 } // namespace ninfer::ops

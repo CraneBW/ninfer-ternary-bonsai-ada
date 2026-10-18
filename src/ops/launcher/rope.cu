@@ -6,6 +6,22 @@
 
 #include <cstdint>
 
+namespace ninfer::ops {
+
+// Baked native table: theta = 1e7 over the 64-wide text rotary dimension, one divisor per rotated
+// pair. A YaRN-extended Program replaces it through set_text_rope_frequencies().
+__device__ __constant__ float kTextRopeInvFrequency[32] = {
+    1.000000000e+00F, 6.042963902e-01F, 3.651741273e-01F, 2.206734069e-01F, 1.333521432e-01F,
+    8.058421878e-02F, 4.869675252e-02F, 2.942727176e-02F, 1.778279410e-02F, 1.074607828e-02F,
+    6.493816316e-03F, 3.924189758e-03F, 2.371373706e-03F, 1.433012570e-03F, 8.659643234e-04F,
+    5.232991147e-04F, 3.162277660e-04F, 1.910952975e-04F, 1.154781985e-04F, 6.978305849e-05F,
+    4.216965034e-05F, 2.548296748e-05F, 1.539926526e-05F, 9.305720409e-06F, 5.623413252e-06F,
+    3.398208329e-06F, 2.053525026e-06F, 1.240937761e-06F, 7.498942093e-07F, 4.531583638e-07F,
+    2.738419634e-07F, 1.654817100e-07F,
+};
+
+} // namespace ninfer::ops
+
 namespace ninfer::ops::detail {
 namespace {
 
@@ -183,7 +199,23 @@ void launch_generic(const Tensor& positions, int rotary_dim, float theta, Tensor
         token_stride(k));
 }
 
+// Native table used to restore the baked divisors when a Program publishes no YaRN scaling.
+constexpr float kDefaultTextRopeInvFrequency[32] = {
+    1.000000000e+00F, 6.042963902e-01F, 3.651741273e-01F, 2.206734069e-01F, 1.333521432e-01F,
+    8.058421878e-02F, 4.869675252e-02F, 2.942727176e-02F, 1.778279410e-02F, 1.074607828e-02F,
+    6.493816316e-03F, 3.924189758e-03F, 2.371373706e-03F, 1.433012570e-03F, 8.659643234e-04F,
+    5.232991147e-04F, 3.162277660e-04F, 1.910952975e-04F, 1.154781985e-04F, 6.978305849e-05F,
+    4.216965034e-05F, 2.548296748e-05F, 1.539926526e-05F, 9.305720409e-06F, 5.623413252e-06F,
+    3.398208329e-06F, 2.053525026e-06F, 1.240937761e-06F, 7.498942093e-07F, 4.531583638e-07F,
+    2.738419634e-07F, 1.654817100e-07F,
+};
+
 } // namespace
+
+void set_text_rope_frequencies_symbol(const float* inv_freq_32) {
+    const float* source = inv_freq_32 != nullptr ? inv_freq_32 : kDefaultTextRopeInvFrequency;
+    CUDA_CHECK(cudaMemcpyToSymbol(kTextRopeInvFrequency, source, sizeof(float) * 32));
+}
 
 void rope_launch(const Tensor& positions, int rotary_dim, float theta, Tensor& q, Tensor& k,
                  cudaStream_t stream) {
