@@ -212,6 +212,8 @@ ninfer_add_test(ninfer_request_log_test
 ninfer_add_test(ninfer_serve_metrics_test
   SOURCES test_serve_metrics.cpp
   LIBRARIES ninfer_serve)
+ninfer_add_test(ninfer_kvmem_retrieval_test
+  SOURCES test_kvmem_retrieval.cpp)
 ninfer_add_test(ninfer_host_timing_test
   SOURCES test_host_timing.cpp
   LIBRARIES ninfer_core)

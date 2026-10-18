@@ -164,24 +164,6 @@ bool ends_with(const std::string& text, std::string_view suffix) {
            text.compare(text.size() - suffix.size(), suffix.size(), suffix) == 0;
 }
 
-long last_real_user_query(const std::vector<ChatMessage>& messages) {
-    long trailing_tool_query = -1;
-    for (long i = static_cast<long>(messages.size()) - 1; i >= 0; --i) {
-        const ChatMessage& message = messages[static_cast<std::size_t>(i)];
-        if (message.role == ChatRole::Tool && trailing_tool_query < 0) { trailing_tool_query = i; }
-        if (message.role != ChatRole::User) { continue; }
-        const RenderedFragment content = trim_ascii_whitespace(message.rendered_content());
-        if (!(starts_with(content.text, "<tool_response>") &&
-              ends_with(content.text, "</tool_response>"))) {
-            return i;
-        }
-    }
-    // A truncated imported history may begin at the tool-result turn. That result is the current
-    // query even though the user message that initiated the omitted tool call is not visible.
-    if (trailing_tool_query >= 0) { return trailing_tool_query; }
-    throw std::invalid_argument("no user query found in chat messages");
-}
-
 // The last message the caller can only append past: a user turn, or a tool result under either
 // spelling (ChatRole::Tool, or the <tool_response> wrapper this template folds into a user
 // message). Unlike last_real_user_query this is the boundary the stable prefix ends at, not the
@@ -380,6 +362,24 @@ std::string_view resolve_reasoning_instructions(ChatTemplateSemantics semantics,
 }
 
 } // namespace
+
+long last_real_user_query(const std::vector<ChatMessage>& messages) {
+    long trailing_tool_query = -1;
+    for (long i = static_cast<long>(messages.size()) - 1; i >= 0; --i) {
+        const ChatMessage& message = messages[static_cast<std::size_t>(i)];
+        if (message.role == ChatRole::Tool && trailing_tool_query < 0) { trailing_tool_query = i; }
+        if (message.role != ChatRole::User) { continue; }
+        const RenderedFragment content = trim_ascii_whitespace(message.rendered_content());
+        if (!(starts_with(content.text, "<tool_response>") &&
+              ends_with(content.text, "</tool_response>"))) {
+            return i;
+        }
+    }
+    // A truncated imported history may begin at the tool-result turn. That result is the current
+    // query even though the user message that initiated the omitted tool call is not visible.
+    if (trailing_tool_query >= 0) { return trailing_tool_query; }
+    throw std::invalid_argument("no user query found in chat messages");
+}
 
 bool ChatMessage::has_media() const noexcept {
     for (const ChatPart& part : parts) {

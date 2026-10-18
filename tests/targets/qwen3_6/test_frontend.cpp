@@ -1120,6 +1120,12 @@ int test_text_and_image_prepare(const Frontend& frontend) {
         check(text_data.position_axis(0).back() == 8 && text_data.position_axis(1).back() == 8 &&
                   text_data.position_axis(2).back() == 8,
               "text frontend did not construct axis-major positions");
+    // KVMem retrieval asks the question with the last user turn, not just the final prompt
+    // token. The preamble ends at token 5; the rendered user turn is [5, 9) here.
+    // This synthetic template renders no preamble: the user turn occupies [0, 5) and the
+    // assistant generation prefix follows it.
+    failures += check(text_data.query_begin == 0 && text_data.query_end == 5,
+                      "text frontend did not publish the last user query span");
 
     ninfer::ChatMessage preserved_message;
     preserved_message.role = ninfer::ChatRole::User;

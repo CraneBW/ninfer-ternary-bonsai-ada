@@ -150,6 +150,11 @@ struct PreparedPromptData {
     PromptIdentity identity;
     PreparedContextCache context_cache;
     std::shared_ptr<const frontend_internal::ToolCallOutputContract> tool_call_output;
+    // Token span of the current user query inside token_ids, half open. KVMem retrieval scores
+    // blocks against the queries in this span rather than the last prompt token, which for a long
+    // prompt with a trailing question is dominated by unrelated document text.
+    std::uint32_t query_begin = 0;
+    std::uint32_t query_end   = 0;
     bool starts_in_reasoning = false;
     PrepareStats prepare;
 

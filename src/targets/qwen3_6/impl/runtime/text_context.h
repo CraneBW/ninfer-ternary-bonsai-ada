@@ -178,7 +178,8 @@ public:
     }
 
     // KVMem K3: arm the retrieval query capture. Set only by the prefill
-    // schedule, so the buffer ends up holding the request's last prompt token.
+    // schedule; attn_mix then accumulates the Q columns inside the request's
+    // query span, so the buffer holds the latest user turn's summed query.
     void set_kvmem_query_capture(const ninfer::kvmem::KvmemQueryCapture* capture) noexcept {
         kvmem_query_ = capture;
     }
@@ -335,6 +336,9 @@ private:
     Tensor* rewrite_checkpoint_hidden_output_ = nullptr;
     std::uint32_t mtp_proposal_extent_        = 0;
     const ninfer::kvmem::KvmemQueryCapture* kvmem_query_ = nullptr;
+    // Prompt position of the current prefill chunk's first column, so the query
+    // accumulator can tell which columns fall inside the request's query span.
+    std::uint32_t kvmem_query_chunk_begin_ = 0;
 
     const Weight* embed_                        = nullptr;
     const Tensor* final_norm_                   = nullptr;

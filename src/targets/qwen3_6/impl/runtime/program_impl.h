@@ -876,7 +876,8 @@ ProgramImplCore::ProgramImplCore(const LoadedModelData& model_in, const Sequence
     text_kv_addresses->install_kvmem_query(
         static_cast<std::uint32_t>(TextConfig::full_attention_layers()),
         static_cast<std::uint32_t>(TextConfig::query_heads),
-        static_cast<std::uint32_t>(TextConfig::head_dim));
+        static_cast<std::uint32_t>(TextConfig::head_dim),
+        static_cast<std::uint32_t>(TextConfig::kv_heads));
     state_images =
         std::make_unique<qwen3_6::StateImageDevicePool>(backing, plan.persistent.state_images);
     const std::uint32_t host_state_slots = *plan.context_cache.host_state_slots;
@@ -11859,6 +11860,11 @@ ProgramImplCore::advance_prefill(SequenceState& sequence, RequestControl& reques
         }
 
         if (staged.cursor < staged.prompt_tokens) {
+            if (!staged.query_captured) {
+                text_kv_addresses->reset_kvmem_query(staged.prompt.query_begin,
+                                                     staged.prompt.query_end);
+                staged.query_captured = true;
+            }
             const std::uint32_t nominal =
                 std::min(prefill_chunk, staged.prompt_tokens - staged.cursor);
             mark_workspace_usage(staged.prepare_mtp ? workspace_plan.mtp_prefill

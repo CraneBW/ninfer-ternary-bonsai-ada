@@ -168,25 +168,59 @@ frontier 一一对应，且 checkpoints 的 StateImage 必须真的处于那个 
   跨块会退化成近似正交——实测 19 个块分数全为 0。
 - 缓存 K 是 int8-group64，所以打分链是：反量化 → 撤销 H256（对合）→ 在块实际烘焙的
   位置 un-RoPE → 与 raw Q 比余弦。落位 `src/kvmem/kvmem_score.cu`。
-- Q 来源：prefill 时在 `ops::rope` **之前**按列捕获进一个启动期分配的 device 缓冲
-  （decode graph 捕获之前装好，地址才不会漂）。
+- Q 来源：prefill 时在 `ops::rope` **之前**按**查询区间**累加进一个启动期分配的 F32
+  device 缓冲（decode graph 捕获之前装好，地址才不会漂）。区间由 frontend 写进
+  `PreparedPromptData.query_begin/query_end`：`last_real_user_query` 找到最后一条真正的
+  用户消息，`message_boundaries` 给出它的 token 区间，再按参考驱动的
+  `query_max_tokens=512` 上限裁到最后 512 个 token；没有精确边界时回退到最后 512 个
+  prompt token。`TextContext` 在每张 prefill 卡片上按 `[query_begin, query_end)` 与当前
+  chunk 的交集调 `kvmem_accumulate_query` 累加，不再是覆盖最后列。
 
 **验收**（与 §6 同一环境）：中段埋唯一事实的两轮问答，无信号时第二轮答不出来（中段块
 不在窗口），有信号时答对；cache 与 TTFT 与无信号版完全一致。新增
-`tests/kvmem_score_test.cu` 用真实页池 + CPU 模型逐位对照。
+`tests/test_kvmem_retrieval.cpp` 覆盖 host 打分器的 GQA max 语义与空块；
+`tests/kvmem_score_test.cu` 是 Windows standalone 的页池 + CPU 模型逐位对照脚本，本环境未编译。
+
+**持久 mean-K（已实现）**：换出到宿主 arena 的块原本没有证据——旧实现只在打分时
+从驻留 device 页现算 mean-K，随后对所有块 `add_scores(id, score, 0)`，宿主块恒为 0 分。
+现在每条 KVMem 地址带一份 host 侧 mean-K **和**（每块 `layers × kv_heads × head_dim`
+个 F32，16 层 × 4 KV head × 256 维 = 64 KiB/块；262K 上下文 4096 块共约 256 MiB，
+只在地址第一次压实时分配）：
+
+- 压实前（stage-out 改写页之前）`kvmem_export_mean_k` 把每个驻留块的 raw mean-K 和
+  写到 host；块的有效 token 数按 `committed_frontier - baked_pos` 算（最后一行未写满的
+  页也正确），已导出且 token 数未变的块跳过重算。
+- `kvmem_score_window` 把 F32 query sums 拷回 host，用
+  `src/kvmem/kvmem_retrieval.h` 的 `mean_key_scores` 对**全部块（含 Host）**打分：
+  GQA group 内逐 query head 算余弦取 max（参考 `score_agg=1`，不再用 group 平均），
+  再对 KV head 与 active layer 平均；纯 FP32、按 block 分线程、无归约所以确定性。
+- 均值 cosine 的 token 数在分子分母抵消，所以 host 侧只需 K 的 sum 与 query 的 sum。
+- `kvmem_forget_window_tail` / `release` 同步截断或清空 mean-K，避免 block id 复用后
+  拿旧证据跳过导出。
+
+**验收**（213,666 token 三主题真实文本，问题在 B 段中段，参考
+`/home/ran/ninfer-work/报告-KVMem复现与实测-2026-09-26.md`）：同一份 int8 KV、
+`--max-context 262144 --max-concurrency 1 --prefill-chunk 2048`，只改窗口预算：
+
+| 窗口 | 答案 | TTFT | prefill | decode | stage_in 块 | 说明 |
+|---|---|---|---|---|---|---|
+| 32K (32,745) | `Type 94 Nambu pistol` | 126.8 s | 1.69k t/s | 50.7 t/s | 207 | 旧实现 17K 窗口答不出 |
+| 48K (49,129) | `Type 94 Nambu pistol` | 131.3 s | 1.63k t/s | 50.4 t/s | 334 | 验收要求的窗口 |
+| 74K (75,753) | `Type 94 Nambu pistol` | 161.9 s | 1.32k t/s | 44.0 t/s | 439 | 旧实现此档才答对 |
+| 98K (100,329) | `Type 94 Nambu pistol` | 168.0 s | 1.27k t/s | 42.3 t/s | 542 | 更长窗口的无回归对照 |
+
+`stage_in` 的 207–542 个块（约 1.3 万–3.5 万 token）就是被最终 query 从宿主重新选回的
+中段证据——旧实现里它们的分数恒 0，永远不会被选回。32K 也能答对说明证据链不只对
+"窗口刚好覆盖事实"有效；98K 档答案仍然正确，TTFT 与 decode 的差别来自窗口变长后的
+attention 扫描量，不是检索开销（打分只在压实时刻发生）。
 
 **仍未做**：
 
-- query 只取 prompt 最后一个 token。参考实现是把**整个 query 区间**（本轮最后一条用户
-  消息）的 Q 求和再平均。区间边界在 frontend 已经算好
-  （`chat_template` 的 `message_boundaries` + `last_real_user_query`），只是在
-  `frontend.cpp` 被丢弃、没进 `PreparedPromptData`；kernel 侧只需由覆写改成累加。
-  真正的工件是区间落在复用前缀里时的情形：参考实现另有一套查询状态冻结/导入机制
-  来跨请求复用上一轮的 Q，我们还没有。
-- mean-K 在打分时由驻留 device 页现算，没有持久 mean-K store，所以已挤出到宿主 arena
-  的块恒为 0 分（"无证据"）。参考实现保留每块每层的 mean-K，挤出块也有分数。
-- 分数只在压缩时刻按当时的 query 算一次，不是每步重选。attention 热度（profile）信号
+- query 区间落在复用前缀里时还没有冻结/导入上一轮 Q 的机制（参考实现有）；当前
+  每个新 prefill 从零累加，因此整段 exact-reuse 的请求会沿用上一次的 query。
+- 分数只在压缩时刻按当时的 query 算一次，不是每步重选；attention 热度（profile）信号
   仍未接入，`profile_score` 恒 0。
+- 并发 prefill 共用一个全局 query 缓冲，目前按单请求假设。
 
 ## 8. 窗口化 continuation 的契约扩展（已实现）
 

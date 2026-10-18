@@ -133,6 +133,11 @@ struct RenderedChat {
     std::vector<std::optional<std::size_t>> cache_boundaries;
 };
 
+// Index of the message that carries the current user query, or the trailing tool result when the
+// imported history starts in the middle of a tool loop. Throws std::invalid_argument when neither
+// is present.
+[[nodiscard]] long last_real_user_query(const std::vector<ChatMessage>& messages);
+
 enum class ChatTemplateSemantics : std::uint8_t {
     ThinkingToggle,
     ReasoningEffort,

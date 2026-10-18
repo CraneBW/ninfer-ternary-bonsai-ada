@@ -5,6 +5,7 @@
 #include "core/paged_kv_cache.h"
 #include "kvmem/kvmem_blocks.h"
 #include "kvmem/kvmem_bridge.h"
+#include "kvmem/kvmem_retrieval.h"
 #include "ninfer/types.h"
 
 #include <algorithm>
@@ -900,6 +901,8 @@ public:
             kvmem_block_pages_.resize(address_capacity);
             kvmem_block_hosts_.resize(address_capacity);
             kvmem_reuse_floors_.resize(address_capacity);
+            kvmem_mean_k_.resize(address_capacity);
+            kvmem_mean_k_tokens_.resize(address_capacity);
         }
         for (std::uint32_t index = 0; index < address_capacity; ++index) {
             free_[index] = address_capacity - 1U - index;
@@ -1894,6 +1897,8 @@ public:
             for (HostKVAllocation& host : kvmem_block_hosts_[index]) { host.release(); }
             kvmem_block_hosts_[index].clear();
             kvmem_reuse_floors_[index] = 0;
+            kvmem_mean_k_[index].clear();
+            kvmem_mean_k_tokens_[index].clear();
         }
         rebuild_checkpoint_protection();
         return true;
@@ -2066,6 +2071,10 @@ private:
         }
         block_pages.resize(keep);
         block_hosts.resize(keep);
+        if (kvmem_mean_k_.size() > index) {
+            kvmem_mean_k_[index].resize(static_cast<std::size_t>(keep) * kvmem_mean_k_stride_);
+            kvmem_mean_k_tokens_[index].resize(keep);
+        }
         repo.truncate(keep);
     }
 
@@ -2127,51 +2136,109 @@ private:
         ++kvmem_plans_;
     }
 
-    // KVMem K3: fill the ledger's retrieval scores from the captured query. A
-    // block whose K is not device-resident (evicted to the host arena) keeps
-    // score 0 -- "no evidence". With no capture installed, or with nothing
-    // scoreable, every score stays 0 and the window selection is the unranked
-    // one, so a KVMem-disabled run is bit-identical to the K2 path.
+    // KVMem K3: refresh the host mean-K of every resident block, then rank the
+    // whole ledger -- resident and evicted -- against the request query. A block
+    // keeps its host mean-K after it is parked, so a middle block evicted by an
+    // earlier chunk can still be selected by the final question; the reference
+    // scorer's evidence never depended on the block staying on the device.
     void kvmem_score_window(std::size_t index, DeviceKVPagePool& pool, cudaStream_t stream) {
         const ninfer::kvmem::KvmemQueryCapture* query = kvmem_query_capture();
-        if (query == nullptr) { return; }
+        if (query == nullptr || query->layers == 0 || query->kv_heads == 0 ||
+            kvmem_mean_k_stride_ == 0 || index >= kvmem_mean_k_.size()) {
+            return;
+        }
         auto& repo            = kvmem_repos_[index];
         const std::uint32_t n = repo.block_count();
         if (n == 0) { return; }
-        std::vector<std::int32_t> pages(n, -1);
-        std::vector<std::int32_t> baked(n, 0);
-        bool scoreable = false;
+        const std::size_t stride = kvmem_mean_k_stride_;
+        kvmem_mean_k_[index].resize(static_cast<std::size_t>(n) * stride, 0.0f);
+        kvmem_mean_k_tokens_[index].resize(n, 0);
+
+        const std::uint32_t frontier = addresses_[index].committed_frontier;
+        constexpr std::uint32_t page_tokens = static_cast<std::uint32_t>(kPagedKVPageSize);
+        std::vector<std::uint32_t> export_ids;
+        std::vector<std::int32_t> export_pages;
+        std::vector<std::int32_t> export_baked;
+        std::vector<std::uint32_t> export_tokens;
         for (std::uint32_t id = 0; id < n; ++id) {
             if (repo.tier_of(id) != ninfer::kvmem::KvTier::Gpu) { continue; }
             if (kvmem_block_pages_[index].size() <= id ||
                 !kvmem_block_pages_[index][id].valid()) {
                 continue;
             }
-            pages[id] = pool.physical_index_of(pages_->physical(kvmem_block_pages_[index][id]));
-            baked[id] = static_cast<std::int32_t>(repo.baked_pos_of(id));
-            scoreable = true;
+            const std::int64_t baked = repo.baked_pos_of(id);
+            if (baked < 0 || static_cast<std::uint64_t>(baked) >= frontier) {
+                kvmem_mean_k_tokens_[index][id] = 0;
+                continue;
+            }
+            const std::uint32_t written =
+                std::min(page_tokens, frontier - static_cast<std::uint32_t>(baked));
+            if (written == 0) {
+                kvmem_mean_k_tokens_[index][id] = 0;
+                continue;
+            }
+            if (kvmem_mean_k_tokens_[index][id] == written) { continue; }
+            export_ids.push_back(id);
+            export_pages.push_back(
+                pool.physical_index_of(pages_->physical(kvmem_block_pages_[index][id])));
+            export_baked.push_back(static_cast<std::int32_t>(baked));
+            export_tokens.push_back(written);
         }
-        if (!scoreable) { return; }
-        std::vector<float> scores(n, 0.0f);
+        if (!export_ids.empty()) {
+            std::vector<float> exported(export_ids.size() * stride, 0.0f);
+            try {
+                ninfer::kvmem::kvmem_export_mean_k(
+                    pool, export_pages.data(), export_baked.data(), export_tokens.data(),
+                    static_cast<std::uint32_t>(export_ids.size()), exported.data(), stream);
+            } catch (const std::exception& error) {
+                // Retrieval only ranks the middle quota: a geometry it cannot read
+                // must not make the compaction fail, it must leave it unranked.
+                std::fprintf(stderr, "KVMEM_TRACE mean_k_failed %s\n", error.what());
+                return;
+            }
+            for (std::size_t i = 0; i < export_ids.size(); ++i) {
+                const std::uint32_t id = export_ids[i];
+                std::copy_n(exported.data() + i * stride, stride,
+                            kvmem_mean_k_[index].data() + static_cast<std::size_t>(id) * stride);
+                kvmem_mean_k_tokens_[index][id] = export_tokens[i];
+            }
+        }
+
+        const std::size_t query_elems = static_cast<std::size_t>(query->layers) *
+                                        query->q_heads * query->head_dim;
+        if (kvmem_query_host_.size() != query_elems) { kvmem_query_host_.resize(query_elems); }
         try {
-            ninfer::kvmem::kvmem_score_blocks(pool, *query, pages.data(), baked.data(), n,
-                                              scores.data(), stream);
+            KVMEM_CUDA_CHECK(cudaStreamSynchronize(stream));
+            kvmem_query_buffer_.copy_to_host(kvmem_query_host_.data(),
+                                             query_elems * sizeof(float));
         } catch (const std::exception& error) {
-            // Retrieval only ranks the middle quota: a geometry it cannot read
-            // must not make the compaction fail, it must leave it unranked.
+            std::fprintf(stderr, "KVMEM_TRACE query_copy_failed %s\n", error.what());
+            return;
+        }
+
+        std::vector<float> scores;
+        try {
+            const ninfer::kvmem::MeanKeyQueryView view{kvmem_query_host_.data(), query->layers,
+                                                       query->head_dim, query->q_heads,
+                                                       query->kv_heads};
+            scores = ninfer::kvmem::mean_key_scores(
+                n, kvmem_mean_k_[index].data(), kvmem_mean_k_tokens_[index].data(), view);
+        } catch (const std::exception& error) {
             std::fprintf(stderr, "KVMEM_TRACE score_failed %s\n", error.what());
             return;
         }
         for (std::uint32_t id = 0; id < n; ++id) {
             repo.add_scores(id, scores[id], 0.0);
-            if (pages[id] < 0) { continue; }
+            if (kvmem_mean_k_tokens_[index][id] == 0) { continue; }
             ++kvmem_scoreable_blocks_;
             if (scores[id] == 0.0F) { ++kvmem_zero_score_blocks_; }
         }
         if (std::getenv("NINFER_KVMEM_TRACE") != nullptr) {
             for (std::uint32_t id = 0; id < n; ++id) {
-                std::fprintf(stderr, "KVMEM_TRACE score id=%u page=%d pos=%d retrieval=%.5f\n", id,
-                             pages[id], baked[id], scores[id]);
+                std::fprintf(stderr,
+                             "KVMEM_TRACE score id=%u tier=%d tokens=%u retrieval=%.5f\n", id,
+                             static_cast<int>(repo.tier_of(id)),
+                             kvmem_mean_k_tokens_[index][id], scores[id]);
             }
         }
     }
@@ -2511,18 +2578,34 @@ public:
         return kvmem_budget_ < kv_tokens ? kvmem_budget_ : 0U;
     }
 
-    // KVMem K3: install the device query-capture buffer
-    // (bf16 [layers][q_heads][head_dim]). Called once at start-up so the address
-    // stays stable across CUDA-graph capture; the prefill schedule writes the
-    // request's query there and kvmem_compact ranks its ledger with it.
-    void install_kvmem_query(std::uint32_t layers, std::uint32_t q_heads, std::uint32_t head_dim) {
-        if (!kvmem_enabled_ || layers == 0 || q_heads == 0 || head_dim == 0) { return; }
+    // KVMem K3: install the device query-sum buffer (f32 [layers][q_heads][head_dim])
+    // and the host mean-K geometry. Called once at start-up so the addresses stay
+    // stable across CUDA-graph capture; the prefill schedule accumulates the
+    // request's query sums there and kvmem_compact ranks its ledger with them.
+    void install_kvmem_query(std::uint32_t layers, std::uint32_t q_heads, std::uint32_t head_dim,
+                             std::uint32_t kv_heads) {
+        if (!kvmem_enabled_ || layers == 0 || q_heads == 0 || head_dim == 0 || kv_heads == 0) {
+            return;
+        }
         const std::uint64_t bytes =
-            static_cast<std::uint64_t>(layers) * q_heads * head_dim * sizeof(std::uint16_t);
+            static_cast<std::uint64_t>(layers) * q_heads * head_dim * sizeof(float);
         kvmem_query_buffer_ = DeviceBuffer(static_cast<std::size_t>(bytes));
         kvmem_query_buffer_.fill(0);
-        kvmem_query_ =
-            ninfer::kvmem::KvmemQueryCapture{kvmem_query_buffer_.p, layers, q_heads, head_dim};
+        kvmem_query_ = ninfer::kvmem::KvmemQueryCapture{
+            kvmem_query_buffer_.p, layers, q_heads, head_dim, kv_heads, 0, 0};
+        kvmem_mean_k_stride_ =
+            static_cast<std::size_t>(layers) * kv_heads * head_dim;
+        kvmem_query_host_.assign(static_cast<std::size_t>(layers) * q_heads * head_dim, 0.0f);
+    }
+
+    // Starts a request's retrieval capture: clears the summed query and records
+    // which prompt positions the latest user turn covers. Chunked prefill then
+    // accumulates the Q columns that fall inside that span.
+    void reset_kvmem_query(std::uint32_t query_begin, std::uint32_t query_end) {
+        if (!kvmem_query_.valid()) { return; }
+        kvmem_query_buffer_.fill(0);
+        kvmem_query_.query_begin = query_begin;
+        kvmem_query_.query_end   = query_end;
     }
 
     // Null until install_kvmem_query ran, i.e. unless KVMem is enabled.
@@ -2565,6 +2648,12 @@ private:
     ninfer::kvmem::KvmemQueryCapture kvmem_query_{};
     // Per address: the lowest window slot a resumed request may continue from.
     std::vector<std::uint32_t> kvmem_reuse_floors_;
+    // Per address: F32 sum of raw K, [block][layer][kv_heads][head_dim], plus the
+    // number of written tokens the row was exported with (0 = no evidence yet).
+    std::vector<std::vector<float>> kvmem_mean_k_;
+    std::vector<std::vector<std::uint32_t>> kvmem_mean_k_tokens_;
+    std::size_t kvmem_mean_k_stride_ = 0;
+    std::vector<float> kvmem_query_host_;
     std::uint64_t kvmem_plans_             = 0;
     std::uint64_t kvmem_compactions_       = 0;
     std::uint64_t kvmem_compact_skips_     = 0;

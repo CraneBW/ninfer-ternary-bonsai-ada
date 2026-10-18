@@ -849,19 +849,20 @@ void TextContext::attn_mix(const FullLayerW& w, Tensor& x, int fidx, Phase ph) {
     ops::rmsnorm(q, *w.q_norm, kCfg.rms_eps, true, qn, s);
     ops::rmsnorm(k, *w.k_norm, kCfg.rms_eps, true, kn, s);
 
-    // KVMem K3: keep the last prompt token's query for the retrieval scorer, taken
-    // BEFORE the position rotation. Only a prefilling card carries the capture
-    // buffer, so the buffer ends up holding the request's final prompt column, and
-    // the stored query matches the raw-K domain the scorer rebuilds the cached
-    // keys in (a key is position independent, so blocks written at other
-    // distances are only comparable once RoPE is out of the way).
+    // KVMem K3: sum the query columns that fall inside the request's user span,
+    // taken BEFORE the position rotation. Only a prefilling card carries the
+    // capture buffer; chunked prefill calls this once per chunk, and the
+    // accumulator ignores columns outside the span. The stored query matches the
+    // raw-K domain the scorer rebuilds the cached keys in (a key is position
+    // independent, so blocks written at other distances are only comparable once
+    // RoPE is out of the way).
     if (kvmem_query_ != nullptr && ph == Phase::Prefill && active_sequence_batch_ == 0 && T > 0 &&
         fidx < static_cast<int>(kvmem_query_->layers)) {
-        ninfer::kvmem::kvmem_capture_query(qn.data, kvmem_query_->q_heads, kvmem_query_->head_dim,
-                                           static_cast<std::uint32_t>(T),
-                                           static_cast<std::uint32_t>(T - 1),
-                                           const_cast<void*>(kvmem_query_->data),
-                                           static_cast<std::uint32_t>(fidx), s);
+        ninfer::kvmem::kvmem_accumulate_query(
+            qn.data, kvmem_query_->q_heads, kvmem_query_->head_dim,
+            static_cast<std::uint32_t>(T), kvmem_query_chunk_begin_,
+            kvmem_query_->query_begin, kvmem_query_->query_end,
+            const_cast<void*>(kvmem_query_->sums), static_cast<std::uint32_t>(fidx), s);
     }
 
     const Tensor& cache_positions =
@@ -1221,6 +1222,7 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
                 ops::scatter(embeddings, indices_device, x, s);
             }
             if constexpr (Tap::enabled) { tap.begin(x); }
+            kvmem_query_chunk_begin_ = prompt_t0;
             run_layers(x, Phase::Prefill, tap);
             if constexpr (requires { tap.capture_positions(positions, s); }) {
                 tap.capture_positions(positions, s);

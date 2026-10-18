@@ -20,6 +20,7 @@
 
 #include "core/paged_kv_cache.h"
 #include "kvmem/kvmem_bridge.h"
+#include "kvmem/kvmem_retrieval.h"
 #include "ops/kernel/paged_kv_address.cuh"
 #include "ops/kv_cache/int8_g64_codec.cuh"
 
@@ -142,9 +143,9 @@ int main() {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     std::srand(90210);
 
-    void* backing    = nullptr;
-    void* d_q_tensor = nullptr;
-    void* d_capture  = nullptr;
+    void* backing        = nullptr;
+    void* d_q_tensor     = nullptr;
+    void* d_query_sums   = nullptr;
     try {
         KVPageGeometry geometry;
         geometry.page_tokens        = kTokens;
@@ -187,12 +188,11 @@ int main() {
         for (int page = 0; page < kPages; ++page) { baked[page] = 1000 + page * kTokens; }
         const auto raw_value = [&](int page, int layer, int head, int token, int d) {
             if (page == kPages - 1) {
+                // Each KV head follows one probe head of its GQA group, so the
+                // max-over-group score has an exact cosine of one to find.
                 const int group = kQHeads / kHeads;
-                float sum       = 0.0f;
-                for (int gi = 0; gi < group; ++gi) {
-                    sum += bf16_value(q_layer[static_cast<std::size_t>(head * group + gi) * kDim + d]);
-                }
-                return sum / static_cast<float>(group) * 0.9f;
+                return bf16_value(q_layer[static_cast<std::size_t>(head * group) * kDim + d]) *
+                       0.9f;
             }
             return static_cast<float>(std::rand() % 2001 - 1000) / 1000.0f;
         };
@@ -243,78 +243,74 @@ int main() {
                       "upload K scales layer %d", layer);
             }
 
-            const std::size_t capture_bytes =
-                static_cast<std::size_t>(kLayers) * kQHeads * kDim * 2;
+            const std::size_t sums_bytes =
+                static_cast<std::size_t>(kLayers) * kQHeads * kDim * sizeof(float);
             CHECK(cudaMalloc(&d_q_tensor, q_tensor.size() * 2) == cudaSuccess, "malloc q tensor");
-            CHECK(cudaMalloc(&d_capture, capture_bytes) == cudaSuccess, "malloc capture");
+            CHECK(cudaMalloc(&d_query_sums, sums_bytes) == cudaSuccess, "malloc query sums");
             CHECK(cudaMemcpy(d_q_tensor, q_tensor.data(), q_tensor.size() * 2,
                              cudaMemcpyHostToDevice) == cudaSuccess,
                   "upload query tensor");
-            CHECK(cudaMemset(d_capture, 0, capture_bytes) == cudaSuccess, "zero capture");
+            CHECK(cudaMemset(d_query_sums, 0, sums_bytes) == cudaSuccess, "zero query sums");
             for (int layer = 0; layer < kLayers; ++layer) {
-                kvmem_capture_query(d_q_tensor, kQHeads, kDim, kTokens, column, d_capture,
-                                    static_cast<std::uint32_t>(layer), nullptr);
+                kvmem_accumulate_query(d_q_tensor, kQHeads, kDim, kTokens, 0, 0, 1, d_query_sums,
+                                       static_cast<std::uint32_t>(layer), nullptr);
             }
             cudaDeviceSynchronize();
 
-            std::vector<std::uint16_t> captured(static_cast<std::size_t>(kLayers) * kQHeads * kDim);
-            cudaMemcpy(captured.data(), d_capture, capture_bytes, cudaMemcpyDeviceToHost);
-            int capture_mismatch = 0;
-            for (int head = 0; head < kQHeads; ++head) {
-                for (int d = 0; d < kDim; ++d) {
-                    const std::uint16_t want = q_layer[static_cast<std::size_t>(head) * kDim + d];
-                    for (int layer = 0; layer < kLayers; ++layer) {
-                        if (captured[(static_cast<std::size_t>(layer) * kQHeads + head) * kDim + d] !=
+            std::vector<float> query_sums(static_cast<std::size_t>(kLayers) * kQHeads * kDim);
+            CHECK(cudaMemcpy(query_sums.data(), d_query_sums, sums_bytes,
+                             cudaMemcpyDeviceToHost) == cudaSuccess,
+                  "read back query sums");
+            int query_mismatch = 0;
+            for (int layer = 0; layer < kLayers; ++layer) {
+                for (int head = 0; head < kQHeads; ++head) {
+                    for (int d = 0; d < kDim; ++d) {
+                        const float want =
+                            bf16_value(q_layer[static_cast<std::size_t>(head) * kDim + d]);
+                        if (query_sums[(static_cast<std::size_t>(layer) * kQHeads + head) * kDim + d] !=
                             want) {
-                            ++capture_mismatch;
+                            ++query_mismatch;
                         }
                     }
                 }
             }
-            CHECK(capture_mismatch == 0,
-                  "query capture must lift the last column bitwise (%d differ)", capture_mismatch);
+            CHECK(query_mismatch == 0,
+                  "query accumulation must lift the selected column bitwise (%d differ)",
+                  query_mismatch);
 
-            // ---- score the ledger: two random pages, one query-aligned, one parked ----
-            const KvmemQueryCapture query{d_capture, static_cast<std::uint32_t>(kLayers),
-                                          static_cast<std::uint32_t>(kQHeads),
-                                          static_cast<std::uint32_t>(kDim)};
-            std::vector<std::int32_t> pages{kPages - 1, 0, -1};
-            std::vector<std::int32_t> positions{baked[kPages - 1], baked[0], 0};
-            const float sentinel = -9.0f;
-            std::vector<float> scores{0.0f, 0.0f, sentinel};
-            // A non-default stream, like the engine's compute stream: the host
-            // read-back must be ordered against it.
-            cudaStream_t score_stream = nullptr;
-            CHECK(cudaStreamCreate(&score_stream) == cudaSuccess, "create score stream");
-            kvmem_score_blocks(pool, query, pages.data(), positions.data(),
-                               static_cast<std::uint32_t>(pages.size()), scores.data(),
-                               score_stream);
-            cudaStreamSynchronize(score_stream);
-            cudaStreamDestroy(score_stream);
-            CHECK(scores[2] == sentinel,
-                  "a block with no device page must be left untouched (got %.3f)", scores[2]);
+            // ---- export the resident mean keys, score the ledger on the host ----
+            const std::size_t stride = static_cast<std::size_t>(kLayers) * kHeads * kDim;
+            std::vector<std::int32_t> export_pages{kPages - 1, 0};
+            std::vector<std::int32_t> export_baked{baked[kPages - 1], baked[0]};
+            std::vector<std::uint32_t> export_tokens{kTokens, kTokens};
+            std::vector<float> exported(2 * stride, 0.0f);
+            kvmem_export_mean_k(pool, export_pages.data(), export_baked.data(),
+                                export_tokens.data(),
+                                static_cast<std::uint32_t>(export_pages.size()), exported.data(),
+                                nullptr);
+
+            std::vector<float> mean_k(kPages * stride, 0.0f);
+            std::vector<std::uint32_t> block_tokens(kPages, 0);
+            std::copy_n(exported.data(), stride, mean_k.data());
+            std::copy_n(exported.data() + stride, stride, mean_k.data() + stride);
+            block_tokens[0] = kTokens;
+            block_tokens[1] = kTokens;
+            const MeanKeyQueryView view{query_sums.data(), kLayers, kDim, kQHeads, kHeads};
+            const std::vector<float> scores =
+                mean_key_scores(kPages, mean_k.data(), block_tokens.data(), view);
+            CHECK(scores[2] == 0.0f,
+                  "a block without mean keys must score zero (got %.3f)", scores[2]);
             CHECK(scores[0] > 0.98f,
                   "a block whose raw K follows the query must score near 1 (got %.5f)", scores[0]);
 
             // ---- CPU model of the kernel: un-rotate each token, then cosine ----
             float worst = 0.0f;
             for (int slot = 0; slot < 2; ++slot) {
-                const int page  = pages[slot];
-                double total    = 0.0;
+                const int page = export_pages[slot];
+                double total   = 0.0;
                 for (int layer = 0; layer < kLayers; ++layer) {
                     for (int head = 0; head < kHeads; ++head) {
                         const int group = kQHeads / kHeads;
-                        float q_bar[kDim];
-                        for (int d = 0; d < kDim; ++d) {
-                            float sum = 0.0f;
-                            for (int gi = 0; gi < group; ++gi) {
-                                sum += bf16_value(captured[(
-                                    static_cast<std::size_t>(layer) * kQHeads + head * group + gi) *
-                                                          kDim +
-                                                      d]);
-                            }
-                            q_bar[d] = sum / static_cast<float>(group);
-                        }
                         float mean_k[kDim];
                         for (int d = 0; d < kDim; ++d) { mean_k[d] = 0.0f; }
                         for (int token = 0; token < kTokens; ++token) {
@@ -335,27 +331,35 @@ int main() {
                             rope_rotary(row, baked[page] + token, true);
                             for (int d = 0; d < kDim; ++d) { mean_k[d] += row[d]; }
                         }
-                        double dot = 0.0, q_norm = 0.0, k_norm = 0.0;
-                        for (int d = 0; d < kDim; ++d) {
-                            dot += static_cast<double>(q_bar[d]) * mean_k[d];
-                            q_norm += static_cast<double>(q_bar[d]) * q_bar[d];
-                            k_norm += static_cast<double>(mean_k[d]) * mean_k[d];
+                        // GQA max: one cosine per probe head of the group, best one wins.
+                        double best = -1.0;
+                        for (int gi = 0; gi < group; ++gi) {
+                            const int probe = head * group + gi;
+                            double dot = 0.0, q_norm = 0.0, k_norm = 0.0;
+                            for (int d = 0; d < kDim; ++d) {
+                                const double q = query_sums[(
+                                    static_cast<std::size_t>(layer) * kQHeads + probe) * kDim + d];
+                                dot += q * mean_k[d];
+                                q_norm += q * q;
+                                k_norm += static_cast<double>(mean_k[d]) * mean_k[d];
+                            }
+                            const double den = q_norm * k_norm;
+                            best = std::max(best, den > 0.0 ? dot / std::sqrt(den) : 0.0);
                         }
-                        const double den = q_norm * k_norm;
-                        total += den > 0.0 ? dot / std::sqrt(den) : 0.0;
+                        total += best;
                     }
                 }
                 const float expected = static_cast<float>(total / kLayers / kHeads);
                 const float diff     = std::fabs(expected - scores[slot]);
                 worst                = std::max(worst, diff);
                 std::printf("page %d score %.5f expected %.5f\n", page, scores[slot], expected);
-                CHECK(diff < 2e-3f, "page %d cosine mismatch (kernel %.5f, cpu %.5f)", page,
+                CHECK(diff < 2e-3f, "page %d cosine mismatch (host %.5f, cpu %.5f)", page,
                       scores[slot], expected);
             }
             std::printf("worst cosine diff = %.6f\n", worst);
         }
 
-        if (d_capture != nullptr) { cudaFree(d_capture); }
+        if (d_query_sums != nullptr) { cudaFree(d_query_sums); }
         if (d_q_tensor != nullptr) { cudaFree(d_q_tensor); }
         cudaFree(backing);
     } catch (const std::exception& error) {

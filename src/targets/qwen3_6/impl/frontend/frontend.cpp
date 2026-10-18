@@ -358,6 +358,38 @@ void assign_text_positions(PreparedPromptData& prompt) {
     prompt.rope_delta = 0;
 }
 
+// The reference KVMem driver caps the query at its last 512 tokens. A single user message can
+// carry an entire document, and averaging the queries of every document token would dilute the
+// question the retrieval is supposed to answer.
+constexpr std::uint32_t kQuerySpanMaxTokens = 512;
+
+void assign_query_span(PreparedPromptData& prompt,
+                       const std::vector<std::optional<std::uint32_t>>& message_boundaries,
+                       long query_message) {
+    std::uint32_t begin = 0;
+    std::uint32_t end   = 0;
+    if (query_message >= 0 &&
+        static_cast<std::size_t>(query_message) + 1U < message_boundaries.size()) {
+        const auto& query_begin =
+            message_boundaries[static_cast<std::size_t>(query_message)];
+        const auto& query_end =
+            message_boundaries[static_cast<std::size_t>(query_message) + 1U];
+        if (query_begin && query_end && *query_begin < *query_end) {
+            begin = *query_begin;
+            end   = *query_end;
+        }
+    }
+    const std::uint32_t prompt_tokens = checked_token_count(prompt.token_ids.size());
+    if (begin >= end || end > prompt_tokens) {
+        end   = prompt_tokens;
+        begin = end > kQuerySpanMaxTokens ? end - kQuerySpanMaxTokens : 0;
+    } else if (end - begin > kQuerySpanMaxTokens) {
+        begin = end - kQuerySpanMaxTokens;
+    }
+    prompt.query_begin = begin;
+    prompt.query_end   = end;
+}
+
 VisionItem convert_vision_item(fi::VisionItem item) {
     VisionItem result;
     result.modality =
@@ -1440,6 +1472,15 @@ PreparedPrompt Frontend::prepare(PromptInput input, const PreparationControl& co
         throw std::invalid_argument("Vision is disabled for this Engine");
     }
 
+    // The query message has to be located before the media path moves the message list into the
+    // processor. A prompt that starts inside a tool loop still reports its trailing tool result.
+    long query_message = -1;
+    try {
+        query_message = fi::last_real_user_query(messages);
+    } catch (const std::invalid_argument&) {
+        query_message = -1;
+    }
+
     auto prepared              = std::make_unique<PreparedPromptData>();
     PreparedPromptData& result = *prepared;
     result.tool_call_output    = tool_call_output;
@@ -1513,6 +1554,7 @@ PreparedPrompt Frontend::prepare(PromptInput input, const PreparationControl& co
         assign_text_positions(result);
     }
     (void)checked_token_count(result.token_ids.size());
+    assign_query_span(result, message_boundaries, query_message);
     result.identity.reusable = true;
     result.context_cache     = prepare_context_cache(
         std::move(cache_hints), message_count, message_boundaries, rendered_markers,

@@ -504,6 +504,7 @@ struct RequestControl {
         std::uint32_t initial_mtp_extent    = 0;
         double elapsed_seconds              = 0.0;
         bool prepare_mtp                    = false;
+        bool query_captured                 = false;
         ReusePath reuse                     = ReusePath::Root;
         MtpBridgeMode mtp_bridge            = MtpBridgeMode::None;
     };
