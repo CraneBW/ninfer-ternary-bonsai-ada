@@ -7378,7 +7378,13 @@ std::uint32_t ProgramImplCore::kvmem_compaction_edge(const SequenceState& sequen
     // the sink head plus the refolded tail, so no prefill-time anchor is needed: the endpoint
     // captured at the true prompt frontier stays the resume point and simply carries the
     // compacted KV geometry instead of the full-context one.
-    return text_kv_addresses->kvmem_window_edge(sequence.execution_frontier);
+    // Compare the budget against the request's prompt-space frontier, not against the cache
+    // frontier: a chunked prefill already folded the address into its window, so the execution
+    // frontier sits inside the budget even though the request holds far more KV than it. Reading
+    // the folded frontier here would skip the completion-time compaction -- the only selection
+    // that runs after the prompt's query is complete, and therefore the one that can rank the
+    // folded-out middle against it instead of the zero evidence of a partial query.
+    return text_kv_addresses->kvmem_window_edge(executed_prompt_tokens(sequence));
 }
 
 void ProgramImplCore::kvmem_apply_window(SequenceState& sequence, std::uint32_t window) {
@@ -12108,6 +12114,18 @@ ProgramImplCore::advance_prefill(SequenceState& sequence, RequestControl& reques
             timing.resume_submit();
             copy_tail(sequence, prefill_hidden.slice(
                                     1, static_cast<std::int32_t>(final_chunk_tokens) - 1, 1));
+            // KVMem K3b: the query capture completes with this final chunk, while every compaction
+            // on the way here ran before it, so the freshly packed window would otherwise carry
+            // the zero evidence of a query that did not exist yet. Score the retained blocks --
+            // hosted ones included -- before the round is submitted, so the first generation
+            // reclaim already ranks them with the query this request asked.
+            if (staged.query_captured && sequence.kv) {
+                text_kv_addresses->kvmem_refresh_scores(sequence.kv->text, device.stream);
+                if (sequence.kv->backend) {
+                    backend_kv_addresses->kvmem_refresh_scores(*sequence.kv->backend,
+                                                               device.stream);
+                }
+            }
         } else {
             mark_workspace_usage(workspace_plan.ordinary_round);
             if (!sequence.tail_hidden_valid) {

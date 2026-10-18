@@ -216,6 +216,17 @@ frontier 一一对应，且 checkpoints 的 StateImage 必须真的处于那个 
 "窗口刚好覆盖事实"有效；98K 档答案仍然正确，TTFT 与 decode 的差别来自窗口变长后的
 attention 扫描量，不是检索开销（打分只在压实时刻发生）。
 
+**完成态重打分（K3b，已落地）**：分块 prefill 边填边压，最后几次压实常常跑在 query 区间
+（最后一条 user 消息）被捕获之前，窗口于是把「query 不存在时」的零证据带进生成期；而
+offload 已把 `sequence.execution_frontier` 改写成窗口值，`kvmem_compaction_edge()` 用
+它判断预算会返回 0，完成态压实被静默跳过。现在两处一起改：
+`advance_prefill` 在最后一个分片提交前调用新的 `kvmem_refresh_scores()`（只对仍驻留
+的块重算分数，不搬页），`kvmem_compaction_edge()` 改按 prompt 空间前沿
+（`executed_prompt_tokens(sequence)`）判断预算，让「query 完整之后」的压实真正运行。
+实测 14,308-token 诊断夹具：完成态压实第 4 次打分 `mass=3.19e7`，stage_in 30 块、
+scoreable 929 / zero 480（此前 zero == scoreable）；2×98,831 共享前缀验收两码全对、
+stage_in 115 块。
+
 **仍未做**：
 
 - query 区间落在复用前缀里时还没有冻结/导入上一轮 Q 的机制（参考实现有）；当前

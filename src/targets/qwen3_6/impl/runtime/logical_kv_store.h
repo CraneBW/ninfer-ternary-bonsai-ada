@@ -2286,6 +2286,19 @@ private:
     }
 
 public:
+    // KVMem K3b: score the blocks that still hold a device page against the request's captured
+    // query, without moving any page. A chunked prefill compacts while it fills the prompt, so the
+    // window that generation attends was packed before the final chunk carried the query span;
+    // without this pass the ledger would keep the zero evidence of a query that did not exist yet.
+    // The next compaction -- generation reclaim or the next turn -- then ranks the window with the
+    // query this request actually asked.
+    void kvmem_refresh_scores(KVAddressSpaceHandle handle, cudaStream_t stream = nullptr) {
+        if (!kvmem_enabled_ || !kvmem_query_.valid()) { return; }
+        Address& address        = require(handle);
+        const std::size_t index = static_cast<std::size_t>(&address - addresses_.data());
+        kvmem_score_window(index, pages_->physical_pool(), stream);
+    }
+
     // KVMem K1b: compact one address's KV into a budget-driven working window.
     //
     // Requires an INACTIVE address whose pages are solely owned (no fork or
