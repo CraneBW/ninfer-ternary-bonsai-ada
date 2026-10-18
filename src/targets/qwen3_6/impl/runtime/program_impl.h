@@ -819,7 +819,8 @@ ProgramImplCore::ProgramImplCore(const LoadedModelData& model_in, const Sequence
         throw std::invalid_argument("Qwen3.6 workspace plan does not match startup features");
     }
     const DeviceSpan backing = persistent.alloc_bytes(plan.persistent.bytes, 256);
-    if (!plan.context_cache.max_private_continuations || !plan.context_cache.max_shared_prefixes) {
+    if (!plan.context_cache.max_private_continuations || !plan.context_cache.max_shared_prefixes ||
+        !plan.context_cache.host_state_slots) {
         throw std::logic_error("Qwen3.6 context cache options are not normalized");
     }
     const std::uint64_t address_capacity64 =
@@ -878,19 +879,18 @@ ProgramImplCore::ProgramImplCore(const LoadedModelData& model_in, const Sequence
         static_cast<std::uint32_t>(TextConfig::head_dim));
     state_images =
         std::make_unique<qwen3_6::StateImageDevicePool>(backing, plan.persistent.state_images);
-    if (plan.context_cache.host_state_slots != 0) {
+    const std::uint32_t host_state_slots = *plan.context_cache.host_state_slots;
+    if (host_state_slots != 0) {
         const std::uint64_t host_state_bytes =
-            static_cast<std::uint64_t>(state_images->host_layout().image_bytes) *
-            plan.context_cache.host_state_slots;
+            static_cast<std::uint64_t>(state_images->host_layout().image_bytes) * host_state_slots;
         StartupPhaseScope host_state_phase(startup_observer, StartupPhase::HostStatePin,
                                            StartupProgressUnit::Bytes, host_state_bytes);
         host_state_images = std::make_unique<qwen3_6::HostStatePool>(
-            state_images->host_layout(), plan.context_cache.host_state_slots);
+            state_images->host_layout(), host_state_slots);
         host_state_phase.complete(host_state_bytes, host_state_bytes);
     }
     const std::uint64_t logical_state_capacity =
-        static_cast<std::uint64_t>(state_images->slot_count()) +
-        plan.context_cache.host_state_slots;
+        static_cast<std::uint64_t>(state_images->slot_count()) + host_state_slots;
     if (logical_state_capacity > std::numeric_limits<std::uint32_t>::max()) {
         throw std::overflow_error("Qwen3.6 logical StateImage capacity exceeds uint32");
     }
@@ -7778,7 +7778,7 @@ ProgramImplCore::inspect_capture(const CaptureOffer& offer, const SharedPrefixHa
     assessment.needs_transfer = !assessment.transfer_requirements.empty();
     assessment.physically_feasible =
         physical_peak_fits(assessment.implementation->demand.physical_peak_additional);
-    if (publish_shared) {
+    if (publish_shared || publish_private) {
         std::vector<runtime::ContextTransferRequirement> recovery;
         recovery.reserve(3);
         if (assessment.state_placement == qwen3_6::CaptureStatePlacement::HostSnapshot) {
@@ -7789,14 +7789,15 @@ ProgramImplCore::inspect_capture(const CaptureOffer& offer, const SharedPrefixHa
                 state_images->host_layout(), runtime::ContextTransferDirection::DeviceToDevice,
                 true));
         }
-        if (text_snapshot_shape->copied_pages() != 0) {
+        if (publish_shared && text_snapshot_shape && text_snapshot_shape->copied_pages() != 0) {
             recovery.push_back(kv_transfer_requirement(
                 runtime::ContextResourceClass::MainKV,
                 runtime::ContextTransferDirection::DeviceToDevice,
                 plan_host_kv_page_layout(text_kv_pages->physical_pool().geometry()),
                 text_snapshot_shape->copied_pages()));
         }
-        if (backend_snapshot_shape && backend_snapshot_shape->copied_pages() != 0) {
+        if (publish_shared && backend_snapshot_shape &&
+            backend_snapshot_shape->copied_pages() != 0) {
             recovery.push_back(kv_transfer_requirement(
                 runtime::ContextResourceClass::BackendKV,
                 runtime::ContextTransferDirection::DeviceToDevice,
@@ -7898,7 +7899,8 @@ ProgramImplCore::checkpoint_recovery_work(const SharedPrefixHandle& owner,
 
 std::unique_ptr<CapturePressureCandidateImpl>
 ProgramImplCore::make_capture_physical_candidate(const CaptureAssessment& assessment) const {
-    if (assessment.implementation == nullptr || !assessment.publishes_shared ||
+    if (assessment.implementation == nullptr ||
+        (!assessment.publishes_shared && !assessment.publishes_private) ||
         assessment.frontier == 0) {
         throw std::invalid_argument("capture pressure candidate is incomplete");
     }

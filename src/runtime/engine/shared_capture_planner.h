@@ -60,6 +60,11 @@ public:
         std::uint32_t blocked_runnable_requests     = 0;
         std::uint32_t stable_scenario_ordinal       = 0;
         std::uint32_t target_budget                 = kTargetBudget;
+        // Private captures admit a pressure target whenever it is physically feasible: a
+        // retained checkpoint that cannot serve the incoming frontier is dead capacity, and the
+        // portfolio value model only prices work it can still recover, so it reports a negative
+        // gain for the transition that reclaims that capacity.
+        bool require_positive_value = true;
     };
 
     struct Result {
@@ -125,7 +130,7 @@ public:
 
             if (assessment.physical_status == MaterializationPhysicalStatus::Feasible) {
                 const TransitionValue value = fold_target(input, assessment, machine_cost);
-                if (value.positive &&
+                if ((value.positive || !input.require_positive_value) &&
                     (!incumbent || better(value, assessment, input, *incumbent))) {
                     incumbent = Incumbent{
                         .target              = queued.target,
@@ -238,7 +243,8 @@ private:
     };
 
     static void validate(const Input& input) {
-        if (input.capture == nullptr || !input.capture->publishes_shared ||
+        if (input.capture == nullptr ||
+            (!input.capture->publishes_shared && !input.capture->publishes_private) ||
             input.target_budget == 0 || input.target_budget > kTargetBudget ||
             input.private_owners.size() != input.private_owner_ids.size() ||
             input.shared_owners.size() != input.shared_owner_ids.size()) {

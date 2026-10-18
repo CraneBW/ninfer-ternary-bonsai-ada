@@ -2990,6 +2990,38 @@ void test_shared_capture_combines_two_pressure_owners() {
     (void)finish_active(manager, program, active);
 }
 
+void test_private_capture_reclaims_a_retained_checkpoint_under_pressure() {
+    FakeManager manager = make_manager(1, 4, 1);
+    FakeProgram program;
+    const ActiveRequest first = start_active(manager, program, 51, make_base(51), 1);
+    (void)finish_active(manager, program, first);
+    const ActiveRequest second = start_active(manager, program, 52, make_base(52), 2);
+    (void)finish_active(manager, program, second);
+    const ActiveRequest active = start_active(manager, program, 53, make_base(53), 3);
+
+    program.required_pressure_actions    = 1;
+    program.pressure_action_immediate_ns = 0;
+    program.capture_assessment           = FakeCaptureAssessment{
+                  .shortlist_key          = FakeShortlistKey{.digest = 53, .frontier = 64},
+                  .protected_rebuild_work = PrefillWork{.tokens = 64},
+                  .publishes_private      = true,
+                  .physically_feasible    = false,
+    };
+    program.capture_summary.endpoint = endpoint(53, 64);
+
+    const auto reserved =
+        manager.reserve_active_capture(program, active.lane, FakeCaptureOffer{.id = 11}, 0, {});
+    require(reserved == FakeManager::ActiveCaptureReserveResult::Reserved,
+            "private capture that cannot fit did not reclaim a retained checkpoint");
+    auto progress      = manager.progress_context_transaction(program, {});
+    const auto outcome = std::get<FakeManager::ActiveCaptureOutcome>(std::move(progress));
+    require(outcome.status == ContextTransactionStatus::Published &&
+                program.started_action_ids.size() == 1,
+            "private capture reclaim did not publish one pressure target");
+    program.required_pressure_actions = 0;
+    (void)finish_active(manager, program, active);
+}
+
 void test_aborted_shared_capture_start_rolls_back_logical_claims() {
     FakeManager manager = make_manager(1, 4, 1);
     FakeProgram program;
@@ -3302,6 +3334,8 @@ int main() {
              test_shared_fanout_keeps_owner_edges_live_across_summary_refresh);
     run_test("shared capture multi-owner pressure",
              test_shared_capture_combines_two_pressure_owners);
+    run_test("private capture reclaims retained checkpoint under pressure",
+             test_private_capture_reclaims_a_retained_checkpoint_under_pressure);
     run_test("aborted shared capture logical rollback",
              test_aborted_shared_capture_start_rolls_back_logical_claims);
     run_test("validate complete capture result before adoption",
