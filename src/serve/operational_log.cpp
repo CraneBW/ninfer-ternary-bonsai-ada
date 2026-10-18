@@ -478,7 +478,7 @@ void OperationalLog::engine_capacity(const GenerationService& service) const {
         logger_->info(
             "context cache | {} active + {} cached device states | host {} states, {} KV | "
             "private {} | shared {} | anchors {}",
-            engine.max_concurrency, *cache.device_state_slots, cache.host_state_slots,
+            engine.max_concurrency, *cache.device_state_slots, *cache.host_state_slots,
             product::format_pretty_bytes(cache.host_kv_capacity_bytes),
             *cache.max_private_continuations, *cache.max_shared_prefixes,
             *cache.max_long_anchors_per_continuation);

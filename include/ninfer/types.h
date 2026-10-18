@@ -298,13 +298,16 @@ struct StartupObserver {
 
 struct ContextCacheOptions {
     // Engine resolves every optional once at construction. With C=max_concurrency, the enabled
-    // defaults are H=C, R=8, Host KV=8 GiB, P=2C, S=max(C,4) and L=2;
+    // defaults are H=C, R=max(8,2C), Host KV=8 GiB, P=2C, S=max(C,4) and L=2;
     // Engine::options() returns those effective values.
     bool enabled = true;
     // Extra Device checkpoint StateImage slots H. Total Device StateImage capacity is C + H.
     std::optional<std::uint32_t> device_state_slots;
+    // Complete Host StateImage slots R. A re-entering lane keeps one retained checkpoint and
+    // publishes the next capture beside it, so the resolved default covers two slots per active
+    // lane: a fixed pool of eight left eight concurrent sessions without transient headroom.
     // Host StateImages and Host KV bytes are independently configured pinned-memory capacities.
-    std::uint32_t host_state_slots     = kDefaultHostStateSlots;
+    std::optional<std::uint32_t> host_state_slots;
     std::size_t host_kv_capacity_bytes = kDefaultHostKvCapacityBytes;
     // Bounded private/shared logical catalogs and per-continuation long-anchor count.
     std::optional<std::uint32_t> max_private_continuations;

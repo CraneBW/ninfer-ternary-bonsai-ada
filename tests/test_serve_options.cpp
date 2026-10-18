@@ -46,7 +46,7 @@ int main() {
     failures += check(defaults.kv_capacity.mode == ninfer::KvCapacityMode::Explicit &&
                           defaults.kv_capacity.explicit_tokens == defaults.max_context,
                       "default KV capacity does not follow max context");
-    failures += check(defaults.context_cache.host_state_slots == ninfer::kDefaultHostStateSlots &&
+    failures += check(!defaults.context_cache.host_state_slots.has_value() &&
                           defaults.context_cache.host_kv_capacity_bytes ==
                               ninfer::kDefaultHostKvCapacityBytes,
                       "Host context-cache defaults mismatch");
@@ -85,11 +85,13 @@ int main() {
 
     const ServeOptions split_k8v4 = parse({"ninfer-serve", "model.ninfer", "--cache-type-k",
                                            "fp8", "--cache-type-v", "nvfp4"});
-    failures += check(split_k8v4.kv_cache == ninfer::KvCacheStorage::Fp8KeyNvfp4Value,
+    failures += check(split_k8v4.kv_storage.resolve(split_k8v4.max_context) ==
+                          ninfer::KvCacheStorage::Fp8KeyNvfp4Value,
                       "per-side fp8/nvfp4 did not select asymmetric K8V4 KV");
     const ServeOptions split_int4e8 = parse({"ninfer-serve", "model.ninfer", "--cache-type-k",
                                              "int4-e8", "--cache-type-v", "int4"});
-    failures += check(split_int4e8.kv_cache == ninfer::KvCacheStorage::RK4V4E8,
+    failures += check(split_int4e8.kv_storage.resolve(split_int4e8.max_context) ==
+                          ninfer::KvCacheStorage::RK4V4E8,
                       "per-side int4-e8/int4 did not select rk4v4-e8 KV");
     bool unsupported_pair_rejected = false;
     try {

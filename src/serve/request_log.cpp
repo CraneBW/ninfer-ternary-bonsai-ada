@@ -500,7 +500,7 @@ std::string format_server_start_json(
               Json{{"enabled", cache.enabled},
                    {"device_state_slots", cache.device_state_slots.value()},
                    {"total_device_state_slots", total_device_state_slots},
-                   {"host_state_slots", cache.host_state_slots},
+                   {"host_state_slots", cache.host_state_slots.value()},
                    {"host_kv_capacity_bytes", cache.host_kv_capacity_bytes},
                    {"max_private_continuations", cache.max_private_continuations.value()},
                    {"max_shared_prefixes", cache.max_shared_prefixes.value()},

@@ -791,7 +791,7 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--no-cuda-graph` | disable CUDA Graph decode | graphs on |
 | `--no-prefix-reuse` | disable compatible-prefix caching | prefix reuse on |
 | `--device-state-slots N` | extra Device checkpoint StateImages beyond the active-lane guarantee | `max-concurrency` |
-| `--host-state-slots N` | pinned Host StateImage capacity | `8` |
+| `--host-state-slots N` | pinned Host StateImage capacity | `max(8, 2 * max-concurrency)` |
 | `--host-kv-mib N` | shared pinned Host Main/Backend KV byte capacity in MiB | `8192` |
 | `--max-private-continuations N` | private continuation descriptor capacity | `2 * max-concurrency` |
 | `--max-shared-prefixes N` | Engine-wide shared stable-prefix descriptor capacity | `max(max-concurrency, 4)` |
@@ -857,20 +857,24 @@ request fields override process flags, and `--greedy` finally forces temperature
 For `C=--max-concurrency` and `H=--device-state-slots`, total Device StateImage capacity is `C+H`:
 `C` slots guarantee active requests and `H` is a global checkpoint pool. Host State and Host KV are
 independent startup-fixed pinned-memory capacities; Host KV is shared by Main and the selected
-Backend pool and is consumed in physical page extents. `--no-prefix-reuse` selects root-only Engine
-mode and cannot be combined with any of the seven explicit context-cache capacity flags, including
-zero-valued flags.
+Backend pool and is consumed in physical page extents. Host State slots default to two per active
+lane because a re-entering continuation holds its retained checkpoint while the capture for its next
+turn needs a second slot. `--no-prefix-reuse` selects root-only Engine mode and cannot be combined
+with any of the seven explicit context-cache capacity flags, including zero-valued flags.
 
 Sizing those pools is an operational decision rather than a fixed rule: a returning session can keep an
 endpoint StateImage, a turn-closure checkpoint, a response-replay checkpoint, and up to
 `--max-long-anchors-per-continuation` anchors alive, and the shared catalog holds its own snapshots.
-When the working set exceeds the slots, capture admission rejects new captures instead of displacing a
-retained checkpoint (only a replaceable long-anchor slot can be recycled in place), so a re-entering
-request keeps falling back to prefill. `throughput.context_cache.occupancy` (`device_state_slots`,
-`host_state_slots`) reports saturation and `throughput.context_cache.captures.completed` reports how
-many captures were admitted in the interval; both appear in the JSONL interval record. Raise
-`--device-state-slots` at the cost of Device memory, which shrinks the KV pool that
-`--kv-capacity auto` can size, or `--host-state-slots` at the cost of pinned Host memory.
+Under pressure a private capture is admitted through a plan that reclaims the least valuable
+retained checkpoint it can replace; shared captures still need a vacant or replaceable shared slot.
+Sizing the pools too tightly therefore shows up as reclaim churn rather than as a refused capture:
+`throughput.context_cache.occupancy` (`device_state_slots`, `host_state_slots`) reports saturation
+and `throughput.context_cache.pressure` counts the reclaimed checkpoints; both appear in the JSONL
+interval record. An eight-slot Host pool serving eight concurrent multi-turn sessions reclaimed its
+own fresh turn closures every round and kept only a third of them; the default resolves to two slots
+per active lane for that reason. Raise `--device-state-slots` at the cost of Device memory, which
+shrinks the KV pool that `--kv-capacity auto` can size, or `--host-state-slots` at the cost of
+pinned Host memory.
 
 Run `./build/apps/ninfer-serve --help` for the exact option contract.
 
