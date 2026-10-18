@@ -218,6 +218,8 @@ ninfer_add_test(ninfer_kvmem_retrieval_test
   SOURCES test_kvmem_retrieval.cpp)
 ninfer_add_test(ninfer_mtp_adaptive_test
   SOURCES test_mtp_adaptive.cpp)
+ninfer_add_test(ninfer_ngram_lookup_test
+  SOURCES test_ngram_lookup.cpp)
 ninfer_add_test(ninfer_host_timing_test
   SOURCES test_host_timing.cpp
   LIBRARIES ninfer_core)

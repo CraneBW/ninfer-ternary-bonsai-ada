@@ -328,6 +328,12 @@ Json adaptive_speculative_json(const GenerationMetrics& metrics) {
                 {"window_transitions", metrics.speculative_window_transitions}};
 }
 
+Json lookup_speculative_json(const GenerationMetrics& metrics) {
+    return Json{{"rounds", metrics.speculative_lookup_rounds},
+                {"drafted_tokens", metrics.speculative_lookup_drafted_tokens},
+                {"accepted_tokens", metrics.speculative_lookup_accepted_tokens}};
+}
+
 Json materialization_json(const ninfer::MaterializationDiagnostics& diagnostics) {
     return Json{
         {"predicted_now_ns", diagnostics.predicted_now_ns},
@@ -598,6 +604,10 @@ std::string format_request_done_json(const std::string& server_instance_id, std:
     // Present only for an adaptive MTP request: a fixed draft window has nothing to report here.
     if (!outcome.metrics.speculative_rounds_per_window.empty()) {
         record["adaptive_speculative"] = adaptive_speculative_json(outcome.metrics);
+    }
+    // Present only when --lookup-ngram supplied at least one round's drafts.
+    if (outcome.metrics.speculative_lookup_rounds != 0) {
+        record["lookup_speculative"] = lookup_speculative_json(outcome.metrics);
     }
     record["materialization"] = materialization_json(outcome.metrics.materialization);
     return record.dump();

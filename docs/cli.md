@@ -202,6 +202,20 @@ surviving, so one configuration serves chat text (where late draft positions rar
 narrow round is cheaper) and highly regular output such as generated JSON (where they do). It
 requires `--spec mtp` and a ceiling of at least three.
 
+`--lookup-ngram` gives an MTP round a second source of drafts: when the request's last eight
+tokens repeat a run that already appeared in its own context, the continuation of that earlier
+occurrence is proposed for the round when it is at least as wide as the draft head's own proposal.
+Copied text -- reproduced passages, repeated JSON lines, echoed tool arguments -- is what this
+covers, and the draft head cannot know it because the continuation lives in the prompt rather than
+in the model's weights. The lookup indexes the request's token stream as it grows and trusts a run
+only when its two most recent occurrences continued identically for sixteen tokens, so a repeated
+template (a JSON key before a varied value, a phrase that recurs with a different ending) keeps the
+draft head's drafts instead of the lookup's. A prediction covers at least three tokens and never
+reaches past the agreed window, and it is verified by the target model exactly like an MTP draft,
+so the committed greedy output is unchanged and a wrong prediction costs at most the verify
+columns it occupies. It requires `--spec mtp` with a draft window of at least three, and combines
+with `--adaptive-mtp`; a round the lookup drafted still verifies at the adapted width.
+
 ## Common options
 
 The table lists executable defaults. The examples above select FP8 KV and MTP3.
@@ -219,6 +233,7 @@ The table lists executable defaults. The examples above select FP8 KV and MTP3.
 | `--spec mtp\|dflash\|dflash2` | speculative backend | off |
 | `--draft-tokens N` | MTP `1..7`; DFlash/DFlash2 `1..15` | unset |
 | `--adaptive-mtp` | MTP only: verify `3..--draft-tokens` drafts per round, chosen per request | off |
+| `--lookup-ngram` | MTP only: draft from an earlier occurrence of the last eight tokens | off |
 | `--lm-head-draft` | optimized proposal head | off |
 | `--vision` | enable image/video input and load Vision GPU allocations | off |
 | `--no-cuda-graph` | disable CUDA Graph decode | graphs on |

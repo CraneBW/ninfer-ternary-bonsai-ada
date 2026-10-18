@@ -79,6 +79,8 @@ struct SequencePlanningInputs {
     // Adaptive MTP verifies a per-round width in [3, draft_window]; the draft window stays the
     // proposal width and the upper bound.
     bool adaptive_mtp                      = false;
+    // --lookup-ngram lets a round take its drafts from a repeat of the request's own tokens.
+    bool lookup_ngram                      = false;
     KvCacheStorage kv_storage              = KvCacheStorage::BFloat16;
     ProposalHead proposal_head             = ProposalHead::Full;
     StartupFeatures features;
@@ -107,6 +109,7 @@ struct SequencePlanImpl<NINFER_QWEN36_VARIANT> {
     std::uint32_t draft_window             = 0;
     SpeculativeBackend speculative_backend = SpeculativeBackend::None;
     bool adaptive_mtp                      = false;
+    bool lookup_ngram                      = false;
     KvCacheStorage kv_storage              = KvCacheStorage::BFloat16;
     ProposalHead proposal_head             = ProposalHead::Full;
     StartupFeatures features;

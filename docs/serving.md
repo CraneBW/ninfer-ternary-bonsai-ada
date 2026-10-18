@@ -47,7 +47,16 @@ frozen by `--spec mtp|dflash|dflash2` and `--draft-tokens`; omitting `--spec` lo
 `--lm-head-draft` additionally loads the optimized proposal head. `--adaptive-mtp` keeps
 `--draft-tokens` as the ceiling and lets each MTP round verify a narrower draft prefix when the
 measured survival of the drafts it proposed, weighted against the round's measured cost, favors one;
-the committed greedy output is unchanged. DFlash on 35B-A3B and DFlash2 on Qwen3.8-27B can be combined
+the committed greedy output is unchanged. `--lookup-ngram` adds a second draft source to MTP: when
+the request's last eight tokens repeat a run that already occurred in its own context and the two
+occurrences continued identically, the continuation of the earlier one is proposed for the round
+(copied passages, repeated JSON lines, echoed tool arguments); those drafts are verified like any
+other, so the committed greedy output is unchanged. On one Qwen3.8-27B build it was measured at
+287.9 t/s against 266.3 t/s for the same fixed window when copying a random identifier manifest
+verbatim (every draft accepted), and neutral on prose and on copied prose, where the draft head
+already accepts most drafts. On generated JSON it cost about three percent: it replaces the head's
+proposal for a round rather than extending it, so it only pays when the continuation it offers is
+the one the model takes. DFlash on 35B-A3B and DFlash2 on Qwen3.8-27B can be combined
 with `--vision`; each accelerates generated-text decode after multimodal prefill, while Vision encode
 and prefill remain outside speculative acceleration. A later request cannot enable a capability
 omitted at startup.
@@ -799,6 +808,7 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--spec mtp\|dflash\|dflash2` | speculative backend | off |
 | `--draft-tokens N` | MTP `1..7`; DFlash/DFlash2 `1..15` | unset |
 | `--adaptive-mtp` | MTP verifies `3..--draft-tokens` drafts per round, chosen per request from measured draft survival and round cost | off |
+| `--lookup-ngram` | MTP drafts an earlier occurrence's continuation when the last eight tokens repeat, which is what copied text needs | off |
 | `--lm-head-draft` | optimized proposal head | off |
 | `--default-max-tokens N` | output limit when omitted by a request | `8192` |
 | `--default-thinking-budget N` | positive thinking cap inherited by thinking-enabled requests | unset |
@@ -983,6 +993,9 @@ as full-precision JSON numbers. Its `speculative` object contains `backend`, `dr
 derived downstream from raw token counts and seconds instead of rounded stderr strings. An adaptive
 MTP request also carries `adaptive_speculative` with `rounds_per_window` (rounds served at each
 verification width, indexed from width one) and `window_transitions`. A fixed draft window omits it.
+A request served with `--lookup-ngram` also carries `lookup_speculative` with `rounds`,
+`drafted_tokens`, and `accepted_tokens` for the rounds the lookup drafted; a request whose lookup
+never predicted anything omits it.
 
 For `server_start.memory`, `workspace.capacity_bytes` is the only physical workspace allocation.
 When Vision is enabled, `vision_workspace` reports the aggregate prompt and maximum-item token

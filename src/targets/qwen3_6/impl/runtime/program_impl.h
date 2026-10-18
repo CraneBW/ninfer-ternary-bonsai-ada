@@ -784,7 +784,8 @@ ProgramImplCore::ProgramImplCore(const LoadedModelData& model_in, const Sequence
       continuation_capacity(normalized_private_capacity(plan.context_cache)),
       shared_prefix_capacity(plan.context_cache.max_shared_prefixes.value_or(0)),
       prefill_chunk(plan.prefill_chunk), draft_window(plan.draft_window),
-      adaptive_mtp(plan.adaptive_mtp), speculative_backend(plan.speculative_backend),
+      adaptive_mtp(plan.adaptive_mtp), lookup_ngram(plan.lookup_ngram),
+      speculative_backend(plan.speculative_backend),
       kv_storage(plan.kv_storage),
       proposal_head(plan.proposal_head), vision_enabled(plan.features.vision),
       use_cuda_graph(plan.use_cuda_graph), causal_scoring(plan.causal_scoring),
@@ -1073,6 +1074,9 @@ ProgramImplCore::ProgramImplCore(const LoadedModelData& model_in, const Sequence
         ops::set_text_rope_frequencies(yarn.scale_factor > 1.0F ? yarn.inv_freq.data() : nullptr);
     }
     device.synchronize();
+    if (lookup_ngram && speculative_backend != SpeculativeBackend::Mtp) {
+        throw std::invalid_argument("n-gram lookup requires the MTP speculative backend");
+    }
     if (adaptive_mtp) {
         if (speculative_backend != SpeculativeBackend::Mtp) {
             throw std::invalid_argument("adaptive MTP requires the MTP speculative backend");
@@ -10606,6 +10610,22 @@ runtime::ExecutionTiming ProgramImplCore::resolve_pending_raw(
 
             const PendingCandidate pending = request.pending;
             const std::uint32_t committed  = accepted_tokens[row];
+            if (lookup_ngram && request.lookup_drafted != 0) {
+                // The drafts this round verified came from the lookup. Count what the round
+                // actually verified (an adapted width can narrow that below the prediction) and
+                // how much of it the target model licensed; the anchor token is committed, not
+                // accepted.
+                const std::uint32_t verified =
+                    speculative_backend == SpeculativeBackend::Mtp
+                        ? std::min(request.lookup_drafted,
+                                   static_cast<std::uint32_t>(
+                                       mtp_host_ingress->current_extents[row]))
+                        : 0U;
+                request.speculative_stats.lookup_drafted_tokens += verified;
+                request.speculative_stats.lookup_accepted_tokens +=
+                    std::min(committed - 1U, verified);
+                request.lookup_drafted = 0;
+            }
             settle_state_fork(sequence);
             const TokenId* token_base =
                 speculative_backend == SpeculativeBackend::Mtp
@@ -10636,6 +10656,37 @@ runtime::ExecutionTiming ProgramImplCore::resolve_pending_raw(
             } else {
                 sequence.dflash_context_frontier =
                     terminal[row] ? sequence.execution_frontier : pending.base_E;
+            }
+
+            if (lookup_ngram && speculative_backend == SpeculativeBackend::Mtp && !terminal[row]) {
+                // Keep the lookup's index level with the ledger, then let an exact repeat of the
+                // last eight tokens propose the continuation the draft head cannot know: the text
+                // this request already contains.
+                if (sequence.ledger.size() < request.lookup_indexed) {
+                    request.lookup.reset();
+                    request.lookup_indexed = 0;
+                }
+                if (request.lookup_indexed < sequence.ledger.size()) {
+                    request.lookup.append(std::span<const TokenId>(
+                        sequence.ledger.data() + request.lookup_indexed,
+                        sequence.ledger.size() - request.lookup_indexed));
+                    request.lookup_indexed = static_cast<std::uint32_t>(sequence.ledger.size());
+                }
+                std::array<TokenId, qwen3_6::kMtpDecodeMaximumDrafts> prediction{};
+                const std::uint32_t wanted =
+                    std::min<std::uint32_t>(draft_window, prediction.size());
+                const std::uint32_t predicted =
+                    request.lookup.predict(std::span<TokenId>(prediction.data(), wanted));
+                // The lookup is a second source, not a replacement: a short prediction must not
+                // narrow the round below what the draft head already licensed, so it only takes
+                // the round over when it offers at least as many tokens.
+                if (predicted >= NgramLookup::kMinimumPrediction && predicted >= sequence.mtp_draft_count) {
+                    sequence.mtp_draft_count = predicted;
+                    std::copy_n(prediction.begin(), predicted, sequence.mtp_drafts.begin());
+                    request.speculative_stats.lookup_rounds += 1;
+                    // Drafted and accepted tokens are counted on the round that verifies them.
+                    request.lookup_drafted = predicted;
+                }
             }
 
             commit_sequence_kv(sequence, sequence.text_kv_valid, backend_kv_valid(sequence));
@@ -11748,6 +11799,9 @@ void ProgramImplCore::install_sampling(SequenceState& sequence, RequestControl& 
                          : std::vector<std::uint64_t>{},
     };
     request.mtp_signal = MtpAdaptiveSignal{};
+    request.lookup.reset();
+    request.lookup_indexed = 0;
+    request.lookup_drafted = 0;
     const bool penalties = request.sampling_host.presence_penalty != 0.0F ||
                            request.sampling_host.frequency_penalty != 0.0F;
     if (penalties) { CUDA_CHECK(cudaMemsetAsync(counts.data, 0, counts.bytes(), device.stream)); }

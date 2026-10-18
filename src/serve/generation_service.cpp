@@ -451,6 +451,9 @@ GenerationOutcome GenerationService::run(PreparedRequest& prepared, const Stream
         std::move(result.speculative.accepted_per_position);
     outcome.metrics.speculative_rounds_per_window = result.speculative.rounds_per_window;
     outcome.metrics.speculative_window_transitions = result.speculative.window_transitions;
+    outcome.metrics.speculative_lookup_rounds          = result.speculative.lookup_rounds;
+    outcome.metrics.speculative_lookup_drafted_tokens  = result.speculative.lookup_drafted_tokens;
+    outcome.metrics.speculative_lookup_accepted_tokens = result.speculative.lookup_accepted_tokens;
 
     outcome.tool_calls      = std::move(result.tool_calls);
     outcome.tool_call_parse = result.tool_call_parse;

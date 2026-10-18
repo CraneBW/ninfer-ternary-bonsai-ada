@@ -13,6 +13,7 @@
 #include "targets/qwen3_6/impl/runtime/layouts.h"
 #include "targets/qwen3_6/impl/runtime/dflash_context.h"
 #include "targets/qwen3_6/impl/runtime/mtp_adaptive.h"
+#include "targets/qwen3_6/impl/runtime/ngram_lookup.h"
 #include "targets/qwen3_6/impl/runtime/host_kv_extent_store.h"
 #include "targets/qwen3_6/impl/runtime/logical_kv_store.h"
 #include "targets/qwen3_6/impl/runtime/state_image_store.h"
@@ -495,6 +496,12 @@ struct RequestControl {
     SpeculativeStats speculative_stats;
     // Per-request survival evidence feeding the adaptive MTP width controller.
     MtpAdaptiveSignal mtp_signal;
+    // Per-request token index behind --lookup-ngram. "lookup_indexed" is how much of the ledger it
+    // has seen; "lookup_drafted" is how many of the drafts being verified came from the lookup (0
+    // when this round's drafts are the draft head's own).
+    NgramLookup lookup;
+    std::uint32_t lookup_indexed = 0;
+    std::uint32_t lookup_drafted = 0;
     detail::PhysicalResources active_resources;
     detail::PhysicalResources optional_resources;
     bool publish_continuation = true;
@@ -675,6 +682,9 @@ public:
     // Adaptive MTP verifies a per-round width inside [3, draft_window]; a fixed round always
     // verifies the full window.
     const bool adaptive_mtp;
+    // --lookup-ngram: a round may take its drafts from an earlier occurrence of the request's last
+    // tokens instead of from the draft head.
+    const bool lookup_ngram;
     const SpeculativeBackend speculative_backend;
     const KvCacheStorage kv_storage;
     const ProposalHead proposal_head;

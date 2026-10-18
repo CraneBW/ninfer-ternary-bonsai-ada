@@ -88,7 +88,7 @@ std::string serve_usage_text(const char* argv0) {
            "--cache-type-v <bf16|int8|fp8|nvfp4|int4>] "
            "[--kvmem [--kvmem-budget N] [--kvmem-gen-reserve N]] "
            "[--spec mtp|dflash|dflash2 --draft-tokens N] "
-           "[--adaptive-mtp] [--default-max-tokens N] [--default-thinking-budget N] "
+           "[--adaptive-mtp] [--lookup-ngram] [--default-max-tokens N] [--default-thinking-budget N] "
            "[--vision] [--vision-max-tokens N] [--no-cuda-graph] [--no-prefix-reuse] "
            "[--lm-head-draft] [--no-thinking] [--preserve-thinking] "
            "[--tolerant-tool-calls] [--cors] "
@@ -132,6 +132,9 @@ std::string serve_usage_text(const char* argv0) {
            "       --no-prefix-reuse disables compatible-prefix caching (enabled by default)\n"
            "       --adaptive-mtp verifies 3..--draft-tokens drafts per MTP round, the width the "
            "drafts' measured survival and round cost favor; greedy output is unchanged\n"
+           "       --lookup-ngram drafts an MTP round from the continuation of an earlier occurrence "
+           "of the last eight tokens when there is one, which is what copied text needs; greedy "
+           "output is unchanged\n"
            "       context cache defaults: device-state=max-concurrency, private=2x concurrency, "
            "shared=max(max-concurrency,4), anchors=2; Host state=max(8, 2x max-concurrency) slots, Host KV=8192 MiB\n"
            "       --device-state-slots is extra checkpoint capacity beyond active lanes; "
@@ -352,6 +355,8 @@ ServeOptions parse_serve_options(int argc, char** argv) {
                 parse_nonnegative_int(require_value("--draft-tokens"), "draft-tokens"));
         } else if (arg == "--adaptive-mtp") {
             options.speculative.adaptive_mtp = true;
+        } else if (arg == "--lookup-ngram") {
+            options.speculative.lookup_ngram = true;
         } else if (arg == "--default-max-tokens") {
             options.default_max_tokens =
                 parse_nonnegative_int(require_value("--default-max-tokens"), "default-max-tokens");

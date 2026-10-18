@@ -866,6 +866,7 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
     impl->prefill_chunk       = inputs.prefill_chunk;
     impl->draft_window        = inputs.draft_window;
     impl->adaptive_mtp        = inputs.adaptive_mtp;
+    impl->lookup_ngram        = inputs.lookup_ngram;
     impl->speculative_backend = inputs.speculative_backend;
     impl->proposal_head       = inputs.proposal_head;
     impl->features            = inputs.features;
@@ -946,6 +947,7 @@ make_sequence_planner_impl(DeviceContext& device, const EngineOptions& options,
         .draft_window        = options.speculative.draft_tokens,
         .speculative_backend = options.speculative.backend,
         .adaptive_mtp        = options.speculative.adaptive_mtp,
+        .lookup_ngram        = options.speculative.lookup_ngram,
         .kv_storage          = options.kv_storage.resolve(options.max_context),
         .proposal_head       = options.speculative.proposal_head,
         .features            = qwen3_6::startup_features(options),

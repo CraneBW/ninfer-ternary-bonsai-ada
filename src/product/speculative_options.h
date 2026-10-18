@@ -33,6 +33,9 @@ inline void validate_speculative_cli_options(const SpeculativeOptions& options) 
     if (options.adaptive_mtp && options.backend != SpeculativeBackend::Mtp) {
         throw std::invalid_argument("--adaptive-mtp requires --spec mtp");
     }
+    if (options.lookup_ngram && options.backend != SpeculativeBackend::Mtp) {
+        throw std::invalid_argument("--lookup-ngram requires --spec mtp");
+    }
     switch (options.backend) {
     case SpeculativeBackend::None:
         if (options.draft_tokens != 0 || options.proposal_head != ProposalHead::Full) {
@@ -52,6 +55,12 @@ inline void validate_speculative_cli_options(const SpeculativeOptions& options) 
         // so a ceiling below three would leave the controller with nothing to choose between.
         if (options.adaptive_mtp && options.draft_tokens < 3) {
             throw std::invalid_argument("--adaptive-mtp requires --draft-tokens in [3,7]");
+        }
+        // The lookup offers a prediction only from three tokens up: a shorter one is not worth
+        // displacing a draft the head already holds. A window too narrow to verify three would
+        // leave the option with nothing it is allowed to draft.
+        if (options.lookup_ngram && options.draft_tokens < 3) {
+            throw std::invalid_argument("--lookup-ngram requires --draft-tokens in [3,7]");
         }
         return;
     case SpeculativeBackend::DFlash:

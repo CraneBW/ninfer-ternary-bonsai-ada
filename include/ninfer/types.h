@@ -255,6 +255,10 @@ struct SpeculativeOptions {
     // MTP only: verify fewer than K drafts when a request's measured draft survival and the
     // round's measured cost favor a narrower round.
     bool adaptive_mtp = false;
+    // MTP only: when the last eight committed tokens repeat a run this request already contains,
+    // propose that run's earlier continuation as the next round's drafts instead of the draft
+    // head's. Copied text is where the head has the least to offer.
+    bool lookup_ngram = false;
     ProposalHead proposal_head = ProposalHead::Full;
 };
 
@@ -936,6 +940,11 @@ struct SpeculativeStats {
     // whose width differed from the previous round. Both stay empty/zero for a fixed draft window.
     std::vector<std::uint64_t> rounds_per_window;
     std::uint64_t window_transitions = 0;
+    // --lookup-ngram: rounds whose drafts the lookup supplied, the drafts it supplied, and how many
+    // of those the target model accepted. Zero when the lookup never won a round.
+    std::uint64_t lookup_rounds          = 0;
+    std::uint64_t lookup_drafted_tokens  = 0;
+    std::uint64_t lookup_accepted_tokens = 0;
 };
 
 struct ThinkingBudgetStats {
