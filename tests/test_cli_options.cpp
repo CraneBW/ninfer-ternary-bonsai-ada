@@ -91,7 +91,8 @@ int main() {
     const ninfer::cli::Options split_k8v4 =
         parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--cache-type-k", "fp8",
                "--cache-type-v", "nvfp4"});
-    failures += check(split_k8v4.kv_cache == ninfer::KvCacheStorage::Fp8KeyNvfp4Value,
+    failures += check(split_k8v4.kv_storage.explicit_value ==
+                          ninfer::KvCacheStorage::Fp8KeyNvfp4Value,
                       "per-side fp8/nvfp4 did not select asymmetric K8V4 KV");
     failures += check(rejects([] {
                           (void)parse({"ninfer-cli", "model.ninfer", "--prompt", "hello",
