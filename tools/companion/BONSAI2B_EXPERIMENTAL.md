@@ -91,12 +91,29 @@ is preserved in previous `real-startup-fixed.d.log` and
 
 ## Remaining acceptance and isolation
 
-The already-running `build-ada-companion` Ninja PID 662841 must complete its
-own build before executing a formal rebuilt `apps/ninfer-serve`. **Do not run
-another Ninja targeting that directory concurrently, stop its process, or
-overwrite its `.o`/libraries.** Retest the formal binary once up to date;
-substantial quality/performance/context tests and other Companion models are
-not implied by these focused semantic requests.
+The original Ninja PID 662841 exited after compiling all objects but failed
+its **final link** because the long-running build had compiled the Hadamard
+wrapper *before* this patch changed its public signature. Re-running Ninja
+would trigger its pre-existing truncated-dependency-database recovery and
+rebuild 339 targets. With Ninja stopped, only the relevant 512 launcher,
+Hadamard wrapper, GDN wrapper and BF16 GDN plan objects were recompiled with
+the generated Ninja compiler commands. The operation archive was then synced
+from the **already tested private archive** (which also contains later
+Bonsai2B fixes that Ninja had compiled too early); the standard generated
+linker command linked `build-ada-companion/apps/ninfer-serve` successfully.
+
+**The actual executable at the formal build target path was then tested**
+against real Bonsai2B v3 with `--kv-dtype int8`. Warmup and two Chat
+Completions requests passed (HTTP 200, `stop`): `Say hello.` produced
+`Hello! How can I help you today?`, and `1+1` produced `2`. Evidence:
+`tmp-nvcc/bonsai2b-adhoc/real-512-formal-int8.log`. The server was shut
+down. This is a verified executable at the formal path, but **not** a clean
+full `cmake --build` PASS; repairing the truncated Ninja dependency state
+and performing a clean incremental build is still separate acceptance work.
+Do not duplicate the prior full 339-object rebuild merely to repeat it.
+
+Substantial quality/performance/context tests and other Companion models
+are not implied by these focused semantic requests.
 
 This checkpoint patch must not be confused with full v3 Vision inference,
 27B Groupwise/NVFP4 serving, TP2 native multi-GPU execution, or Strata ×
