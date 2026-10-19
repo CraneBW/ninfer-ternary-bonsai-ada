@@ -13,7 +13,9 @@
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <random>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -263,6 +265,350 @@ int verify_self_describing_shape() {
     if (!check_fixture(wrong_topology, "model_shape_wrong_topology",
                        "text/layers/3/attention/query_norm")) {
         return 1;
+    }
+    return 0;
+}
+
+int verify_real_v3_gsq_header() {
+    // Verify the published 27B v3 semantic directory without opening its incomplete 15GB
+    // payload. The 376800-byte JSON header contains the whole text tensor inventory.
+    const auto path = std::filesystem::path(NINFER_SOURCE_DIR) / ".." / ".." /
+                      "real-models" / "qwen3_8_gsq_rco_iq3_s_v3.ninfer";
+    if (!std::filesystem::is_regular_file(path)) { return 0; }
+    std::ifstream file(path, std::ios::binary);
+    std::array<unsigned char, 32> header{};
+    file.read(reinterpret_cast<char*>(header.data()), header.size());
+    const std::array<unsigned char, 8> magic{'N', 'I', 'N', 'F', 'E', 'R', 0, 3};
+    if (!file || !std::equal(magic.begin(), magic.end(), header.begin())) {
+        std::cerr << "real GSQ v3 header has invalid magic\n";
+        return 1;
+    }
+    std::uint64_t bytes = 0;
+    for (int i = 0; i < 8; ++i) { bytes |= std::uint64_t(header[8 + i]) << (8 * i); }
+    if (bytes == 0 || bytes > 1024 * 1024) {
+        std::cerr << "real GSQ v3 JSON header has invalid length\n";
+        return 1;
+    }
+    std::string json(static_cast<std::size_t>(bytes), '\0');
+    file.read(json.data(), static_cast<std::streamsize>(json.size()));
+    if (!file) {
+        std::cerr << "real GSQ JSON directory not fully downloaded\n";
+        return 1;
+    }
+    const auto root = nlohmann::json::parse(json);
+    const V3TextMetadata metadata = inspect_v3_text_metadata(root);
+    if (metadata.tensors.size() != 963 || metadata.shape.hidden != TextConfig::hidden ||
+        root.at("bindings").size() != 1513) {
+        std::cerr << "GSQ v3 text semantic inventory size differs\n";
+        return 1;
+    }
+    const auto find = [&](std::string_view name) -> const V3LogicalTensor& {
+        const auto it = std::find_if(metadata.tensors.begin(), metadata.tensors.end(),
+                                     [&](const auto& t) { return t.parameter == name; });
+        if (it == metadata.tensors.end()) {
+            throw std::runtime_error("real GSQ text missing " + std::string(name));
+        }
+        return *it;
+    };
+    const auto& shared_query = find("text/layers/0/gdn/query");
+    const auto& shared_z = find("text/layers/0/gdn/z");
+    const auto& mixed_gate = find("text/layers/0/mlp/gate");
+    const auto& mixed_up = find("text/layers/0/mlp/up");
+    const auto& reordered = find("text/layers/0/gdn/output");
+    if (shared_query.object_id != shared_z.object_id ||
+        shared_query.parent_rows != 16384 || shared_query.first_row != 0 ||
+        shared_z.first_row != 10240 || shared_z.rows != 6144 ||
+        shared_query.format != NumericFormat::GGUF_IQ4_XS ||
+        mixed_gate.format != NumericFormat::GGUF_IQ2_XS ||
+        mixed_up.format != NumericFormat::GGUF_IQ2_XXS ||
+        reordered.input_columns_object != "auxiliary/000000") {
+        std::cerr << "GSQ semantic parent slices, mixed formats or Use were lost\n";
+        return 1;
+    }
+    const auto reject_v3_metadata = [&](nlohmann::json invalid, std::string_view label) {
+        try {
+            (void)inspect_v3_text_metadata(invalid);
+        } catch (const ninfer::artifact::ArtifactError&) {
+            return true;
+        }
+        std::cerr << "GSQ v3 metadata accepted invalid " << label << '\n';
+        return false;
+    };
+    {
+        auto invalid = root;
+        invalid["components"]["text"]["config"]["hidden_size"] = 4096;
+        if (!reject_v3_metadata(std::move(invalid), "hidden_size")) { return 1; }
+    }
+    {
+        auto invalid = root;
+        auto& end = invalid["bindings"]["text/layers/0/gdn/query"]["parts"][0]["range"][1];
+        end = end.get<std::uint64_t>() + TextConfig::hidden;
+        if (!reject_v3_metadata(std::move(invalid), "shared parent slice")) { return 1; }
+    }
+    {
+        auto invalid = root;
+        invalid["bindings"].erase("text/layers/3/attention/key");
+        if (!reject_v3_metadata(std::move(invalid), "missing attention/key")) { return 1; }
+    }
+
+    // A sparse file supplies the declared 15GB *virtual* payload length with only the
+    // downloaded header+directory occupying disk blocks. This exercises the production
+    // v3 Reader -> Binder -> target27B LoadPlan path, including parent de-duplication,
+    // without loading a single model weight or allocating GPU memory.
+    const auto sparse_path = std::filesystem::temp_directory_path() /
+        ("ninfer_gsq_v3_sparse_" + std::to_string(std::random_device{}()) + ".ninfer");
+    auto sparse = ninfer::test::artifact_fixture::TemporaryArtifact{sparse_path};
+    {
+        std::ofstream output(sparse.path, std::ios::binary | std::ios::trunc);
+        output.write(reinterpret_cast<const char*>(header.data()), header.size());
+        output.write(json.data(), static_cast<std::streamsize>(json.size()));
+        if (!output) { throw std::runtime_error("cannot write v3 metadata fixture"); }
+    }
+    const auto payload_offset =
+        ninfer::test::artifact_fixture::align_up(32 + bytes, 4096);
+    const auto payload_bytes = root.at("files").at(0).at("payload_bytes").get<std::uint64_t>();
+    std::filesystem::resize_file(sparse.path, payload_offset + payload_bytes);
+    ninfer::artifact::Reader reader(sparse.path);
+    ninfer::artifact::Binder binder(reader);
+    const auto plan = bind_v3_text_artifact(
+        binder, root, features(ninfer::SpeculativeBackend::None));
+    if (!plan.bindings.v3_text || plan.bindings.dflash2 ||
+        !plan.bindings.text_layers[3].is_full_attention ||
+        plan.bindings.text_layers[0].is_full_attention ||
+        !std::holds_alternative<IndividualGdnInputProjectionPlan>(
+            plan.bindings.text_layers[0].gdn.input_projection) ||
+        !std::holds_alternative<IndividualAttentionProjectionPlan>(
+            plan.bindings.text_layers[3].attention.projection) ||
+        !plan.bindings.text_layers[0].mlp.gate ||
+        !plan.bindings.text_layers[0].mlp.up ||
+        plan.materialization.object_count != root.at("objects").size() ||
+        plan.materialization.host_objects.size() != 6 ||
+        plan.materialization.device_objects.empty() ||
+        plan.materialization.device_capacity_bytes < (std::uint64_t{1} << 30)) {
+        std::cerr << "real GSQ v3 text-only materialization plan is incomplete\n";
+        return 1;
+    }
+    const auto& gdn = std::get<IndividualGdnInputProjectionPlan>(
+        plan.bindings.text_layers[0].gdn.input_projection);
+    if (gdn.query.object.index != gdn.key.object.index ||
+        gdn.query.object.index != gdn.value.object.index ||
+        gdn.query.object.index != gdn.z.object.index ||
+        gdn.query.first_row != 0 || gdn.key.first_row != 2048 ||
+        gdn.value.first_row != 4096 || gdn.z.first_row != 10240 ||
+        !plan.bindings.text_layers[0].gdn.output.input_columns) {
+        std::cerr << "real GSQ v3 plan lost shared parents or activation gather\n";
+        return 1;
+    }
+    {
+        ninfer::artifact::Binder package_binder(reader);
+        const ninfer::EngineOptions options{};
+        const auto packaged =
+            Package::plan_load(package_binder, options, WeightsProfile::Qwen38GroupwiseInt);
+        if (packaged.materialization().device_objects.size() !=
+                plan.materialization.device_objects.size()) {
+            std::cerr << "Package did not select the real GSQ v3 binder\n";
+            return 1;
+        }
+    }
+    struct FeatureCase {
+        ninfer::targets::qwen3_6::StartupFeatures choice;
+        const char* name;
+        std::size_t logical_bindings;
+    };
+    auto vision_only = features(ninfer::SpeculativeBackend::None);
+    vision_only.vision = true;
+    auto mtp_with_vision = features(ninfer::SpeculativeBackend::Mtp);
+    mtp_with_vision.vision = true;
+    auto dflash_with_vision = features(ninfer::SpeculativeBackend::DFlash2);
+    dflash_with_vision.vision = true;
+    constexpr std::size_t kVisionBindings = 441;
+    constexpr std::size_t kMtpBindings = 16;
+    constexpr std::size_t kDFlashBindings = 91;
+    for (const FeatureCase& test : {
+             FeatureCase{vision_only, "Vision", kVisionBindings},
+             FeatureCase{features(ninfer::SpeculativeBackend::Mtp), "MTP", kMtpBindings},
+             FeatureCase{features(ninfer::SpeculativeBackend::DFlash2), "DFlash2", kDFlashBindings},
+             FeatureCase{mtp_with_vision, "Vision+MTP", kVisionBindings + kMtpBindings},
+             FeatureCase{dflash_with_vision, "Vision+DFlash2",
+                         kVisionBindings + kDFlashBindings},
+             FeatureCase{features(ninfer::SpeculativeBackend::Mtp,
+                                  ninfer::ProposalHead::Optimized), "MTP+indexed proposal",
+                         kMtpBindings + 2},
+             FeatureCase{features(ninfer::SpeculativeBackend::DFlash2,
+                                  ninfer::ProposalHead::Optimized), "DFlash2+indexed proposal",
+                         kDFlashBindings + 2},
+         }) {
+        const auto metadata = inspect_v3_feature_metadata(root, test.choice);
+        if (metadata.size() != test.logical_bindings) {
+            std::cerr << "GSQ " << test.name << " feature semantic inventory incomplete\n";
+            return 1;
+        }
+        ninfer::artifact::Binder selected_binder(reader);
+        const auto selected_plan = bind_v3_text_artifact(selected_binder, root, test.choice);
+        if (!selected_plan.bindings.v3_text ||
+            selected_plan.materialization.object_count != root.at("objects").size() ||
+            selected_plan.materialization.host_objects.size() != 6 ||
+            selected_plan.materialization.device_objects.size() <=
+                plan.materialization.device_objects.size()) {
+            std::cerr << "GSQ " << test.name << " physical placement incomplete\n";
+            return 1;
+        }
+        if (test.choice.mtp() &&
+            (!selected_plan.bindings.mtp.v3 ||
+             !selected_plan.bindings.mtp.mlp.gate ||
+             !selected_plan.bindings.mtp.mlp.up ||
+             selected_plan.bindings.mtp.v3->query.object.index !=
+                 selected_plan.bindings.mtp.v3->key.object.index)) {
+            std::cerr << "GSQ MTP ModelView parent references incomplete\n";
+            return 1;
+        }
+        if (test.choice.vision &&
+            (selected_plan.bindings.vision_backbone.layers[0].qkv.index ==
+                 selected_plan.bindings.vision_backbone.layers[1].qkv.index ||
+             selected_plan.bindings.vision_backbone.layers[0].qkv.index ==
+                 selected_plan.bindings.vision_backbone.layers[0].qkv_bias.index)) {
+            std::cerr << "GSQ Vision physical QKV/bias parent identity incorrect\n";
+            return 1;
+        }
+        if (test.choice.dflash2() &&
+            (!selected_plan.bindings.dflash2 ||
+             selected_plan.bindings.dflash2->layers[0].query_key_value.selected_rows !=
+                 DFlashConfig::query_key_value_rows ||
+             selected_plan.bindings.dflash2->layers[0].gate_up.selected_rows !=
+                 DFlashConfig::mlp_gate_up_rows)) {
+            std::cerr << "GSQ DFlash2 packed runtime parent geometry incomplete\n";
+            return 1;
+        }
+        if (test.choice.optimized_proposal() &&
+            (!selected_plan.bindings.v3_proposal_head ||
+             selected_plan.bindings.v3_proposal_head->selected_rows !=
+                 TextConfig::draft_head_rows)) {
+            std::cerr << "GSQ optimized proposal binding incomplete\n";
+            return 1;
+        }
+    }
+    const auto feature_rejected = [&](nlohmann::json invalid,
+                                      ninfer::targets::qwen3_6::StartupFeatures selected,
+                                      const char* label) {
+        try {
+            (void)inspect_v3_feature_metadata(invalid, selected);
+        } catch (const ninfer::artifact::ArtifactError&) {
+            return true;
+        }
+        std::cerr << "GSQ v3 accepted broken feature " << label << '\n';
+        return false;
+    };
+    {
+        auto invalid = root;
+        invalid["bindings"].erase("mtp/layers/0/attention/key");
+        if (!feature_rejected(std::move(invalid), features(ninfer::SpeculativeBackend::Mtp),
+                              "MTP key")) { return 1; }
+    }
+    {
+        auto invalid = root;
+        auto& start = invalid["bindings"]["vision/layers/0/attention/key"]["parts"][0]
+                              ["range"][0];
+        start = start.get<std::uint64_t>() + 1152;
+        if (!feature_rejected(std::move(invalid), vision_only, "Vision QKV order")) { return 1; }
+    }
+    {
+        auto invalid = root;
+        invalid["components"]["dflash2"]["config"]["dflash_config"]["selector_rank"] = 128;
+        if (!feature_rejected(std::move(invalid),
+                              features(ninfer::SpeculativeBackend::DFlash2),
+                              "DFlash2 selector config")) { return 1; }
+    }
+    return 0;
+}
+
+int verify_real_qwen36_v3_headers() {
+    // The two official Qwen3.6 artifacts also use v3 directories. A sparse header-derived
+    // fixture exercises their exact physical layouts without requiring 17+GiB on disk or GPU.
+    const auto root_path = std::filesystem::path(NINFER_SOURCE_DIR) / ".." / ".." / "real-models";
+    for (const auto& [filename, expected_mlp_format] : {
+             std::pair{"qwen3_6_27b.ninfer", NumericFormat::Q4G64_F16S},
+             std::pair{"qwen3_6_27b_nvfp4.ninfer", NumericFormat::NVFP4},
+         }) {
+        const auto file_path = root_path / filename;
+        if (!std::filesystem::is_regular_file(file_path)) { continue; }
+        std::ifstream file(file_path, std::ios::binary);
+        std::array<unsigned char, 32> header{};
+        file.read(reinterpret_cast<char*>(header.data()), header.size());
+        const std::array<unsigned char, 8> magic{'N', 'I', 'N', 'F', 'E', 'R', 0, 3};
+        if (!file || !std::equal(magic.begin(), magic.end(), header.begin())) {
+            throw std::runtime_error(std::string(filename) + " is not v3");
+        }
+        std::uint64_t bytes = 0;
+        for (int i = 0; i < 8; ++i) {
+            bytes |= std::uint64_t(header[8 + i]) << (8 * i);
+        }
+        if (bytes == 0 || bytes > (1 << 20)) {
+            throw std::runtime_error(std::string(filename) + " has invalid JSON length");
+        }
+        std::string content(bytes, '\0');
+        file.read(content.data(), static_cast<std::streamsize>(content.size()));
+        if (!file) { throw std::runtime_error("incomplete Qwen3.6 v3 header"); }
+        const auto directory = nlohmann::json::parse(content);
+        const auto metadata = inspect_v3_text_metadata(directory);
+        if (metadata.tensors.size() != 963 ||
+            directory.at("metadata").at("name") != "qwen3.6-27b") {
+            throw std::runtime_error("Qwen3.6 v3 semantic text inventory differs");
+        }
+        const auto gate = std::ranges::find_if(metadata.tensors, [](const V3LogicalTensor& item) {
+            return item.parameter == "text/layers/0/mlp/gate";
+        });
+        if (gate == metadata.tensors.end() || gate->format != expected_mlp_format) {
+            throw std::runtime_error("Qwen3.6 v3 physical MLP format differs");
+        }
+        auto sparse_file = ninfer::test::artifact_fixture::TemporaryArtifact{
+            std::filesystem::temp_directory_path() /
+            ("ninfer_v3_qwen36_" + std::to_string(std::random_device{}()) + ".ninfer")};
+        {
+            std::ofstream output(sparse_file.path, std::ios::binary | std::ios::trunc);
+            output.write(reinterpret_cast<const char*>(header.data()), header.size());
+            output.write(content.data(), static_cast<std::streamsize>(content.size()));
+            if (!output) { throw std::runtime_error("Qwen3.6 metadata fixture failed"); }
+        }
+        const auto start = ninfer::test::artifact_fixture::align_up(32 + bytes, 4096);
+        const auto payload = directory.at("files").at(0).at("payload_bytes")
+                                 .get<std::uint64_t>();
+        std::filesystem::resize_file(sparse_file.path, start + payload);
+        ninfer::artifact::Reader reader(sparse_file.path);
+        ninfer::artifact::Binder plain_binder(reader);
+        const auto plain = bind_v3_text_artifact(
+            plain_binder, directory, features(ninfer::SpeculativeBackend::None));
+        if (!plain.bindings.v3_text || plain.materialization.host_objects.size() != 6 ||
+            plain.materialization.object_count != directory.at("objects").size()) {
+            throw std::runtime_error("Qwen3.6 v3 base plan differs");
+        }
+        {
+            ninfer::artifact::Binder package_binder(reader);
+            const ninfer::EngineOptions options{};
+            const auto profile = expected_mlp_format == NumericFormat::NVFP4
+                                     ? WeightsProfile::Qwen36Nvfp4
+                                     : WeightsProfile::Qwen36GroupwiseInt;
+            const auto packaged = Package::plan_load(package_binder, options, profile);
+            if (packaged.materialization().device_objects.size() !=
+                    plain.materialization.device_objects.size()) {
+                throw std::runtime_error("Package rejected Qwen3.6 native v3 profile");
+            }
+        }
+        for (const auto& selected : {
+                 features(ninfer::SpeculativeBackend::Mtp),
+                 [] {
+                     auto feature = features(ninfer::SpeculativeBackend::None);
+                     feature.vision = true;
+                     return feature;
+                 }(),
+             }) {
+            ninfer::artifact::Binder binder(reader);
+            const auto plan = bind_v3_text_artifact(binder, directory, selected);
+            if (plan.materialization.device_objects.size() <=
+                    plain.materialization.device_objects.size() ||
+                plan.materialization.object_count != directory.at("objects").size()) {
+                throw std::runtime_error("Qwen3.6 v3 feature plan incomplete");
+            }
+        }
     }
     return 0;
 }
@@ -528,6 +874,12 @@ int verify_vision_workspace_planning() {
 
 int main(int argc, char** argv) {
     if (const int result = verify_self_describing_shape(); result != 0) { return result; }
+    if (const int result = verify_real_v3_gsq_header(); result != 0) { return result; }
+    if (const int result = verify_real_qwen36_v3_headers(); result != 0) { return result; }
+    if (argc == 2 && std::string_view(argv[1]) == "--v3-header-only") {
+        std::cout << "real v3 GSQ text metadata validated\n";
+        return 0;
+    }
     if (argc == 2 && std::string_view(argv[1]) == "--shape-only") {
         std::cout << "self-describing model shape fixtures passed\n";
         return 0;

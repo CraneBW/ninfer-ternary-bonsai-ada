@@ -101,6 +101,17 @@ Package::WeightsProfile Package::resolve_weights(const artifact::ArtifactIdentit
 
 Package::LoadPlan Package::plan_load(artifact::Binder& binder, const EngineOptions& options,
                                      WeightsProfile weights_profile) {
+    if (const auto* v3 = binder.reader().v3_directory()) {
+        if (weights_profile != WeightsProfile::Qwen36GroupwiseInt &&
+            weights_profile != WeightsProfile::Qwen36Nvfp4 &&
+            weights_profile != WeightsProfile::Qwen38GroupwiseInt &&
+            weights_profile != WeightsProfile::Qwen38Nvfp4) {
+            throw artifact::ArtifactError("unsupported 27B v3 weight profile");
+        }
+        return LoadPlan(std::make_unique<LoadPlan::Impl>(
+            weights_profile,
+            detail::bind_v3_text_artifact(binder, *v3, qwen3_6::startup_features(options))));
+    }
     return LoadPlan(std::make_unique<LoadPlan::Impl>(
         weights_profile,
         detail::bind_artifact(binder, weights_profile, qwen3_6::startup_features(options))));

@@ -209,14 +209,25 @@ artifact::ArtifactIdentity registered_identity(const artifact::Reader& reader) {
         }
         const auto& config = components.at("text").at("config");
         const auto& metadata = directory->at("metadata");
-        if (metadata.value("name", "") == "qwen3.8-27b" &&
+        const std::string name = metadata.value("name", "");
+        if ((name == "qwen3.8-27b" || name == "qwen3.6-27b") &&
             config.value("model_type", "") == "qwen3_5_text" &&
             config.value("hidden_size", 0) == 5120 &&
             config.value("num_hidden_layers", 0) == 64) {
-            // Text's mixed GGUF formats are dispatched from their descriptors
-            // by the Qwen3.8 target. The legacy weights profile is currently
-            // the target's model-family identifier, not its per-tensor codec.
-            return {std::string(Qwen3_6_27B::qwen3_8_model_id), "groupwise-int"};
+            // v3 stores the physical codec on each tensor. For Qwen3.6 the
+            // presence of any NVFP4 weights also selects the existing
+            // NVFP4-family capacity policy; plain Q4/Q5 stays groupwise.
+            bool any_nvfp4 = false;
+            if (name == "qwen3.6-27b") {
+                for (const auto& object : directory->at("objects")) {
+                    if (object.value("kind", "") == "tensor" &&
+                        object.value("format", "") == "nvfp4") {
+                        any_nvfp4 = true;
+                        break;
+                    }
+                }
+            }
+            return {name, any_nvfp4 ? "nvfp4" : "groupwise-int"};
         }
         throw artifact::ArtifactError(
             "v3 component geometry is not registered as an executable target");

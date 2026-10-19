@@ -14,10 +14,13 @@
 #include <cstdint>
 #include <initializer_list>
 #include <limits>
+#include <map>
 #include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <unordered_map>
+#include <unordered_set>
 #include <variant>
 #include <vector>
 
@@ -208,8 +211,51 @@ private:
     FoldedSigns table_;
 };
 
+Weight row_view(const Weight& block, std::int32_t row_begin, std::int32_t row_count);
+
 Weight materialized_weight(const artifact::MaterializedArtifact& materialized,
                            const WeightPlan& plan, std::int32_t rows, std::int32_t columns) {
+    if (plan.parent_rows > 0) {
+        if (rows != plan.selected_rows || columns != plan.parent_columns ||
+            plan.first_row < 0 || plan.first_row + rows > plan.parent_rows) {
+            throw artifact::ArtifactError("v3 logical weight range conflicts with parent shape");
+        }
+        Weight weight = artifact::materialized_weight(materialized, plan.object, plan.format,
+                                                      plan.parent_rows, plan.parent_columns);
+        if (rows != plan.parent_rows || plan.first_row != 0) {
+            if (weight.layout == QuantLayout::GgufBlocks) {
+                const auto block = gguf_block_shape(weight.qtype);
+                const std::uint64_t bytes_per_row =
+                    static_cast<std::uint64_t>(columns / block.elements) * block.bytes;
+                const auto* origin = static_cast<const std::byte*>(weight.qdata);
+                weight.qdata = origin + static_cast<std::uint64_t>(plan.first_row) * bytes_per_row;
+                weight.payload = weight.qdata;
+                weight.payload_bytes = static_cast<std::uint64_t>(rows) * bytes_per_row;
+                weight.n = rows;
+                weight.shape[0] = rows;
+                weight.padded_shape[0] = rows;
+            } else if (weight.layout == QuantLayout::RowSplit) {
+                weight = row_view(weight, plan.first_row, rows);
+            } else if (weight.layout == QuantLayout::Contiguous) {
+                const std::size_t word_bytes =
+                    plan.format == NumericFormat::BF16 ? 2 : 4;
+                const auto* first = static_cast<const std::byte*>(weight.qdata) +
+                                    static_cast<std::size_t>(plan.first_row) * columns * word_bytes;
+                weight.payload = weight.qdata = first;
+                weight.payload_bytes = static_cast<std::uint64_t>(rows) * columns * word_bytes;
+                weight.n = rows;
+                weight.shape[0] = rows;
+                weight.padded_shape[0] = rows;
+            } else {
+                throw artifact::ArtifactError("v3 partial tensor format is not row-sliceable");
+            }
+        }
+        if (plan.input_columns) {
+            weight.input_columns =
+                static_cast<const std::int32_t*>(materialized.device_data(*plan.input_columns));
+        }
+        return weight;
+    }
     // Ternary weights are exactly the folded weights (the artifact's 402 ternary tensors are its
     // 401 folded weights plus the inverse-mapped token embedding), so the format alone decides
     // that a sign block is required.
@@ -303,7 +349,15 @@ Weight row_view(const Weight& block, std::int32_t row_begin, std::int32_t row_co
 DensePostMixerPayload load_mlp(const MlpPlan& plan,
                                const artifact::MaterializedArtifact& materialized) {
     DensePostMixerPayload out;
-    out.gate_up = materialized_weight(materialized, plan.gate_up, TextConfig::mtp_mlp_gate_up_rows, TextConfig::hidden);
+    if (plan.gate && plan.up) {
+        out.gate = materialized_weight(materialized, *plan.gate, TextConfig::intermediate,
+                                        TextConfig::hidden);
+        out.up = materialized_weight(materialized, *plan.up, TextConfig::intermediate,
+                                      TextConfig::hidden);
+    } else {
+        out.gate_up = materialized_weight(materialized, plan.gate_up,
+                                         TextConfig::mtp_mlp_gate_up_rows, TextConfig::hidden);
+    }
     out.down    = materialized_weight(materialized, plan.down, TextConfig::hidden, TextConfig::intermediate);
     return out;
 }
@@ -315,6 +369,19 @@ load_attention_projection(const FullAttentionPlan& plan,
         return SplitAttentionProjectionPayload{
             .query_key  = materialized_weight(materialized, split->query_key, (TextConfig::query_size + TextConfig::kv_size), TextConfig::hidden),
             .gate_value = materialized_weight(materialized, split->gate_value, (TextConfig::query_size + TextConfig::kv_size), TextConfig::hidden),
+        };
+    }
+    if (const auto* individual =
+            std::get_if<IndividualAttentionProjectionPlan>(&plan.projection)) {
+        return IndividualAttentionProjectionPayload{
+            .query = materialized_weight(materialized, individual->query,
+                                          TextConfig::query_size, TextConfig::hidden),
+            .key = materialized_weight(materialized, individual->key, TextConfig::kv_size,
+                                        TextConfig::hidden),
+            .gate = materialized_weight(materialized, individual->gate,
+                                         TextConfig::query_size, TextConfig::hidden),
+            .value = materialized_weight(materialized, individual->value,
+                                          TextConfig::kv_size, TextConfig::hidden),
         };
     }
     const auto& fused = std::get<FusedAttentionProjectionPlan>(plan.projection);
@@ -330,6 +397,19 @@ load_gdn_input_projection(const GdnPlan& plan, const artifact::MaterializedArtif
         return SplitGdnInputProjectionPayload{
             .query_key = materialized_weight(materialized, split->query_key, (2 * TextConfig::key_dim), TextConfig::hidden),
             .value_z   = materialized_weight(materialized, split->value_z, (2 * TextConfig::value_dim), TextConfig::hidden),
+        };
+    }
+    if (const auto* individual =
+            std::get_if<IndividualGdnInputProjectionPlan>(&plan.input_projection)) {
+        return IndividualGdnInputProjectionPayload{
+            .query = materialized_weight(materialized, individual->query,
+                                          TextConfig::key_dim, TextConfig::hidden),
+            .key = materialized_weight(materialized, individual->key,
+                                        TextConfig::key_dim, TextConfig::hidden),
+            .value = materialized_weight(materialized, individual->value,
+                                          TextConfig::value_dim, TextConfig::hidden),
+            .z = materialized_weight(materialized, individual->z,
+                                      TextConfig::value_dim, TextConfig::hidden),
         };
     }
     const auto& fused = std::get<FusedGdnInputProjectionPlan>(plan.input_projection);
@@ -711,6 +791,1018 @@ void validate_artifact_model_shape(const artifact::Binder& binder) {
 // Defined below, next to the materialization pass that consumes it.
 std::optional<HadamardSignsPlan> bind_hadamard_signs(artifact::Binder& binder);
 
+namespace {
+
+using Json = nlohmann::json;
+
+std::uint64_t v3_unsigned(const Json& value, std::string_view label) {
+    if (!value.is_number_integer() ||
+        (!value.is_number_unsigned() && value.get<std::int64_t>() < 0)) {
+        throw artifact::ArtifactError(std::string(label) + ": expected nonnegative integer");
+    }
+    return value.get<std::uint64_t>();
+}
+
+std::string v3_string(const Json& value, std::string_view label) {
+    if (!value.is_string() || value.get_ref<const std::string&>().empty()) {
+        throw artifact::ArtifactError(std::string(label) + ": expected nonempty string");
+    }
+    return value.get<std::string>();
+}
+
+NumericFormat v3_format(std::string_view spelling) {
+    if (spelling == "bf16") { return NumericFormat::BF16; }
+    if (spelling == "fp32") { return NumericFormat::FP32; }
+    if (spelling == "int32") { return NumericFormat::I32; }
+    if (spelling == "q2_g64_fp16") { return NumericFormat::Q2G64_F16S; }
+    if (spelling == "q4_g64_fp16") { return NumericFormat::Q4G64_F16S; }
+    if (spelling == "q5_g64_fp16") { return NumericFormat::Q5G64_F16S; }
+    if (spelling == "q6_g64_fp16") { return NumericFormat::Q6G64_F16S; }
+    if (spelling == "q8_g32_fp16") { return NumericFormat::W8G32_F16S; }
+    if (spelling == "t2_g128_fp16") { return NumericFormat::T2G128_F16S; }
+    if (spelling == "nvfp4") { return NumericFormat::NVFP4; }
+    if (spelling == "fp8_e4m3fn_row_bf16") {
+        return NumericFormat::FP8_E4M3FN_ROW_BF16S;
+    }
+    if (spelling == "fp8_e4m3fn_row_fp16") {
+        return NumericFormat::FP8_E4M3FN_ROW_FP16S;
+    }
+    for (int code = static_cast<int>(NumericFormat::GGUF_Q8_0);
+         code <= static_cast<int>(NumericFormat::GGUF_Q2_0); ++code) {
+        const auto format = static_cast<NumericFormat>(code);
+        if (artifact::format_name(format) == spelling) { return format; }
+    }
+    throw artifact::ArtifactError("qwen3_6_27b: unsupported v3 numeric format: " +
+                                  std::string(spelling));
+}
+
+artifact::StorageLayout v3_layout(std::string_view spelling) {
+    if (spelling == "contiguous_le_v1") {
+        return artifact::StorageLayout::ContiguousLeV1;
+    }
+    if (spelling == "row_split_k128_v1") {
+        return artifact::StorageLayout::RowSplitK128V1;
+    }
+    if (spelling == "block_scale_k16_m128x4_v1") {
+        return artifact::StorageLayout::BlockScaleK16M128x4V1;
+    }
+    if (spelling == "row_scale_v1") {
+        return artifact::StorageLayout::RowScaleV1;
+    }
+    if (spelling == "row_interleaved_v1") {
+        return artifact::StorageLayout::RowInterleavedV1;
+    }
+    if (spelling == "gguf_blocks_v1") {
+        return artifact::StorageLayout::GgufBlocksV1;
+    }
+    throw artifact::ArtifactError("qwen3_6_27b: unsupported v3 tensor layout: " +
+                                  std::string(spelling));
+}
+
+void require_v3_shape(const Json& shape, std::initializer_list<std::uint64_t> expected,
+                      std::string_view label) {
+    if (!shape.is_array() || shape.size() != expected.size()) {
+        throw artifact::ArtifactError(std::string(label) + ": wrong logical tensor rank");
+    }
+    std::size_t i = 0;
+    for (auto dim : expected) {
+        if (v3_unsigned(shape.at(i++), label) != dim) {
+            throw artifact::ArtifactError(std::string(label) + ": declared tensor shape differs");
+        }
+    }
+}
+
+void validate_v3_text_config(const Json& root, const ModelShape& s) {
+    const auto& components = root.at("components");
+    const auto& text = components.at("text");
+    const auto& config = text.at("config");
+    const auto require_dim = [&](const char* field, int expected) {
+        if (!config.contains(field) || v3_unsigned(config.at(field), field) !=
+                                             static_cast<std::uint64_t>(expected)) {
+            throw artifact::ArtifactError(std::string("components.text.config.") + field +
+                                          ": incompatible 27B Program geometry");
+        }
+    };
+    require_dim("hidden_size", s.hidden);
+    require_dim("intermediate_size", s.intermediate);
+    require_dim("num_hidden_layers", s.layers);
+    require_dim("vocab_size", s.output_rows);
+    require_dim("num_attention_heads", s.query_heads);
+    require_dim("num_key_value_heads", s.kv_heads);
+    require_dim("head_dim", s.head_dim);
+    require_dim("linear_num_key_heads", s.gdn_key_heads);
+    require_dim("linear_key_head_dim", s.gdn_key_head_dim);
+    require_dim("linear_num_value_heads", s.gdn_value_heads);
+    require_dim("linear_value_head_dim", s.gdn_value_head_dim);
+    require_dim("linear_conv_kernel_dim", s.gdn_conv_kernel);
+    require_dim("max_position_embeddings", static_cast<int>(kNativeContext));
+    if (config.value("model_type", std::string{}) != "qwen3_5_text" ||
+        config.value("tie_word_embeddings", true)) {
+        throw artifact::ArtifactError("components.text.config: unsupported model family or tied head");
+    }
+    const auto& types = config.at("layer_types");
+    if (!types.is_array() || types.size() != static_cast<std::size_t>(s.layers)) {
+        throw artifact::ArtifactError("components.text.config.layer_types: wrong layer count");
+    }
+    for (int layer = 0; layer < s.layers; ++layer) {
+        const std::string expected = s.is_full_attention(layer) ? "full_attention" :
+                                                                "linear_attention";
+        if (v3_string(types.at(layer), "layer_types") != expected) {
+            throw artifact::ArtifactError("components.text.config.layer_types[" +
+                                          std::to_string(layer) + "]: incompatible topology");
+        }
+    }
+    const auto& rope = config.at("rope_parameters");
+    if (!rope.is_object() || !rope.contains("rope_theta") ||
+        !rope.at("rope_theta").is_number() ||
+        std::abs(rope.at("rope_theta").get<double>() - TextConfig::rope_theta) > 1 ||
+        !rope.contains("partial_rotary_factor") ||
+        !rope.at("partial_rotary_factor").is_number() ||
+        std::abs(rope.at("partial_rotary_factor").get<double>() -
+                 double(s.rotary_dim) / s.head_dim) > 1e-6) {
+        throw artifact::ArtifactError("components.text.config.rope_parameters: incompatible RoPE");
+    }
+    if (!config.contains("rms_norm_eps") || !config.at("rms_norm_eps").is_number() ||
+        std::abs(config.at("rms_norm_eps").get<double>() - TextConfig::rms_epsilon) > 1e-10) {
+        throw artifact::ArtifactError("components.text.config.rms_norm_eps: incompatible RMSNorm");
+    }
+}
+
+} // namespace
+
+V3TextMetadata inspect_v3_text_metadata(const nlohmann::json& root) {
+    // The v3 container layer validates general schema, but model-specific geometry and semantic
+    // role ownership belong here. This inspector uses JSON alone, so a partial 15GB download
+    // can be checked from its 376800-byte directory without mmap'ing any weight.
+    validate_v3_text_config(root, kModelShape);
+    const Json& raw_objects = root.at("objects");
+    const Json& bindings    = root.at("bindings");
+    const Json& uses        = root.at("uses");
+    if (!raw_objects.is_array() || !bindings.is_object() || !uses.is_array()) {
+        throw artifact::ArtifactError("v3 text metadata requires objects, bindings and uses");
+    }
+    std::unordered_map<std::string, const Json*> objects;
+    objects.reserve(raw_objects.size());
+    for (const auto& object : raw_objects) {
+        const auto& name = v3_string(object.at("id"), "v3 object id");
+        if (!objects.emplace(name, &object).second) {
+            throw artifact::ArtifactError("v3 text duplicate object: " + name);
+        }
+    }
+    std::map<std::pair<std::string, std::string>, const Json*> use_index;
+    for (const auto& use : uses) {
+        const auto parameter = v3_string(use.at("parameter"), "Use parameter");
+        const auto input     = v3_string(use.at("input"), "Use input");
+        if (!use_index.emplace(std::make_pair(parameter, input), &use).second) {
+            throw artifact::ArtifactError("v3 text duplicate Use: " + parameter + "@" + input);
+        }
+    }
+
+    V3TextMetadata manifest;
+    manifest.tensors.reserve(963);
+    const auto add = [&](const std::string& parameter,
+                         std::initializer_list<std::uint64_t> shape,
+                         std::string_view expected_input = {}) {
+        if (!bindings.contains(parameter)) {
+            throw artifact::ArtifactError("v3 text missing binding " + parameter);
+        }
+        const auto& binding = bindings.at(parameter);
+        if (!binding.is_object()) {
+            throw artifact::ArtifactError(parameter + ": binding must be an object");
+        }
+        std::string id;
+        std::uint64_t begin = 0;
+        std::uint64_t end   = 0;
+        bool partial = false;
+        if (binding.size() == 1 && binding.contains("object")) {
+            id = v3_string(binding.at("object"), parameter);
+        } else if (binding.size() == 1 && binding.contains("parts") &&
+                   binding.at("parts").is_array() && binding.at("parts").size() == 1) {
+            const auto& piece = binding.at("parts").at(0);
+            id = v3_string(piece.at("object"), parameter);
+            const auto& range = piece.at("range");
+            if (!range.is_array() || range.size() != 2) {
+                throw artifact::ArtifactError(parameter + ": partial binding requires [begin,end]");
+            }
+            begin = v3_unsigned(range.at(0), parameter);
+            end   = v3_unsigned(range.at(1), parameter);
+            partial = true;
+        } else {
+            throw artifact::ArtifactError(parameter + ": expected whole or single contiguous part");
+        }
+        const auto found = objects.find(id);
+        if (found == objects.end() || found->second->value("kind", std::string{}) != "tensor") {
+            throw artifact::ArtifactError(parameter + ": missing tensor object " + id);
+        }
+        const auto& tensor = *found->second;
+        const auto format = v3_format(v3_string(tensor.at("format"), id));
+        const auto layout = v3_layout(v3_string(tensor.at("layout"), id));
+        const auto& source_shape = tensor.at("shape");
+        if (!source_shape.is_array() || source_shape.size() != shape.size()) {
+            throw artifact::ArtifactError(parameter + ": wrong physical tensor rank");
+        }
+        V3LogicalTensor out;
+        out.parameter = parameter;
+        out.object_id = id;
+        out.format    = format;
+        out.layout    = layout;
+        std::vector<std::uint64_t> dimensions(shape);
+        const auto rows = dimensions.at(0);
+        const auto columns = dimensions.size() == 2 ? dimensions[1] : 1;
+        out.rows = rows;
+        out.columns = columns;
+        out.parent_rows = v3_unsigned(source_shape.at(0), id);
+        const std::uint64_t source_columns =
+            source_shape.size() == 2 ? v3_unsigned(source_shape.at(1), id) : 1;
+        if (source_columns != columns) {
+            throw artifact::ArtifactError(parameter + ": physical input width differs");
+        }
+        if (partial) {
+            if (shape.size() != 2 || begin >= end ||
+                begin % columns || end % columns || end - begin != rows * columns ||
+                end / columns > out.parent_rows) {
+                throw artifact::ArtifactError(parameter + ": invalid row-part geometry");
+            }
+            out.first_row = begin / columns;
+        } else {
+            require_v3_shape(source_shape, shape, parameter);
+        }
+        if (!expected_input.empty()) {
+            const auto use = use_index.find({parameter, std::string(expected_input)});
+            if (use == use_index.end()) {
+                throw artifact::ArtifactError(parameter + ": missing Use " +
+                                              std::string(expected_input));
+            }
+            const auto& declaration = *use->second;
+            if (declaration.contains("activation_policy")) {
+                out.activation_policy =
+                    v3_string(declaration.at("activation_policy"), parameter + " Use");
+                if (out.activation_policy != "A16Only" && out.activation_policy != "AllowA8" &&
+                    out.activation_policy != "AllowA4") {
+                    throw artifact::ArtifactError(parameter + ": unsupported activation policy");
+                }
+            }
+            if (declaration.contains("auxiliaries")) {
+                const auto& auxiliary = declaration.at("auxiliaries");
+                if (!auxiliary.is_object() || auxiliary.size() != 1) {
+                    throw artifact::ArtifactError(parameter + ": unexpected Use auxiliary");
+                }
+                if (parameter.find("/gdn/output") != std::string::npos &&
+                    auxiliary.contains("input_columns")) {
+                    const auto& ref = auxiliary.at("input_columns");
+                    if (!ref.is_object() || ref.size() != 1 || !ref.contains("object")) {
+                        throw artifact::ArtifactError(parameter + ": invalid input_columns binding");
+                    }
+                    out.input_columns_object =
+                        v3_string(ref.at("object"), parameter + " input_columns");
+                    const auto columns_object = objects.find(*out.input_columns_object);
+                    if (columns_object == objects.end() ||
+                        columns_object->second->value("kind", std::string{}) != "tensor") {
+                        throw artifact::ArtifactError(parameter + ": missing input_columns tensor");
+                    }
+                    const auto& source = *columns_object->second;
+                    if (v3_format(v3_string(source.at("format"), parameter)) != NumericFormat::I32 ||
+                        v3_layout(v3_string(source.at("layout"), parameter)) !=
+                            artifact::StorageLayout::ContiguousLeV1) {
+                        throw artifact::ArtifactError(parameter + ": invalid input_columns format");
+                    }
+                    require_v3_shape(source.at("shape"), {columns}, parameter + " input_columns");
+                } else if (auxiliary.contains("activation_input_divisor") &&
+                           format == NumericFormat::NVFP4) {
+                    const auto& ref = auxiliary.at("activation_input_divisor");
+                    if (!ref.is_object() || ref.size() != 1 || !ref.contains("object")) {
+                        throw artifact::ArtifactError(parameter + ": invalid divisor reference");
+                    }
+                    out.input_divisor_object =
+                        v3_string(ref.at("object"), parameter + " activation_input_divisor");
+                    const auto scalar = objects.find(*out.input_divisor_object);
+                    if (scalar == objects.end() ||
+                        scalar->second->value("kind", std::string{}) != "tensor" ||
+                        v3_format(v3_string(scalar->second->at("format"), parameter)) !=
+                            NumericFormat::FP32 ||
+                        v3_layout(v3_string(scalar->second->at("layout"), parameter)) !=
+                            artifact::StorageLayout::ContiguousLeV1) {
+                        throw artifact::ArtifactError(parameter + ": invalid FP32 divisor");
+                    }
+                    require_v3_shape(scalar->second->at("shape"), {},
+                                     parameter + " input_divisor");
+                } else {
+                    throw artifact::ArtifactError(parameter + ": unexpected Use auxiliary");
+                }
+            }
+        }
+        manifest.tensors.push_back(std::move(out));
+    };
+
+    const auto& s = kModelShape;
+    add("text/token_embedding", {std::uint64_t(s.output_rows), std::uint64_t(s.hidden)});
+    add("text/output_head", {std::uint64_t(s.output_rows), std::uint64_t(s.hidden)},
+        "text/final_hidden");
+    add("text/final_norm", {std::uint64_t(s.hidden)});
+    for (int layer = 0; layer < s.layers; ++layer) {
+        const std::string p = "text/layers/" + std::to_string(layer) + "/";
+        const std::string mixer = p + "mixer_input";
+        add(p + "input_norm", {std::uint64_t(s.hidden)});
+        add(p + "post_attention_norm", {std::uint64_t(s.hidden)});
+        if (s.is_full_attention(layer)) {
+            add(p + "attention/query", {std::uint64_t(s.query_size()), std::uint64_t(s.hidden)},
+                mixer);
+            add(p + "attention/gate", {std::uint64_t(s.query_size()), std::uint64_t(s.hidden)},
+                mixer);
+            add(p + "attention/key", {std::uint64_t(s.kv_size()), std::uint64_t(s.hidden)},
+                mixer);
+            add(p + "attention/value", {std::uint64_t(s.kv_size()), std::uint64_t(s.hidden)},
+                mixer);
+            add(p + "attention/query_norm", {std::uint64_t(s.head_dim)});
+            add(p + "attention/key_norm", {std::uint64_t(s.head_dim)});
+            add(p + "attention/output", {std::uint64_t(s.hidden), std::uint64_t(s.query_size())},
+                p + "attention/gated_output");
+        } else {
+            add(p + "gdn/a_log", {std::uint64_t(s.gdn_value_heads)});
+            add(p + "gdn/dt_bias", {std::uint64_t(s.gdn_value_heads)});
+            add(p + "gdn/convolution", {std::uint64_t(s.gdn_conv_kernel),
+                                        std::uint64_t(s.convolution_dim())});
+            add(p + "gdn/a_projection",
+                {std::uint64_t(s.gdn_value_heads), std::uint64_t(s.hidden)}, mixer);
+            add(p + "gdn/b_projection",
+                {std::uint64_t(s.gdn_value_heads), std::uint64_t(s.hidden)}, mixer);
+            add(p + "gdn/query", {std::uint64_t(s.key_dim()), std::uint64_t(s.hidden)}, mixer);
+            add(p + "gdn/key", {std::uint64_t(s.key_dim()), std::uint64_t(s.hidden)}, mixer);
+            add(p + "gdn/value", {std::uint64_t(s.value_dim()), std::uint64_t(s.hidden)}, mixer);
+            add(p + "gdn/z", {std::uint64_t(s.value_dim()), std::uint64_t(s.hidden)}, mixer);
+            add(p + "gdn/norm", {std::uint64_t(s.gdn_value_head_dim)});
+            add(p + "gdn/output", {std::uint64_t(s.hidden), std::uint64_t(s.value_dim())},
+                p + "gdn/gated_output");
+        }
+        add(p + "mlp/gate", {std::uint64_t(s.intermediate), std::uint64_t(s.hidden)},
+            p + "ffn_input");
+        add(p + "mlp/up", {std::uint64_t(s.intermediate), std::uint64_t(s.hidden)},
+            p + "ffn_input");
+        add(p + "mlp/down", {std::uint64_t(s.hidden), std::uint64_t(s.intermediate)},
+            p + "mlp/product");
+    }
+    return manifest;
+}
+
+std::vector<V3LogicalTensor> inspect_v3_feature_metadata(
+    const nlohmann::json& root, qwen3_6::StartupFeatures features) {
+    const auto& components = root.at("components");
+    const auto& objects = root.at("objects");
+    const auto& bindings = root.at("bindings");
+    const auto& uses = root.at("uses");
+    std::unordered_map<std::string, const Json*> object_index;
+    object_index.reserve(objects.size());
+    for (const auto& object : objects) {
+        object_index.emplace(v3_string(object.at("id"), "v3 object"), &object);
+    }
+    std::map<std::pair<std::string, std::string>, const Json*> use_index;
+    for (const auto& use : uses) {
+        use_index.emplace(
+            std::make_pair(v3_string(use.at("parameter"), "Use parameter"),
+                           v3_string(use.at("input"), "Use input")), &use);
+    }
+    std::vector<V3LogicalTensor> out;
+    out.reserve(features.vision ? 470 : 100);
+    const auto add = [&](const std::string& name,
+                         std::initializer_list<std::uint64_t> dimensions,
+                         std::string_view activation = {},
+                         std::optional<NumericFormat> required_format = std::nullopt)
+        -> const V3LogicalTensor& {
+        if (!bindings.contains(name)) {
+            throw artifact::ArtifactError("v3 missing feature binding " + name);
+        }
+        const auto& declaration = bindings.at(name);
+        std::string id;
+        std::uint64_t start = 0;
+        std::uint64_t stop = 0;
+        bool part = false;
+        if (declaration.is_object() && declaration.size() == 1 &&
+            declaration.contains("object")) {
+            id = v3_string(declaration.at("object"), name);
+        } else if (declaration.is_object() && declaration.size() == 1 &&
+                   declaration.contains("parts") && declaration.at("parts").is_array() &&
+                   declaration.at("parts").size() == 1) {
+            const auto& piece = declaration.at("parts").at(0);
+            if (!piece.is_object() || piece.size() != 2 ||
+                !piece.contains("object") || !piece.contains("range")) {
+                throw artifact::ArtifactError(name + ": invalid single-parent row part");
+            }
+            id = v3_string(piece.at("object"), name);
+            const auto& bounds = piece.at("range");
+            if (!bounds.is_array() || bounds.size() != 2) {
+                throw artifact::ArtifactError(name + ": part range must have two bounds");
+            }
+            start = v3_unsigned(bounds[0], name);
+            stop  = v3_unsigned(bounds[1], name);
+            part = true;
+        } else {
+            throw artifact::ArtifactError(name + ": requires whole or single-parent binding");
+        }
+        const auto found = object_index.find(id);
+        if (found == object_index.end() ||
+            found->second->value("kind", std::string{}) != "tensor") {
+            throw artifact::ArtifactError(name + ": object missing or not tensor: " + id);
+        }
+        const auto& physical = *found->second;
+        V3LogicalTensor logical;
+        logical.parameter = name;
+        logical.object_id = id;
+        logical.format = v3_format(v3_string(physical.at("format"), name));
+        logical.layout = v3_layout(v3_string(physical.at("layout"), name));
+        if (required_format && logical.format != *required_format) {
+            throw artifact::ArtifactError(name + ": unexpected physical encoding");
+        }
+        std::vector<std::uint64_t> shape(dimensions);
+        if (shape.empty() || shape.size() > 3 || !physical.at("shape").is_array() ||
+            physical.at("shape").size() != shape.size()) {
+            throw artifact::ArtifactError(name + ": feature tensor rank differs");
+        }
+        logical.rows = shape.at(0);
+        logical.columns = 1;
+        for (std::size_t dim = 1; dim < shape.size(); ++dim) {
+            logical.columns *= shape[dim];
+        }
+        logical.parent_rows = v3_unsigned(physical.at("shape")[0], name);
+        std::uint64_t parent_columns = 1;
+        for (std::size_t dim = 1; dim < shape.size(); ++dim) {
+            parent_columns *= v3_unsigned(physical.at("shape")[dim], name);
+        }
+        if (parent_columns != logical.columns) {
+            throw artifact::ArtifactError(name + ": physical matrix input width differs");
+        }
+        if (part) {
+            if (shape.size() > 2) {
+                throw artifact::ArtifactError(name + ": only vectors/matrices support row parts");
+            }
+            const std::uint64_t elements = logical.rows * logical.columns;
+            if (start >= stop || start % logical.columns != 0 ||
+                stop - start != elements || stop / logical.columns > logical.parent_rows) {
+                throw artifact::ArtifactError(name + ": invalid row-aligned physical range");
+            }
+            logical.first_row = start / logical.columns;
+        } else {
+            require_v3_shape(physical.at("shape"), dimensions, name);
+        }
+        if (!activation.empty()) {
+            const auto use_it = use_index.find({name, std::string(activation)});
+            if (use_it == use_index.end()) {
+                throw artifact::ArtifactError(name + ": missing Use " + std::string(activation));
+            }
+            const auto& use = *use_it->second;
+            if (!use.contains("activation_policy")) {
+                throw artifact::ArtifactError(name + ": missing activation policy");
+            }
+            logical.activation_policy = v3_string(use.at("activation_policy"), name);
+            if (logical.activation_policy != "A16Only" &&
+                logical.activation_policy != "AllowA8" &&
+                logical.activation_policy != "AllowA4") {
+                throw artifact::ArtifactError(name + ": unsupported activation policy");
+            }
+            if (use.contains("auxiliaries") && !use.at("auxiliaries").empty()) {
+                throw artifact::ArtifactError(name + ": unsupported feature Use auxiliaries");
+            }
+        }
+        out.push_back(std::move(logical));
+        return out.back();
+    };
+    const auto dimension = [&](const Json& cfg, const char* field, int expected,
+                               std::string_view component) {
+        if (!cfg.contains(field) ||
+            v3_unsigned(cfg.at(field), field) != static_cast<std::uint64_t>(expected)) {
+            throw artifact::ArtifactError(std::string(component) + "." + field +
+                                          ": incompatible 27B feature geometry");
+        }
+    };
+    const auto target_component = [&](const char* name) -> const Json& {
+        if (!components.contains(name) ||
+            components.at(name).value("target", std::string{}) != "text") {
+            throw artifact::ArtifactError(std::string("v3 ") + name +
+                                          ": missing text target");
+        }
+        return components.at(name);
+    };
+    if (features.vision) {
+        const auto& cfg = target_component("vision").at("config");
+        if (cfg.value("model_type", std::string{}) != "qwen3_5_vision") {
+            throw artifact::ArtifactError("v3 vision: unsupported model_type");
+        }
+        for (const auto& [name, value] :
+             std::array<std::pair<const char*, int>, 8>{{
+                 {"depth", qwen3_6::VisionBackboneConfig::layers},
+                 {"hidden_size", qwen3_6::VisionBackboneConfig::hidden},
+                 {"intermediate_size", qwen3_6::VisionBackboneConfig::intermediate},
+                 {"num_heads", qwen3_6::VisionBackboneConfig::heads},
+                 {"patch_size", 16}, {"temporal_patch_size", 2},
+                 {"spatial_merge_size", qwen3_6::VisionBackboneConfig::merge},
+                 {"num_position_embeddings", qwen3_6::VisionBackboneConfig::position_embeddings},
+             }}) {
+            dimension(cfg, name, value, "vision.config");
+        }
+        constexpr auto H = qwen3_6::VisionBackboneConfig::hidden;
+        constexpr auto I = qwen3_6::VisionBackboneConfig::intermediate;
+        constexpr auto M = qwen3_6::VisionBackboneConfig::merger_hidden;
+        const auto vadd = [&](const std::string& n,
+                              std::initializer_list<std::uint64_t> dims,
+                              std::string_view input = {},
+                              std::optional<NumericFormat> format = std::nullopt) {
+            return add(n, dims, input, format);
+        };
+        vadd("vision/patch_embedding", {H, qwen3_6::VisionBackboneConfig::patch_dim},
+             "vision/patch_input", NumericFormat::Q6G64_F16S);
+        vadd("vision/patch_embedding_bias", {H}, {}, NumericFormat::BF16);
+        vadd("vision/position_embedding",
+             {qwen3_6::VisionBackboneConfig::position_embeddings, H}, {},
+             NumericFormat::BF16);
+        for (int i = 0; i < qwen3_6::VisionBackboneConfig::layers; ++i) {
+            const std::string p = "vision/layers/" + std::to_string(i) + "/";
+            for (const char* role : {"norm1_weight", "norm1_bias",
+                                     "norm2_weight", "norm2_bias"}) {
+                vadd(p + role, {H}, {}, NumericFormat::BF16);
+            }
+            const auto prefix = p + "attention/";
+            const auto a = vadd(prefix + "query", {H, H}, p + "attention_input",
+                                NumericFormat::Q4G64_F16S);
+            const auto b = vadd(prefix + "key", {H, H}, p + "attention_input",
+                                NumericFormat::Q4G64_F16S);
+            const auto c = vadd(prefix + "value", {H, H}, p + "attention_input",
+                                NumericFormat::Q4G64_F16S);
+            if (a.object_id != b.object_id || b.object_id != c.object_id ||
+                a.parent_rows != 3 * H || a.first_row != 0 ||
+                b.first_row != H || c.first_row != 2 * H) {
+                throw artifact::ArtifactError(p + ": Vision QKV parent or order differs");
+            }
+            const auto qb = vadd(prefix + "query_bias", {H}, {}, NumericFormat::BF16);
+            const auto kb = vadd(prefix + "key_bias", {H}, {}, NumericFormat::BF16);
+            const auto vb = vadd(prefix + "value_bias", {H}, {}, NumericFormat::BF16);
+            if (qb.object_id != kb.object_id || kb.object_id != vb.object_id ||
+                qb.parent_rows != 3 * H || qb.first_row != 0 ||
+                kb.first_row != H || vb.first_row != 2 * H) {
+                throw artifact::ArtifactError(p + ": Vision QKV bias parent or order differs");
+            }
+            vadd(prefix + "output", {H, H}, p + "attention_output",
+                 NumericFormat::Q5G64_F16S);
+            vadd(prefix + "output_bias", {H}, {}, NumericFormat::BF16);
+            vadd(p + "mlp/fc1", {I, H}, p + "mlp_input", NumericFormat::Q4G64_F16S);
+            vadd(p + "mlp/fc1_bias", {I}, {}, NumericFormat::BF16);
+            vadd(p + "mlp/fc2", {H, I}, p + "mlp_activation", NumericFormat::Q5G64_F16S);
+            vadd(p + "mlp/fc2_bias", {H}, {}, NumericFormat::BF16);
+        }
+        vadd("vision/merger/norm_weight", {H}, {}, NumericFormat::BF16);
+        vadd("vision/merger/norm_bias", {H}, {}, NumericFormat::BF16);
+        vadd("vision/merger/fc1", {M, M}, "vision/merger/input",
+             NumericFormat::W8G32_F16S);
+        vadd("vision/merger/fc1_bias", {M}, {}, NumericFormat::BF16);
+        vadd("vision/merger/fc2", {TextConfig::hidden, M}, "vision/merger/activation",
+             NumericFormat::W8G32_F16S);
+        vadd("vision/merger/fc2_bias", {TextConfig::hidden}, {}, NumericFormat::BF16);
+    }
+    if (features.mtp()) {
+        const auto& component = target_component("mtp");
+        const auto& architectures = component.at("config").at("architectures");
+        if (!architectures.is_array() || architectures.size() != 1 ||
+            architectures.at(0) != "Qwen3_5MTP") {
+            throw artifact::ArtifactError("v3 MTP: unsupported architecture");
+        }
+        // GSQ keeps MTP as GGUF Q6K; both Qwen3.6 v3 profiles preserve W8 row-split.
+        const auto stem_binding = bindings.at("mtp/input_projection");
+        const auto stem_id = v3_string(stem_binding.at("object"), "mtp input projection");
+        const auto stem = object_index.find(stem_id);
+        if (stem == object_index.end()) {
+            throw artifact::ArtifactError("v3 MTP input projection parent missing");
+        }
+        const auto fmt = v3_format(v3_string(stem->second->at("format"), "mtp format"));
+        if (fmt != NumericFormat::GGUF_Q6_K && fmt != NumericFormat::W8G32_F16S) {
+            throw artifact::ArtifactError("v3 MTP requires GGUF Q6K or row-split W8");
+        }
+        const auto H = TextConfig::hidden;
+        const auto Q = TextConfig::query_size;
+        const auto K = TextConfig::kv_size;
+        const auto I = TextConfig::intermediate;
+        add("mtp/input_projection", {H, 2 * H}, "mtp/stem_input", fmt);
+        add("mtp/embedding_norm", {H}, {}, NumericFormat::BF16);
+        add("mtp/hidden_norm", {H}, {}, NumericFormat::BF16);
+        add("mtp/final_norm", {H}, {}, NumericFormat::BF16);
+        const std::string p = "mtp/layers/0/";
+        add(p + "input_norm", {H}, {}, NumericFormat::BF16);
+        const auto prefix = p + "attention/";
+        const auto q = add(prefix + "query", {Q, H}, p + "mixer_input", fmt);
+        const auto k = add(prefix + "key", {K, H}, p + "mixer_input", fmt);
+        const auto g = add(prefix + "gate", {Q, H}, p + "mixer_input", fmt);
+        const auto v = add(prefix + "value", {K, H}, p + "mixer_input", fmt);
+        if (q.object_id != k.object_id || q.object_id != g.object_id ||
+            q.object_id != v.object_id || q.parent_rows != TextConfig::attention_input_rows ||
+            q.first_row != 0 || k.first_row != Q ||
+            g.first_row != Q + K || v.first_row != 2 * Q + K) {
+            throw artifact::ArtifactError("v3 MTP attention packing differs");
+        }
+        add(prefix + "query_norm", {TextConfig::head_dim}, {}, NumericFormat::BF16);
+        add(prefix + "key_norm", {TextConfig::head_dim}, {}, NumericFormat::BF16);
+        add(prefix + "output", {H, Q}, p + "attention/gated_output", fmt);
+        add(p + "post_attention_norm", {H}, {}, NumericFormat::BF16);
+        const auto gate = add(p + "mlp/gate", {I, H}, p + "ffn_input", fmt);
+        const auto up = add(p + "mlp/up", {I, H}, p + "ffn_input", fmt);
+        if (gate.object_id != up.object_id || gate.parent_rows != 2 * I ||
+            gate.first_row != 0 || up.first_row != I) {
+            throw artifact::ArtifactError("v3 MTP gate/up packing differs");
+        }
+        add(p + "mlp/down", {H, I}, p + "mlp/product", fmt);
+    }
+    if (features.dflash2()) {
+        const auto& cfg = target_component("dflash2").at("config");
+        if (cfg.value("model_type", std::string{}) != "qwen3") {
+            throw artifact::ArtifactError("v3 DFlash2: unsupported model_type");
+        }
+        for (const auto& [name, value] :
+             std::array<std::pair<const char*, int>, 7>{{
+                 {"num_hidden_layers", DFlashConfig::layers},
+                 {"intermediate_size", DFlashConfig::intermediate},
+                 {"num_attention_heads", DFlashConfig::query_heads},
+                 {"num_key_value_heads", DFlashConfig::kv_heads},
+                 {"head_dim", DFlashConfig::head_dim},
+                 {"sliding_window", DFlashConfig::local_capacity},
+                 {"max_position_embeddings", static_cast<int>(kNativeContext)},
+             }}) {
+            dimension(cfg, name, value, "dflash2.config");
+        }
+        const auto& architectures = cfg.at("architectures");
+        if (!architectures.is_array() || architectures.size() != 1 ||
+            architectures[0] != "DFlash2DraftModel") {
+            throw artifact::ArtifactError("v3 DFlash2 architecture differs");
+        }
+        const auto& layer_types = cfg.at("layer_types");
+        if (!layer_types.is_array() || layer_types.size() != DFlashConfig::layers) {
+            throw artifact::ArtifactError("v3 DFlash2 layer type count differs");
+        }
+        for (const auto& type : layer_types) {
+            if (type != "sliding_attention") {
+                throw artifact::ArtifactError("v3 DFlash2 layer type differs");
+            }
+        }
+        const auto& rope = cfg.at("rope_parameters").at("rope_theta");
+        if (!rope.is_number() || std::abs(rope.get<double>() -
+                                           static_cast<double>(DFlashConfig::rope_theta)) > 1) {
+            throw artifact::ArtifactError("v3 DFlash2 RoPE theta differs");
+        }
+        const auto& eps = cfg.at("rms_norm_eps");
+        if (!eps.is_number() ||
+            std::abs(eps.get<double>() - DFlashConfig::rms_epsilon) > 1e-10) {
+            throw artifact::ArtifactError("v3 DFlash2 norm epsilon differs");
+        }
+        const auto& special = cfg.at("dflash_config");
+        dimension(special, "selector_rank", DFlashConfig::selector_dim, "dflash_config");
+        dimension(special, "mask_token_id", DFlashConfig::mask_token, "dflash_config");
+        dimension(special, "selector_top_k", 16, "dflash_config");
+        dimension(special, "conv_kernel_size", 2, "dflash_config");
+        dimension(special, "conv_group_size", 16, "dflash_config");
+        const auto& ids = special.at("target_layer_ids");
+        if (!ids.is_array() || ids.size() != DFlashConfig::target_feature_layers.size()) {
+            throw artifact::ArtifactError("v3 DFlash2 target feature count differs");
+        }
+        for (std::size_t i = 0; i < ids.size(); ++i) {
+            if (v3_unsigned(ids[i], "DFlash target layer") !=
+                static_cast<std::uint64_t>(DFlashConfig::target_feature_layers[i])) {
+                throw artifact::ArtifactError("v3 DFlash2 target layers differ");
+            }
+        }
+        constexpr int H = DFlashConfig::hidden;
+        constexpr int Q = DFlashConfig::query_size;
+        constexpr int K = DFlashConfig::kv_size;
+        constexpr int I = DFlashConfig::intermediate;
+        add("dflash2/feature_projection", {H, DFlashConfig::feature_rows},
+            "dflash2/target_features", NumericFormat::W8G32_F16S);
+        add("dflash2/context_norm", {H}, {}, NumericFormat::BF16);
+        add("dflash2/final_norm", {H}, {}, NumericFormat::BF16);
+        for (int i = 0; i < DFlashConfig::layers; ++i) {
+            const std::string p = "dflash2/layers/" + std::to_string(i) + "/";
+            add(p + "input_norm", {H}, {}, NumericFormat::BF16);
+            add(p + "post_attention_norm", {H}, {}, NumericFormat::BF16);
+            const auto q = add(p + "attention/query", {Q, H},
+                               p + "query_projection_input", NumericFormat::W8G32_F16S);
+            const auto k = add(p + "attention/key", {K, H},
+                               p + "query_projection_input", NumericFormat::W8G32_F16S);
+            const auto v = add(p + "attention/value", {K, H},
+                               p + "query_projection_input", NumericFormat::W8G32_F16S);
+            if (q.object_id != k.object_id || q.object_id != v.object_id ||
+                q.parent_rows != Q + 2 * K || q.first_row != 0 ||
+                k.first_row != Q || v.first_row != Q + K) {
+                throw artifact::ArtifactError(p + ": DFlash attention packed parent differs");
+            }
+            const auto ck = add(p + "attention/context_key", {K, H},
+                                "dflash2/context_input", NumericFormat::W8G32_F16S);
+            const auto cv = add(p + "attention/context_value", {K, H},
+                                "dflash2/context_input", NumericFormat::W8G32_F16S);
+            if (ck.object_id != k.object_id || cv.object_id != v.object_id ||
+                ck.first_row != k.first_row || cv.first_row != v.first_row) {
+                throw artifact::ArtifactError(p + ": DFlash context KV differs");
+            }
+            add(p + "attention/query_norm", {DFlashConfig::head_dim}, {}, NumericFormat::BF16);
+            add(p + "attention/key_norm", {DFlashConfig::head_dim}, {}, NumericFormat::BF16);
+            add(p + "attention/output", {H, Q}, p + "attention_output",
+                NumericFormat::W8G32_F16S);
+            const auto gate = add(p + "mlp/gate", {I, H}, p + "mlp_input",
+                                  NumericFormat::W8G32_F16S);
+            const auto up = add(p + "mlp/up", {I, H}, p + "mlp_input",
+                                NumericFormat::W8G32_F16S);
+            if (gate.object_id != up.object_id || gate.parent_rows != 2 * I ||
+                gate.first_row != 0 || up.first_row != I) {
+                throw artifact::ArtifactError(p + ": DFlash packed gate/up differs");
+            }
+            add(p + "mlp/down", {H, I}, p + "mlp_product", NumericFormat::W8G32_F16S);
+            add(p + "attention_conv/base_kernel", {2, 2, H}, {}, NumericFormat::BF16);
+            add(p + "attention_conv/kernel_projection", {DFlashConfig::dynamic_conv_rows, H},
+                p + "attention_conv_input", NumericFormat::BF16);
+            add(p + "mlp_conv/base_kernel", {2, 2, H}, {}, NumericFormat::BF16);
+            add(p + "mlp_conv/kernel_projection", {DFlashConfig::dynamic_conv_rows, H},
+                p + "mlp_conv_input", NumericFormat::BF16);
+        }
+        add("dflash2/candidate_selector/hidden_projection",
+            {DFlashConfig::selector_dim, H}, "dflash2/final_hidden",
+            NumericFormat::BF16);
+        add("dflash2/candidate_selector/predecessor_codebook",
+            {TextConfig::output_rows, DFlashConfig::selector_dim}, {},
+            NumericFormat::BF16);
+        add("dflash2/candidate_selector/successor_codebook",
+            {TextConfig::output_rows, DFlashConfig::selector_dim}, {},
+            NumericFormat::BF16);
+    }
+    if (features.optimized_proposal()) {
+        const auto& proposal = components.at("text").at("proposal");
+        if (proposal.value("domain", std::string{}) != "indexed" ||
+            v3_unsigned(proposal.at("rows"), "proposal rows") !=
+                static_cast<std::uint64_t>(TextConfig::draft_head_rows)) {
+            throw artifact::ArtifactError("v3 optimized proposal requires indexed 131072 rows");
+        }
+        const std::string name = features.mtp() ? "mtp/final_hidden" : "dflash2/final_hidden";
+        const auto binding = bindings.at("proposal/head");
+        const auto object = object_index.find(v3_string(binding.at("object"), "proposal/head"));
+        if (object == object_index.end()) {
+            throw artifact::ArtifactError("v3 optimized proposal parent missing");
+        }
+        const auto fmt = v3_format(v3_string(object->second->at("format"), "proposal format"));
+        if (fmt != NumericFormat::GGUF_Q4_K && fmt != NumericFormat::Q4G64_F16S) {
+            throw artifact::ArtifactError("v3 optimized proposal requires GGUF Q4K or Q4G64");
+        }
+        add("proposal/head", {TextConfig::draft_head_rows, TextConfig::hidden}, name, fmt);
+        add("proposal/token_ids", {TextConfig::draft_head_rows}, {}, NumericFormat::I32);
+    }
+    return out;
+}
+
+ArtifactLoadPlan bind_v3_text_artifact(artifact::Binder& binder, const nlohmann::json& directory,
+                                       qwen3_6::StartupFeatures features) {
+    if (features.speculative != SpeculativeBackend::None &&
+        features.speculative != SpeculativeBackend::Mtp &&
+        features.speculative != SpeculativeBackend::DFlash2) {
+        throw artifact::ArtifactError(
+            "qwen3.8 v3: this target registers MTP and DFlash2 speculative backends");
+    }
+    const V3TextMetadata metadata = inspect_v3_text_metadata(directory);
+    const auto feature_metadata = inspect_v3_feature_metadata(directory, features);
+    const auto& root_objects = directory.at("objects");
+    const auto& roles = directory.at("components").at("text").at("resources");
+    const auto& vision_roles = directory.at("components").at("vision").at("resources");
+    if (!roles.is_object() || !vision_roles.is_object()) {
+        throw artifact::ArtifactError("v3 frontend resources must be role maps");
+    }
+    std::map<std::string, V3LogicalTensor, std::less<>> semantics;
+    std::unordered_set<std::string> device_objects;
+    for (const auto& tensor : metadata.tensors) {
+        semantics.emplace(tensor.parameter, tensor);
+        device_objects.insert(tensor.object_id);
+        if (tensor.input_columns_object) { device_objects.insert(*tensor.input_columns_object); }
+    }
+    for (const auto& tensor : feature_metadata) {
+        if (!semantics.emplace(tensor.parameter, tensor).second) {
+            throw artifact::ArtifactError("v3 duplicate semantic weight " + tensor.parameter);
+        }
+        device_objects.insert(tensor.object_id);
+        if (tensor.input_columns_object) { device_objects.insert(*tensor.input_columns_object); }
+    }
+    const auto frontend_id = [&](const nlohmann::json& component, std::string_view role) {
+        const std::string key(role);
+        if (!component.contains(key) || !component.at(key).is_string()) {
+            throw artifact::ArtifactError("v3 frontend missing resource role " + key);
+        }
+        return component.at(key).get<std::string>();
+    };
+    std::unordered_set<std::string> host_objects{
+        frontend_id(roles, "tokenizer.json"),
+        frontend_id(roles, "tokenizer_config.json"),
+        frontend_id(roles, "chat_template.jinja"),
+        frontend_id(roles, "generation_config.json"),
+        frontend_id(vision_roles, "preprocessor_config.json"),
+        frontend_id(vision_roles, "video_preprocessor_config.json"),
+    };
+
+    std::unordered_map<std::string, artifact::ObjectHandle> handles;
+    handles.reserve(root_objects.size());
+    for (const auto& object : root_objects) {
+        const std::string id = v3_string(object.at("id"), "v3 object id");
+        const artifact::ObjectDescriptor* stored = binder.find(id);
+        if (!stored) { throw artifact::ArtifactError("v3 object missing from Binder: " + id); }
+        artifact::ObjectHandle handle;
+        if (const auto* tensor = std::get_if<artifact::TensorDescriptor>(stored)) {
+            if (host_objects.contains(id)) {
+                throw artifact::ArtifactError("v3 frontend role points to tensor: " + id);
+            }
+            handle = binder.require_tensor(id, tensor->format, tensor->layout, tensor->shape);
+            if (device_objects.contains(id)) {
+                binder.materialize_on_device(handle);
+            } else {
+                binder.validate_only(handle);
+            }
+        } else {
+            handle = binder.require_resource(id, artifact::ResourceEncoding::RawBytesV1);
+            if (device_objects.contains(id)) {
+                throw artifact::ArtifactError("v3 selected weight is a resource: " + id);
+            }
+            if (host_objects.contains(id)) {
+                binder.retain_on_host(handle);
+            } else {
+                binder.validate_only(handle);
+            }
+        }
+        handles.emplace(id, handle);
+    }
+
+    const auto selected = [&](std::string_view parameter) -> const V3LogicalTensor& {
+        const auto it = semantics.find(std::string(parameter));
+        if (it == semantics.end()) {
+            throw artifact::ArtifactError("v3 parameter missing from selected semantic binding: " +
+                                          std::string(parameter));
+        }
+        return it->second;
+    };
+    const auto handle_of = [&](std::string_view parameter) -> artifact::ObjectHandle {
+        return handles.at(selected(parameter).object_id);
+    };
+    const auto weight_of = [&](std::string_view parameter) -> WeightPlan {
+        const auto& source = selected(parameter);
+        WeightPlan out{};
+        out.object         = handles.at(source.object_id);
+        out.format         = source.format;
+        out.parent_rows    = static_cast<std::int32_t>(source.parent_rows);
+        out.parent_columns = static_cast<std::int32_t>(source.columns);
+        out.first_row      = static_cast<std::int32_t>(source.first_row);
+        out.selected_rows  = static_cast<std::int32_t>(source.rows);
+        if (source.input_columns_object) {
+            out.input_columns = handles.at(*source.input_columns_object);
+        }
+        return out;
+    };
+    const auto host = [&](const nlohmann::json& resources, std::string_view role) {
+        return handles.at(frontend_id(resources, role));
+    };
+
+    ArtifactLoadPlan load;
+    BindingPlan& out = load.bindings;
+    out.features = features;
+    out.v3_text = true;
+    out.frontend = {
+        .tokenizer_json = host(roles, "tokenizer.json"),
+        .tokenizer_config_json = host(roles, "tokenizer_config.json"),
+        .chat_template_jinja = host(roles, "chat_template.jinja"),
+        .generation_config_json = host(roles, "generation_config.json"),
+        .preprocessor_config_json = host(vision_roles, "preprocessor_config.json"),
+        .video_preprocessor_config_json = host(vision_roles, "video_preprocessor_config.json"),
+    };
+    out.token_embedding = weight_of("text/token_embedding");
+    out.output_head = weight_of("text/output_head");
+    out.final_norm = handle_of("text/final_norm");
+    for (std::size_t layer = 0; layer < kTextLayers; ++layer) {
+        const std::string prefix = "text/layers/" + std::to_string(layer) + "/";
+        auto& target = out.text_layers[layer];
+        target.is_full_attention = is_full_layer(layer);
+        target.input_norm = handle_of(prefix + "input_norm");
+        target.post_attention_norm = handle_of(prefix + "post_attention_norm");
+        if (target.is_full_attention) {
+            target.attention.projection = IndividualAttentionProjectionPlan{
+                .query = weight_of(prefix + "attention/query"),
+                .key = weight_of(prefix + "attention/key"),
+                .gate = weight_of(prefix + "attention/gate"),
+                .value = weight_of(prefix + "attention/value"),
+            };
+            target.attention.query_norm = handle_of(prefix + "attention/query_norm");
+            target.attention.key_norm = handle_of(prefix + "attention/key_norm");
+            target.attention.output = weight_of(prefix + "attention/output");
+        } else {
+            target.gdn.a_log = handle_of(prefix + "gdn/a_log");
+            target.gdn.dt_bias = handle_of(prefix + "gdn/dt_bias");
+            target.gdn.convolution = handle_of(prefix + "gdn/convolution");
+            target.gdn.control_projection = SplitGdnControlProjectionPlan{
+                .a_projection = weight_of(prefix + "gdn/a_projection"),
+                .b_projection = weight_of(prefix + "gdn/b_projection"),
+            };
+            target.gdn.input_projection = IndividualGdnInputProjectionPlan{
+                .query = weight_of(prefix + "gdn/query"),
+                .key = weight_of(prefix + "gdn/key"),
+                .value = weight_of(prefix + "gdn/value"),
+                .z = weight_of(prefix + "gdn/z"),
+            };
+            target.gdn.norm = handle_of(prefix + "gdn/norm");
+            target.gdn.output = weight_of(prefix + "gdn/output");
+        }
+        target.mlp.gate = weight_of(prefix + "mlp/gate");
+        target.mlp.up = weight_of(prefix + "mlp/up");
+        target.mlp.down = weight_of(prefix + "mlp/down");
+    }
+    if (features.mtp()) {
+        const std::string p = "mtp/layers/0/";
+        MtpPlan::V3Projections semantic;
+        semantic.input_projection = weight_of("mtp/input_projection");
+        semantic.query = weight_of(p + "attention/query");
+        semantic.gate = weight_of(p + "attention/gate");
+        semantic.key = weight_of(p + "attention/key");
+        semantic.value = weight_of(p + "attention/value");
+        semantic.output = weight_of(p + "attention/output");
+        out.mtp.v3 = std::move(semantic);
+        out.mtp.embedding_norm = handle_of("mtp/embedding_norm");
+        out.mtp.hidden_norm = handle_of("mtp/hidden_norm");
+        out.mtp.final_norm = handle_of("mtp/final_norm");
+        out.mtp.input_norm = handle_of(p + "input_norm");
+        out.mtp.query_norm = handle_of(p + "attention/query_norm");
+        out.mtp.key_norm = handle_of(p + "attention/key_norm");
+        out.mtp.post_attention_norm = handle_of(p + "post_attention_norm");
+        out.mtp.mlp.gate = weight_of(p + "mlp/gate");
+        out.mtp.mlp.up = weight_of(p + "mlp/up");
+        out.mtp.mlp.down = weight_of(p + "mlp/down");
+    }
+    if (features.vision) {
+        const auto& h = qwen3_6::VisionBackboneConfig{};
+        (void)h;
+        auto& backbone = out.vision_backbone;
+        backbone.patch_embedding = handle_of("vision/patch_embedding");
+        backbone.patch_embedding_bias = handle_of("vision/patch_embedding_bias");
+        backbone.position_embedding = handle_of("vision/position_embedding");
+        for (std::size_t i = 0; i < backbone.layers.size(); ++i) {
+            const std::string p = "vision/layers/" + std::to_string(i) + "/";
+            auto& v = backbone.layers[i];
+            // One packed [Q;K;V] parent (and corresponding packed bias) backs the individual
+            // v3 semantic references. The shared Vision runtime consumes exactly this form.
+            v.qkv = handle_of(p + "attention/query");
+            v.qkv_bias = handle_of(p + "attention/query_bias");
+            v.output = handle_of(p + "attention/output");
+            v.output_bias = handle_of(p + "attention/output_bias");
+            v.fc1 = handle_of(p + "mlp/fc1");
+            v.fc1_bias = handle_of(p + "mlp/fc1_bias");
+            v.fc2 = handle_of(p + "mlp/fc2");
+            v.fc2_bias = handle_of(p + "mlp/fc2_bias");
+            v.norm1_weight = handle_of(p + "norm1_weight");
+            v.norm1_bias = handle_of(p + "norm1_bias");
+            v.norm2_weight = handle_of(p + "norm2_weight");
+            v.norm2_bias = handle_of(p + "norm2_bias");
+        }
+        out.vision_merger_input.fc1 = handle_of("vision/merger/fc1");
+        out.vision_merger_input.fc1_bias = handle_of("vision/merger/fc1_bias");
+        out.vision_merger_norm.weight = handle_of("vision/merger/norm_weight");
+        out.vision_merger_norm.bias = handle_of("vision/merger/norm_bias");
+        out.vision_merger_fc2 = handle_of("vision/merger/fc2");
+        out.vision_merger_fc2_bias = handle_of("vision/merger/fc2_bias");
+    }
+    if (features.dflash2()) {
+        out.dflash2.emplace();
+        auto& dflash = *out.dflash2;
+        dflash.feature_projection = weight_of("dflash2/feature_projection");
+        dflash.context_norm = handle_of("dflash2/context_norm");
+        dflash.final_norm = handle_of("dflash2/final_norm");
+        for (std::size_t i = 0; i < dflash.layers.size(); ++i) {
+            const std::string p = "dflash2/layers/" + std::to_string(i) + "/";
+            auto& layer = dflash.layers[i];
+            layer.input_norm = handle_of(p + "input_norm");
+            layer.post_attention_norm = handle_of(p + "post_attention_norm");
+            // Q/K/V share a single W8 [6144,5120] source; preserve it as the parent,
+            // because the existing DFlash2 runtime has a registered fused W8 projection.
+            layer.query_key_value = weight_of(p + "attention/query");
+            layer.query_key_value.first_row = 0;
+            layer.query_key_value.selected_rows = DFlashConfig::query_key_value_rows;
+            layer.query_norm = handle_of(p + "attention/query_norm");
+            layer.key_norm = handle_of(p + "attention/key_norm");
+            layer.attention_output = weight_of(p + "attention/output");
+            layer.gate_up = weight_of(p + "mlp/gate");
+            layer.gate_up.first_row = 0;
+            layer.gate_up.selected_rows = DFlashConfig::mlp_gate_up_rows;
+            layer.down = weight_of(p + "mlp/down");
+            layer.attention_conv.base_kernel = handle_of(p + "attention_conv/base_kernel");
+            layer.attention_conv.kernel_projection =
+                weight_of(p + "attention_conv/kernel_projection");
+            layer.mlp_conv.base_kernel = handle_of(p + "mlp_conv/base_kernel");
+            layer.mlp_conv.kernel_projection = weight_of(p + "mlp_conv/kernel_projection");
+        }
+        dflash.candidate_selector.hidden_projection =
+            weight_of("dflash2/candidate_selector/hidden_projection");
+        dflash.candidate_selector.predecessor_codebook =
+            handle_of("dflash2/candidate_selector/predecessor_codebook");
+        dflash.candidate_selector.successor_codebook =
+            handle_of("dflash2/candidate_selector/successor_codebook");
+    }
+    if (features.optimized_proposal()) {
+        out.v3_proposal_head = weight_of("proposal/head");
+        out.draft_head_token_ids = handle_of("proposal/token_ids");
+    }
+    load.materialization = binder.finish();
+    return load;
+}
+
 ArtifactLoadPlan bind_artifact(artifact::Binder& binder, WeightsProfile weights_profile,
                                qwen3_6::StartupFeatures features) {
     validate_artifact_model_shape(binder);
@@ -938,35 +2030,73 @@ LoadedModelData::LoadedModelData(BindingPlan plan, artifact::MaterializedArtifac
     output_head = materialized_weight(backing, plan.output_head, TextConfig::output_rows, TextConfig::hidden);
     if (plan.features.optimized_proposal()) {
         auto& proposal     = runtime.optimized_proposal.emplace();
-        proposal.head      = artifact::materialized_weight(backing, plan.draft_head,
-                                                           NumericFormat::Q4G64_F16S, TextConfig::draft_head_rows, TextConfig::hidden);
+        if (plan.v3_proposal_head) {
+            proposal.head = materialized_weight(backing, *plan.v3_proposal_head,
+                                                TextConfig::draft_head_rows,
+                                                TextConfig::hidden);
+        } else {
+            proposal.head = artifact::materialized_weight(
+                backing, plan.draft_head, NumericFormat::Q4G64_F16S,
+                TextConfig::draft_head_rows, TextConfig::hidden);
+        }
         proposal.token_ids = artifact::materialized_tensor(backing, plan.draft_head_token_ids,
                                                            NumericFormat::I32, {TextConfig::draft_head_rows});
     }
 
     if (plan.features.mtp()) {
         auto& mtp            = runtime.mtp.emplace();
-        mtp.input_projection = artifact::materialized_weight(
-            backing, plan.mtp.input_projection, NumericFormat::W8G32_F16S, TextConfig::hidden,
-            TextConfig::mtp_input_rows);
+        if (plan.mtp.v3) {
+            mtp.input_projection = materialized_weight(
+                backing, plan.mtp.v3->input_projection, TextConfig::hidden,
+                TextConfig::mtp_input_rows);
+        } else {
+            mtp.input_projection = artifact::materialized_weight(
+                backing, plan.mtp.input_projection, NumericFormat::W8G32_F16S,
+                TextConfig::hidden, TextConfig::mtp_input_rows);
+        }
         mtp.embedding_norm   = artifact::materialized_tensor(backing, plan.mtp.embedding_norm,
                                                              NumericFormat::BF16, {TextConfig::hidden});
         mtp.hidden_norm      = artifact::materialized_tensor(backing, plan.mtp.hidden_norm,
                                                              NumericFormat::BF16, {TextConfig::hidden});
         mtp.input_norm       = artifact::materialized_tensor(backing, plan.mtp.input_norm,
                                                              NumericFormat::BF16, {TextConfig::hidden});
-        mtp.attention.packed = artifact::materialized_weight(
-            backing, plan.mtp.query_key_gate_value, NumericFormat::W8G32_F16S, TextConfig::attention_input_rows, TextConfig::hidden);
-        mtp.attention.query       = row_view(mtp.attention.packed, 0, TextConfig::query_size);
-        mtp.attention.key         = row_view(mtp.attention.packed, TextConfig::query_size, TextConfig::kv_size);
-        mtp.attention.output_gate = row_view(mtp.attention.packed, (TextConfig::query_size + TextConfig::kv_size), TextConfig::query_size);
-        mtp.attention.value       = row_view(mtp.attention.packed, (2 * TextConfig::query_size + TextConfig::kv_size), TextConfig::kv_size);
+        if (plan.mtp.v3) {
+            const auto& projection = *plan.mtp.v3;
+            mtp.attention.query = materialized_weight(backing, projection.query,
+                                                       TextConfig::query_size, TextConfig::hidden);
+            mtp.attention.key = materialized_weight(backing, projection.key,
+                                                     TextConfig::kv_size, TextConfig::hidden);
+            mtp.attention.output_gate = materialized_weight(backing, projection.gate,
+                                                              TextConfig::query_size,
+                                                              TextConfig::hidden);
+            mtp.attention.value = materialized_weight(backing, projection.value,
+                                                       TextConfig::kv_size, TextConfig::hidden);
+        } else {
+            mtp.attention.packed = artifact::materialized_weight(
+                backing, plan.mtp.query_key_gate_value, NumericFormat::W8G32_F16S,
+                TextConfig::attention_input_rows, TextConfig::hidden);
+            mtp.attention.query = row_view(mtp.attention.packed, 0, TextConfig::query_size);
+            mtp.attention.key =
+                row_view(mtp.attention.packed, TextConfig::query_size, TextConfig::kv_size);
+            mtp.attention.output_gate = row_view(
+                mtp.attention.packed, TextConfig::query_size + TextConfig::kv_size,
+                TextConfig::query_size);
+            mtp.attention.value = row_view(
+                mtp.attention.packed, 2 * TextConfig::query_size + TextConfig::kv_size,
+                TextConfig::kv_size);
+        }
         mtp.query_norm =
             artifact::materialized_tensor(backing, plan.mtp.query_norm, NumericFormat::BF16, {TextConfig::head_dim});
         mtp.key_norm =
             artifact::materialized_tensor(backing, plan.mtp.key_norm, NumericFormat::BF16, {TextConfig::head_dim});
-        mtp.output              = artifact::materialized_weight(backing, plan.mtp.output,
-                                                                NumericFormat::W8G32_F16S, TextConfig::hidden, TextConfig::query_size);
+        if (plan.mtp.v3) {
+            mtp.output = materialized_weight(backing, plan.mtp.v3->output,
+                                             TextConfig::hidden, TextConfig::query_size);
+        } else {
+            mtp.output = artifact::materialized_weight(
+                backing, plan.mtp.output, NumericFormat::W8G32_F16S,
+                TextConfig::hidden, TextConfig::query_size);
+        }
         mtp.post_attention_norm = artifact::materialized_tensor(
             backing, plan.mtp.post_attention_norm, NumericFormat::BF16, {TextConfig::hidden});
         mtp.post_mixer = load_mlp(plan.mtp.mlp, backing);

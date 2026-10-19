@@ -358,7 +358,7 @@ void TextContext::mtp_forward_stem(const Tensor& ids, const Tensor& hidden,
     ops::mtp_pack_fc_input(e, h, fc_in, s);
 
     x = roots.residual;
-    ops::linear(fc_in, *mtp_.fc, x, s);
+    ops::linear(fc_in, *mtp_.fc, x, ops::LinearPolicy::A16Only, work_, s);
 
     ah = roots.attention_hidden;
     ops::rmsnorm(x, *mtp_.input_norm, kCfg.rms_eps, true, ah, s);
@@ -416,7 +416,8 @@ void TextContext::mtp_forward_tail(Tensor& x, const Tensor& ah, const Tensor& po
 
     const auto post = workspace_recipe::mtp_post_attention<TextConfig>(work_, T);
     Tensor o        = post.output;
-    ops::linear(a.view({kCfg.q_size, T}), *mtp_.o_proj, o, s);
+    ops::linear(a.view({kCfg.q_size, T}), *mtp_.o_proj, o,
+                ops::LinearPolicy::A16Only, work_, s);
     ops::residual_add(o, x, s);
 
     Tensor mh = post.post_mixer_hidden;
@@ -548,7 +549,8 @@ void TextContext::mtp_prefill_chunk(const Tensor& ids, const Tensor& hidden,
         ops::sigmoid_mul(gate, a, s);
 
         Tensor o = work_.alloc(DType::BF16, {kCfg.hidden, 1});
-        ops::linear(a.view({kCfg.q_size, 1}), *mtp_.o_proj, o, s);
+        ops::linear(a.view({kCfg.q_size, 1}), *mtp_.o_proj, o,
+                    ops::LinearPolicy::A16Only, work_, s);
         ops::residual_add(o, x_last, s);
 
         Tensor mh = work_.alloc(DType::BF16, {kCfg.hidden, 1});
@@ -571,7 +573,8 @@ void TextContext::proposal_argmax(const Tensor& hidden, Tensor& logits, Tensor& 
                                      static_cast<std::uint64_t>(T));
     if (proposal_head_ != nullptr) {
         Tensor proposal_logits = work_.alloc(DType::BF16, {proposal_head_n_, T});
-        ops::linear(hidden, *proposal_head_, proposal_logits, ctx_.stream);
+        ops::linear(hidden, *proposal_head_, proposal_logits,
+                    ops::LinearPolicy::A16Only, work_, ctx_.stream);
         ops::argmax(proposal_logits, proposal_tokens, proposal_head_n_, ctx_.stream);
         ops::proposal_remap_token_ids(proposal_tokens, proposal_head_ids_, proposal_head_n_,
                                       ctx_.stream);

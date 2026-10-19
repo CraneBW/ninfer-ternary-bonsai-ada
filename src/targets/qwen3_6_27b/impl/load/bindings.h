@@ -17,7 +17,9 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <nlohmann/json.hpp>
 #include <optional>
+#include <string>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -38,11 +40,19 @@ struct WeightPlan {
     std::int32_t hadamard_perm_hd  = 0;
     std::int32_t hadamard_perm_nk  = 0;
     std::int32_t hadamard_perm_rep = 1;
+    // v3 semantic binding may select consecutive rows from a shared GGUF parent.
+    std::int32_t parent_rows = 0;
+    std::int32_t parent_columns = 0;
+    std::int32_t first_row = 0;
+    std::int32_t selected_rows = 0;
+    std::optional<artifact::ObjectHandle> input_columns;
 };
 
 struct MlpPlan {
     WeightPlan gate_up;
     WeightPlan down;
+    std::optional<WeightPlan> gate;
+    std::optional<WeightPlan> up;
 };
 
 struct SplitAttentionProjectionPlan {
@@ -54,8 +64,16 @@ struct FusedAttentionProjectionPlan {
     WeightPlan query_key_gate_value;
 };
 
+struct IndividualAttentionProjectionPlan {
+    WeightPlan query;
+    WeightPlan key;
+    WeightPlan gate;
+    WeightPlan value;
+};
+
 struct FullAttentionPlan {
-    std::variant<SplitAttentionProjectionPlan, FusedAttentionProjectionPlan> projection;
+    std::variant<SplitAttentionProjectionPlan, FusedAttentionProjectionPlan,
+                 IndividualAttentionProjectionPlan> projection;
     artifact::ObjectHandle query_norm;
     artifact::ObjectHandle key_norm;
     WeightPlan output;
@@ -68,6 +86,13 @@ struct SplitGdnInputProjectionPlan {
 
 struct FusedGdnInputProjectionPlan {
     WeightPlan query_key_value_z;
+};
+
+struct IndividualGdnInputProjectionPlan {
+    WeightPlan query;
+    WeightPlan key;
+    WeightPlan value;
+    WeightPlan z;
 };
 
 struct SplitGdnControlProjectionPlan {
@@ -87,7 +112,8 @@ struct GdnPlan {
     artifact::ObjectHandle dt_bias;
     artifact::ObjectHandle convolution;
     GdnControlProjectionPlan control_projection;
-    std::variant<SplitGdnInputProjectionPlan, FusedGdnInputProjectionPlan> input_projection;
+    std::variant<SplitGdnInputProjectionPlan, FusedGdnInputProjectionPlan,
+                 IndividualGdnInputProjectionPlan> input_projection;
     artifact::ObjectHandle norm;
     WeightPlan output;
 };
@@ -102,6 +128,15 @@ struct TextLayerPlan {
 };
 
 struct MtpPlan {
+    struct V3Projections {
+        WeightPlan input_projection;
+        WeightPlan query;
+        WeightPlan key;
+        WeightPlan gate;
+        WeightPlan value;
+        WeightPlan output;
+    };
+    std::optional<V3Projections> v3;
     artifact::ObjectHandle input_projection;
     artifact::ObjectHandle embedding_norm;
     artifact::ObjectHandle hidden_norm;
@@ -167,6 +202,7 @@ struct HadamardSignsPlan {
 struct BindingPlan {
     qwen3_6::FrontendResourcePlan frontend;
     qwen3_6::StartupFeatures features;
+    bool v3_text = false;
 
     WeightPlan token_embedding;
     std::array<TextLayerPlan, kTextLayers> text_layers;
@@ -174,6 +210,7 @@ struct BindingPlan {
     WeightPlan output_head;
     artifact::ObjectHandle draft_head;
     artifact::ObjectHandle draft_head_token_ids;
+    std::optional<WeightPlan> v3_proposal_head;
     // Absent unless the artifact stores folded (rotated-basis) weights; the ternary port does.
     std::optional<HadamardSignsPlan> hadamard_signs;
     MtpPlan mtp;
@@ -196,12 +233,44 @@ struct ArtifactLoadPlan {
 void validate_artifact_model_shape(const artifact::Binder& binder, const ModelShape& expected);
 void validate_artifact_model_shape(const artifact::Binder& binder);
 
+// Inspect the complete v3 *directory* before the large weight payload is available.
+// Every semantic text parameter must have its expected shape, source parent/range, and Use.
+// This is also the read-only preflight for the actual v3 binding route.
+struct V3LogicalTensor {
+    std::string parameter;
+    std::string object_id;
+    artifact::NumericFormat format = artifact::NumericFormat::BF16;
+    artifact::StorageLayout layout = artifact::StorageLayout::ContiguousLeV1;
+    std::uint64_t rows = 0;
+    std::uint64_t columns = 0;
+    std::uint64_t parent_rows = 0;
+    std::uint64_t first_row = 0;
+    std::string activation_policy;
+    std::optional<std::string> input_columns_object;
+    std::optional<std::string> input_divisor_object;
+};
+struct V3TextMetadata {
+    ModelShape shape = kModelShape;
+    std::vector<V3LogicalTensor> tensors;
+};
+[[nodiscard]] V3TextMetadata inspect_v3_text_metadata(const nlohmann::json& directory);
+// Feature-specific semantic records use the same physical-parent row coordinates as text.
+// Optional proposal records are returned when the selected backend uses the indexed head.
+[[nodiscard]] std::vector<V3LogicalTensor>
+inspect_v3_feature_metadata(const nlohmann::json& directory,
+                            qwen3_6::StartupFeatures features);
+ArtifactLoadPlan bind_v3_text_artifact(artifact::Binder& binder,
+                                       const nlohmann::json& directory,
+                                       qwen3_6::StartupFeatures features);
+
 ArtifactLoadPlan bind_artifact(artifact::Binder& binder, WeightsProfile weights_profile,
                                qwen3_6::StartupFeatures features);
 
 struct DensePostMixerPayload {
     Weight gate_up;
     Weight down;
+    std::optional<Weight> gate;
+    std::optional<Weight> up;
 };
 
 struct SplitAttentionProjectionPayload {
@@ -213,8 +282,16 @@ struct FusedAttentionProjectionPayload {
     Weight query_key_gate_value;
 };
 
+struct IndividualAttentionProjectionPayload {
+    Weight query;
+    Weight key;
+    Weight gate;
+    Weight value;
+};
+
 using FullAttentionProjectionPayload =
-    std::variant<SplitAttentionProjectionPayload, FusedAttentionProjectionPayload>;
+    std::variant<SplitAttentionProjectionPayload, FusedAttentionProjectionPayload,
+                 IndividualAttentionProjectionPayload>;
 
 struct SplitGdnInputProjectionPayload {
     Weight query_key;
@@ -225,8 +302,16 @@ struct FusedGdnInputProjectionPayload {
     Weight query_key_value_z;
 };
 
+struct IndividualGdnInputProjectionPayload {
+    Weight query;
+    Weight key;
+    Weight value;
+    Weight z;
+};
+
 using GdnInputProjectionPayload =
-    std::variant<SplitGdnInputProjectionPayload, FusedGdnInputProjectionPayload>;
+    std::variant<SplitGdnInputProjectionPayload, FusedGdnInputProjectionPayload,
+                 IndividualGdnInputProjectionPayload>;
 
 struct SplitGdnControlProjectionPayload {
     Weight a_projection;
