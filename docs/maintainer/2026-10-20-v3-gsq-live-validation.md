@@ -71,7 +71,34 @@ tmp-nvcc/gsq-v3-full-dflash2-smoke.log
 tmp-nvcc/gsq-v3-full-dflash2-response.json
 ```
 
-**Scope:** These are startup and *short real-generation* functional tests, not
-throughput benchmarks or long-context stability tests. Vision, groupwise/NVFP4
-whole-model inference, 2B Companion and real multi-rank TP2 are separately
-tracked and must not be represented as passed by this report.
+## Real v3 Vision PNG-to-text smoke
+
+A later GSQ v3 native server with Vision enabled received a real OpenAI
+Chat Completions `image_url` data-URL PNG, passed preprocessing, started a
+multimodal request and completed **HTTP 200**. The test image was a 64×64
+RGB synthetic gradient, with top-left `(0,0,0)`, top-right `(252,0,126)`,
+bottom-left `(0,252,126)` and bottom-right `(252,252,252)`.
+
+Prompt: `What colors and pattern are in this picture? Answer briefly.`
+
+Output (24-token limit, `finish_reason=length`):
+
+> The image features a smooth gradient blending from bright green in the
+> bottom-left corner to vivid magenta/pink in the top
+
+The response identifies the corner colors and gradient consistent with the
+actual PNG pixels; it was **truncated** by the deliberately small output
+limit. In the server log this is `media 1`, `prompt 90`, `output 24`, HTTP 200.
+The Vision source ModelView/device materialization has an independent 333
+physical-parent oracle (295,719,424 GPU bytes), verified separately.
+
+Local files: `tmp-nvcc/v3-vision-gradient64.png`,
+`tmp-nvcc/v3-vision-gradient64-request.json`,
+`tmp-nvcc/gsq-v3-full-vision-smoke.log`, and
+`tmp-nvcc/gsq-v3-full-vision-response.json`.
+
+**Scope:** Text, MTP and DFlash2 examples above are short real-generation
+functional tests. This single image request supports a narrow Vision
+end-to-end smoke claim, not full image/video coverage or visual benchmark
+accuracy. Long-context stability, groupwise/NVFP4 whole-model serving,
+other Companion models and real multi-rank TP2 remain separate work.
