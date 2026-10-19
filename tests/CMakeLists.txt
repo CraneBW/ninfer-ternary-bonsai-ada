@@ -370,6 +370,9 @@ ninfer_add_op_test(ninfer_gdn_input_proj_conv_snapshot_test
 ninfer_add_op_test(ninfer_gdn_input_proj_conv_record_test
   SOURCES ops/test_gdn_input_proj_conv_record.cpp
   LIBRARIES ninfer_ops)
+ninfer_add_op_test(ninfer_gdn_snapshot_capacity_test
+  SOURCES ops/test_gdn_snapshot_capacity.cpp
+  LIBRARIES ninfer_ops)
 ninfer_add_op_test(ninfer_gated_delta_net_replay_record_test
   SOURCES ops/test_gated_delta_net_replay_record.cpp
   LIBRARIES ninfer_ops)

@@ -920,7 +920,14 @@ std::size_t gdn_input_proj_conv_snapshot_workspace_capacity_bytes(
             (void)resolve_w8_conv_plan(min_width, batch_size);
             (void)resolve_w8_conv_plan(max_width, batch_size);
         }
-        return composed_snapshot_capacity(channels, batch_size * max_width, 0);
+        // The folded ternary parents project from the batched compose route, whose project lambda
+        // takes the workspace overload of the projection: that one allocates its own [hidden,
+        // aggregate columns] rotation buffer plus the int8 scratch beside the projected plane, and
+        // both live at the same time. The single-column note below explains why this reservation is
+        // unconditional even though the query carries no weights profile.
+        return composed_snapshot_capacity(
+            channels, batch_size * max_width,
+            detail::ternary_rotation_workspace_bytes(kFoldedGdnHidden, batch_size * max_width));
     }
 
     std::int32_t largest_materialized_width = 0;
