@@ -1,3 +1,674 @@
+diff --git a/include/ninfer/ops/hadamard_transform.h b/include/ninfer/ops/hadamard_transform.h
+index a61dfbb..48377a2 100644
+--- a/include/ninfer/ops/hadamard_transform.h
++++ b/include/ninfer/ops/hadamard_transform.h
+@@ -4,6 +4,7 @@
+ #include "core/weight.h"
+ 
+ #include <cuda_runtime.h>
++#include <cstdint>
+ 
+ namespace ninfer::ops {
+ 
+@@ -41,7 +42,7 @@ namespace ninfer::ops {
+  *   None. No persistent state side effect.
+  */
+ void hadamard_transform(const Tensor& x, const Tensor& signs, bool inverse, Tensor& out,
+-                        cudaStream_t stream);
++                        cudaStream_t stream, std::int32_t block_size = 1024);
+ 
+ /**
+  * Op: silu_mul_hadamard
+@@ -68,7 +69,8 @@ void hadamard_transform(const Tensor& x, const Tensor& signs, bool inverse, Tens
+  * Workspace:
+  *   None. No persistent state side effect.
+  */
+-void silu_mul_hadamard(const Tensor& plane, const Tensor& signs, Tensor& out, cudaStream_t stream);
++void silu_mul_hadamard(const Tensor& plane, const Tensor& signs, Tensor& out, cudaStream_t stream,
++                       std::int32_t block_size = 1024);
+ 
+ 
+ /**
+@@ -95,11 +97,13 @@ void silu_mul_hadamard(const Tensor& plane, const Tensor& signs, Tensor& out, cu
+  * No workspace or persistent state.
+  */
+ void rmsnorm_hadamard(const Tensor& x, const Tensor& weight, float eps, bool unit_offset,
+-                      const Tensor& signs, Tensor& out, cudaStream_t stream);
++                      const Tensor& signs, Tensor& out, cudaStream_t stream,
++                      std::int32_t block_size = 1024);
+ void gated_rmsnorm_hadamard(const Tensor& x, const Tensor& weight, const Tensor& z, float eps,
+-                            const Tensor& signs, Tensor& out, cudaStream_t stream);
++                            const Tensor& signs, Tensor& out, cudaStream_t stream,
++                            std::int32_t block_size = 1024);
+ void sigmoid_mul_hadamard(const Tensor& gate, const Tensor& x, const Tensor& signs, Tensor& out,
+-                          cudaStream_t stream);
++                          cudaStream_t stream, std::int32_t block_size = 1024);
+ 
+ 
+ /**
+@@ -114,6 +118,6 @@ void sigmoid_mul_hadamard(const Tensor& gate, const Tensor& x, const Tensor& sig
+  * or persistent state.
+  */
+ void embedding_rotated(const Tensor& ids, const Weight& table, const Tensor& signs, Tensor& out,
+-                       cudaStream_t stream);
++                       cudaStream_t stream, std::int32_t block_size = 1024);
+ 
+ } // namespace ninfer::ops
+diff --git a/src/models/qwen3_5/config.cpp b/src/models/qwen3_5/config.cpp
+index 75af4be..55f52fa 100644
+--- a/src/models/qwen3_5/config.cpp
++++ b/src/models/qwen3_5/config.cpp
+@@ -324,6 +324,16 @@ Config parse_config(const artifact::Directory& directory, const LoadOptions& opt
+         Config out;
+         out.mtp  = options.speculative == SpeculativeBackend::Mtp;
+         out.text = text(directory.component("text").config, out.mtp);
++        // Explicit per-artifact rotation basis, rather than inferring 512 from a width
++        // divisible by both 512 and 1024 or consulting process-global environment.
++        if (directory.metadata.contains("hadamard_block_size")) {
++            const auto block = integer(directory.metadata.at("hadamard_block_size"),
++                                       "metadata.hadamard_block_size");
++            if (block != 512 && block != 1024) {
++                throw ArtifactError("metadata.hadamard_block_size must be 512 or 1024");
++            }
++            out.text.hadamard_block_size = block;
++        }
+         if (options.vision) { out.vision = vision(companion(directory, "vision").config); }
+         if (out.mtp) {
+             const auto& config = companion(directory, "mtp").config;
+diff --git a/src/models/qwen3_5/config.h b/src/models/qwen3_5/config.h
+index ec9eac6..b7beea1 100644
+--- a/src/models/qwen3_5/config.h
++++ b/src/models/qwen3_5/config.h
+@@ -72,6 +72,7 @@ struct MoeConfig {
+ 
+ struct TextConfig {
+     Architecture architecture             = Architecture::Qwen3_5;
++    std::uint32_t hadamard_block_size      = 1024;
+     std::uint32_t hidden_size             = 0;
+     std::uint32_t vocab_size              = 0;
+     std::uint32_t num_hidden_layers       = 0;
+diff --git a/src/models/qwen3_5/execution/attention.cpp b/src/models/qwen3_5/execution/attention.cpp
+index 4533e7c..e12e34d 100644
+--- a/src/models/qwen3_5/execution/attention.cpp
++++ b/src/models/qwen3_5/execution/attention.cpp
+@@ -73,10 +73,12 @@ std::size_t attention_projection_workspace_bytes(const AttentionParameters& para
+ 
+ void attention_projection(const Tensor& hidden, const AttentionParameters& parameters,
+                           Tensor& query, Tensor& gate, Tensor& key, Tensor& value,
+-                          WorkspaceArena& workspace, cudaStream_t stream, InputBasis basis) {
++                          WorkspaceArena& workspace, cudaStream_t stream, InputBasis basis,
++                          std::int32_t block_size) {
+     auto scope = workspace.scope();
+     const Tensor x =
+-        rotated_input(hidden, projection_signs(parameters.projection), workspace, stream, basis);
++        rotated_input(hidden, projection_signs(parameters.projection), workspace, stream, basis,
++                      block_size);
+     if (const auto* gguf = std::get_if<ops::GgufProjectionWeights>(&parameters.projection)) {
+         ops::attn_input_proj(x, *gguf, query, gate, key, value, workspace, stream);
+     } else if (const auto* pair =
+diff --git a/src/models/qwen3_5/execution/attention.h b/src/models/qwen3_5/execution/attention.h
+index f690a93..cee7871 100644
+--- a/src/models/qwen3_5/execution/attention.h
++++ b/src/models/qwen3_5/execution/attention.h
+@@ -12,7 +12,8 @@ attention_projection_workspace_bytes(const AttentionParameters& parameters, std:
+ void attention_projection(const Tensor& hidden, const AttentionParameters& parameters,
+                           Tensor& query, Tensor& gate, Tensor& key, Tensor& value,
+                           WorkspaceArena& workspace, cudaStream_t stream,
+-                          InputBasis basis = InputBasis::Primal);
++                          InputBasis basis = InputBasis::Primal,
++                          std::int32_t block_size = 1024);
+ 
+ void text_rope(const Tensor& positions, const RopeConfig& config, const ops::RopeYarn& yarn,
+                Tensor& query, cudaStream_t stream);
+diff --git a/src/models/qwen3_5/execution/ffn.cpp b/src/models/qwen3_5/execution/ffn.cpp
+index 254f5df..7edd648 100644
+--- a/src/models/qwen3_5/execution/ffn.cpp
++++ b/src/models/qwen3_5/execution/ffn.cpp
+@@ -44,19 +44,20 @@ std::size_t rotated_dense_workspace_bytes(const DenseParameters& p, std::int32_t
+ 
+ void rotated_dense_ffn(const Tensor& hidden, const DenseParameters& p, Tensor& residual,
+                        WorkspaceArena& workspace, cudaStream_t stream, InputBasis basis,
+-                       bool wide_verification) {
++                       bool wide_verification, std::int32_t block_size) {
+     const auto columns      = hidden.ne[1];
+     const auto& gu          = p.gate_up.weight;
+     const auto intermediate = gu.n / 2;
+     Tensor plane            = workspace.alloc(DType::BF16, {gu.n, columns});
+     {
+         auto call      = workspace.scope();
+-        const Tensor x = rotated_input(hidden, p.gate_up.hadamard_signs, workspace, stream, basis);
++        const Tensor x = rotated_input(hidden, p.gate_up.hadamard_signs, workspace, stream, basis,
++                                       block_size);
+         ops::linear(x, gu, plane, p.gate_up.policy, workspace, stream);
+     }
+     Tensor activation = workspace.alloc(DType::BF16, {intermediate, columns});
+     if (rotated(p.down.hadamard_signs)) {
+-        ops::silu_mul_hadamard(plane, p.down.hadamard_signs, activation, stream);
++        ops::silu_mul_hadamard(plane, p.down.hadamard_signs, activation, stream, block_size);
+     } else {
+         ops::silu_mul(plane.slice(0, 0, intermediate), plane.slice(0, intermediate, intermediate),
+                       activation, stream);
+@@ -160,7 +161,8 @@ const Tensor* ffn_input_signs(const FfnParameters& parameters) {
+ 
+ void ffn(const Tensor& hidden, const FfnParameters& parameters, Tensor& residual,
+          const ops::SparseMoeHints& hints, WorkspaceArena& workspace, cudaStream_t stream, bool mtp,
+-         bool verify, InputBasis basis, bool wide_verification, NativeExpertRuntime* experts) {
++         bool verify, InputBasis basis, bool wide_verification, NativeExpertRuntime* experts,
++         std::int32_t block_size) {
+     auto scope         = workspace.scope();
+     const auto columns = hidden.ne[1];
+     if (const auto* moe = std::get_if<StreamedMoeParameters>(&parameters)) {
+@@ -186,7 +188,8 @@ void ffn(const Tensor& hidden, const FfnParameters& parameters, Tensor& residual
+     }
+     const auto& p = std::get<DenseParameters>(parameters);
+     if (rotated_dense(p)) {
+-        rotated_dense_ffn(hidden, p, residual, workspace, stream, basis, wide_verification);
++        rotated_dense_ffn(hidden, p, residual, workspace, stream, basis, wide_verification,
++                          block_size);
+         return;
+     }
+     const auto& gu   = p.gate_up.weight;
+diff --git a/src/models/qwen3_5/execution/ffn.h b/src/models/qwen3_5/execution/ffn.h
+index bc4849b..78ac161 100644
+--- a/src/models/qwen3_5/execution/ffn.h
++++ b/src/models/qwen3_5/execution/ffn.h
+@@ -16,7 +16,8 @@ class NativeExpertRuntime;
+ void ffn(const Tensor& hidden, const FfnParameters& parameters, Tensor& residual,
+          const ops::SparseMoeHints& hints, WorkspaceArena& workspace, cudaStream_t stream,
+          bool mtp = false, bool verify = false, InputBasis basis = InputBasis::Primal,
+-         bool wide_verification = false, NativeExpertRuntime* experts = nullptr);
++         bool wide_verification = false, NativeExpertRuntime* experts = nullptr,
++         std::int32_t block_size = 1024);
+ // The sign vector of a rotated Dense FFN's input projection, or null.
+ [[nodiscard]] const Tensor* ffn_input_signs(const FfnParameters& parameters);
+ 
+diff --git a/src/models/qwen3_5/execution/gdn.cpp b/src/models/qwen3_5/execution/gdn.cpp
+index 63d4e71..5bec472 100644
+--- a/src/models/qwen3_5/execution/gdn.cpp
++++ b/src/models/qwen3_5/execution/gdn.cpp
+@@ -115,10 +115,12 @@ std::size_t gdn_record_workspace_bytes(const GdnParameters& parameters, const Gd
+ }
+ 
+ void gdn_projection(const Tensor& hidden, const GdnParameters& parameters, Tensor& qkv, Tensor& z,
+-                    WorkspaceArena& workspace, cudaStream_t stream, InputBasis basis) {
++                    WorkspaceArena& workspace, cudaStream_t stream, InputBasis basis,
++                    std::int32_t block_size) {
+     auto scope = workspace.scope();
+     const Tensor x =
+-        rotated_input(hidden, projection_signs(parameters.projection), workspace, stream, basis);
++        rotated_input(hidden, projection_signs(parameters.projection), workspace, stream, basis,
++                      block_size);
+     if (const auto* gguf = std::get_if<ops::GgufProjectionWeights>(&parameters.projection)) {
+         ops::gdn_input_proj(x, *gguf, qkv, z, workspace, stream);
+     } else if (const auto* pair =
+@@ -133,10 +135,21 @@ void gdn_projection(const Tensor& hidden, const GdnParameters& parameters, Tenso
+ InputBasis gdn_norm_control(const Tensor& residual, const Tensor& norm, float epsilon,
+                             const GdnParameters& parameters, Tensor& hidden, Tensor& g,
+                             Tensor& beta, WorkspaceArena& workspace,
+-                            DeviceExecutionView execution) {
++                            DeviceExecutionView execution, std::int32_t block_size) {
+     const Tensor& signs = projection_signs(parameters.projection);
+     if (const auto* pair = std::get_if<ops::PairedProjectionWeights>(&parameters.control)) {
+         if (rotated(signs)) {
++            if (block_size == 512) {
++                // The fused control producer is specialized for the 1024-point basis.
++                // Preserve its BF16 normalization/control arithmetic, then rotate h
++                // with the explicit model-specific 512 basis on the same stream.
++                ops::gdn_norm_gating_proj(residual, norm, epsilon, pair->first, pair->second,
++                                          parameters.a_log, parameters.dt_bias, workspace,
++                                          hidden, g, beta, execution);
++                ops::hadamard_transform(hidden, signs, false, hidden, execution.stream,
++                                        block_size);
++                return InputBasis::Rotated;
++            }
+             ops::gdn_norm_gating_proj_rotated(residual, norm, epsilon, pair->first, pair->second,
+                                               parameters.a_log, parameters.dt_bias, signs,
+                                               workspace, hidden, g, beta, execution);
+@@ -158,10 +171,11 @@ void gdn_projection_snapshot(const Tensor& hidden, const GdnParameters& paramete
+                              const Tensor& valid_columns, const Tensor& initial_slots,
+                              const Tensor& destination_slots, Tensor& query, Tensor& key,
+                              Tensor& value, Tensor& z, WorkspaceArena& workspace,
+-                             cudaStream_t stream, InputBasis basis) {
++                             cudaStream_t stream, InputBasis basis, std::int32_t block_size) {
+     auto scope = workspace.scope();
+     const Tensor x =
+-        rotated_input(hidden, projection_signs(parameters.projection), workspace, stream, basis);
++        rotated_input(hidden, projection_signs(parameters.projection), workspace, stream, basis,
++                      block_size);
+     WorkspaceArena scratch(workspace.alloc_bytes(
+         snapshot_scratch_bytes(parameters, config, hidden.ne[2], hidden.ne[1], hidden.ne[1])));
+     if (const auto* gguf = std::get_if<ops::GgufProjectionWeights>(&parameters.projection)) {
+@@ -186,10 +200,11 @@ void gdn_projection_record(const Tensor& hidden, const GdnParameters& parameters
+                            const Tensor& valid_columns, const Tensor& initial_slots,
+                            Tensor& conv_record, Tensor& query, Tensor& key, Tensor& value,
+                            Tensor& z, WorkspaceArena& workspace, cudaStream_t stream,
+-                           InputBasis basis) {
++                           InputBasis basis, std::int32_t block_size) {
+     auto scope = workspace.scope();
+     const Tensor x =
+-        rotated_input(hidden, projection_signs(parameters.projection), workspace, stream, basis);
++        rotated_input(hidden, projection_signs(parameters.projection), workspace, stream, basis,
++                      block_size);
+     WorkspaceArena scratch(workspace.alloc_bytes(
+         record_scratch_bytes(parameters, config, hidden.ne[2], hidden.ne[1], hidden.ne[1])));
+     if (const auto* gguf = std::get_if<ops::GgufProjectionWeights>(&parameters.projection)) {
+diff --git a/src/models/qwen3_5/execution/gdn.h b/src/models/qwen3_5/execution/gdn.h
+index 04d7096..ec9ea67 100644
+--- a/src/models/qwen3_5/execution/gdn.h
++++ b/src/models/qwen3_5/execution/gdn.h
+@@ -18,23 +18,27 @@ namespace ninfer::models::qwen3_5::execution {
+                                                      std::int32_t last_width);
+ void gdn_projection(const Tensor& hidden, const GdnParameters& parameters, Tensor& qkv, Tensor& z,
+                     WorkspaceArena& workspace, cudaStream_t stream,
+-                    InputBasis basis = InputBasis::Primal);
++                    InputBasis basis = InputBasis::Primal,
++                    std::int32_t block_size = 1024);
+ // Returns the basis `hidden` is written in: rotated when the input projection is.
+ [[nodiscard]] InputBasis gdn_norm_control(const Tensor& residual, const Tensor& norm, float epsilon,
+                                           const GdnParameters& parameters, Tensor& hidden,
+                                           Tensor& g, Tensor& beta, WorkspaceArena& workspace,
+-                                          DeviceExecutionView execution);
++                                          DeviceExecutionView execution,
++                                          std::int32_t block_size = 1024);
+ void gdn_projection_snapshot(const Tensor& hidden, const GdnParameters& parameters,
+                              const GdnConfig& config, Tensor& conv_states,
+                              const Tensor& valid_columns, const Tensor& initial_slots,
+                              const Tensor& destination_slots, Tensor& query, Tensor& key,
+                              Tensor& value, Tensor& z, WorkspaceArena& workspace,
+-                             cudaStream_t stream, InputBasis basis = InputBasis::Primal);
++                             cudaStream_t stream, InputBasis basis = InputBasis::Primal,
++                             std::int32_t block_size = 1024);
+ void gdn_projection_record(const Tensor& hidden, const GdnParameters& parameters,
+                            const GdnConfig& config, const Tensor& conv_states,
+                            const Tensor& valid_columns, const Tensor& initial_slots,
+                            Tensor& conv_record, Tensor& query, Tensor& key, Tensor& value,
+                            Tensor& z, WorkspaceArena& workspace, cudaStream_t stream,
+-                           InputBasis basis = InputBasis::Primal);
++                           InputBasis basis = InputBasis::Primal,
++                           std::int32_t block_size = 1024);
+ 
+ } // namespace ninfer::models::qwen3_5::execution
+diff --git a/src/models/qwen3_5/execution/linear.h b/src/models/qwen3_5/execution/linear.h
+index 734c0c2..e6748d9 100644
+--- a/src/models/qwen3_5/execution/linear.h
++++ b/src/models/qwen3_5/execution/linear.h
+@@ -10,9 +10,9 @@ namespace ninfer::models::qwen3_5::execution {
+ 
+ inline void project(const Tensor& input, const LinearParameters& p, Tensor& output,
+                     WorkspaceArena& workspace, cudaStream_t stream,
+-                    InputBasis basis = InputBasis::Primal) {
++                    InputBasis basis = InputBasis::Primal, std::int32_t block_size = 1024) {
+     auto scope     = workspace.scope();
+-    const Tensor x = rotated_input(input, p.hadamard_signs, workspace, stream, basis);
++    const Tensor x = rotated_input(input, p.hadamard_signs, workspace, stream, basis, block_size);
+     ops::linear(x, p.weight, output, p.policy, workspace, stream);
+ }
+ 
+@@ -20,18 +20,20 @@ inline void project(const Tensor& input, const LinearParameters& p, Tensor& outp
+ // single-row copy verification (see residual_projection_policy).
+ inline void project_add(const Tensor& input, const LinearParameters& p, Tensor& residual,
+                         WorkspaceArena& workspace, cudaStream_t stream,
+-                        InputBasis basis = InputBasis::Primal, bool wide_verification = false) {
++                        InputBasis basis = InputBasis::Primal, bool wide_verification = false,
++                        std::int32_t block_size = 1024) {
+     auto scope     = workspace.scope();
+-    const Tensor x = rotated_input(input, p.hadamard_signs, workspace, stream, basis);
++    const Tensor x = rotated_input(input, p.hadamard_signs, workspace, stream, basis, block_size);
+     ops::linear_add(x, p.weight, residual, residual_projection_policy(p, wide_verification),
+                     workspace, stream);
+ }
+ 
+ inline void project_swiglu(const Tensor& input, const LinearParameters& p, Tensor& output,
+                            WorkspaceArena& workspace, cudaStream_t stream,
+-                           InputBasis basis = InputBasis::Primal) {
++                           InputBasis basis = InputBasis::Primal,
++                           std::int32_t block_size = 1024) {
+     auto scope     = workspace.scope();
+-    const Tensor x = rotated_input(input, p.hadamard_signs, workspace, stream, basis);
++    const Tensor x = rotated_input(input, p.hadamard_signs, workspace, stream, basis, block_size);
+     ops::linear_swiglu(x, p.weight, output, p.policy, workspace, stream);
+ }
+ 
+diff --git a/src/models/qwen3_5/execution/rotation.h b/src/models/qwen3_5/execution/rotation.h
+index 6a3b8f6..6b3b3ac 100644
+--- a/src/models/qwen3_5/execution/rotation.h
++++ b/src/models/qwen3_5/execution/rotation.h
+@@ -34,18 +34,19 @@ enum class InputBasis : std::uint8_t { Primal, Rotated };
+ // x itself, or its rotation in a workspace allocation that lives in the caller's scope.
+ [[nodiscard]] inline Tensor rotated_input(const Tensor& x, const Tensor& signs,
+                                           WorkspaceArena& workspace, cudaStream_t stream,
+-                                          InputBasis basis = InputBasis::Primal) {
++                                          InputBasis basis = InputBasis::Primal,
++                                          std::int32_t block_size = 1024) {
+     if (!rotated(signs) || basis == InputBasis::Rotated) { return x; }
+     Tensor out = workspace.alloc(DType::BF16, {x.ne[0], x.ne[1], x.ne[2], x.ne[3]});
+-    ops::hadamard_transform(x, signs, false, out, stream);
++    ops::hadamard_transform(x, signs, false, out, stream, block_size);
+     return out;
+ }
+ 
+ // The token rows of `ids`, restored to the primal basis when the table is stored rotated.
+ inline void embed_tokens(const Tensor& ids, const Weight& table, const Tensor& signs, Tensor& out,
+-                         cudaStream_t stream) {
++                         cudaStream_t stream, std::int32_t block_size = 1024) {
+     if (rotated(signs)) {
+-        ops::embedding_rotated(ids, table, signs, out, stream);
++        ops::embedding_rotated(ids, table, signs, out, stream, block_size);
+     } else {
+         ops::embedding(ids, table, out, stream);
+     }
+diff --git a/src/models/qwen3_5/execution/text.cpp b/src/models/qwen3_5/execution/text.cpp
+index 6021a7e..ef4ef51 100644
+--- a/src/models/qwen3_5/execution/text.cpp
++++ b/src/models/qwen3_5/execution/text.cpp
+@@ -306,7 +306,8 @@ void TextContext::mtp_forward_stem(const Tensor& ids, const Tensor& hidden,
+         emb = input_embeddings->view({dimension(config_.hidden_size), T});
+     } else {
+         emb = roots.embedding;
+-        embed_tokens(flat_ids, *embed_, parameters_.text.token_embedding_signs, emb, s);
++        embed_tokens(flat_ids, *embed_, parameters_.text.token_embedding_signs, emb, s,
++                     config_.hadamard_block_size);
+     }
+ 
+     Tensor e = roots.normalized_embedding;
+@@ -318,7 +319,8 @@ void TextContext::mtp_forward_stem(const Tensor& ids, const Tensor& hidden,
+     ops::mtp_pack_fc_input(e, h, fc_in, s);
+ 
+     x = roots.residual;
+-    project(fc_in, mtp_->input_projection, x, work_, s);
++    project(fc_in, mtp_->input_projection, x, work_, s, InputBasis::Primal,
++            config_.hadamard_block_size);
+ 
+     ah = roots.attention_hidden;
+     ops::rmsnorm(x, mtp_->input_norm, config_.rms_norm_eps, true, ah, s);
+@@ -413,7 +415,8 @@ void TextContext::mtp_forward_tail(Tensor& x, const Tensor& ah, const Tensor& po
+ 
+     const auto post = workspace::mtp_post_attention(work_, config_, T);
+     Tensor o        = post.output;
+-    project(a.view({dimension(config_.attention->query_width()), T}), mtp_->output, o, work_, s);
++    project(a.view({dimension(config_.attention->query_width()), T}), mtp_->output, o, work_, s,
++            InputBasis::Primal, config_.hadamard_block_size);
+     ops::residual_add(o, x, s);
+ 
+     Tensor mh = post.post_mixer_hidden;
+@@ -421,7 +424,8 @@ void TextContext::mtp_forward_tail(Tensor& x, const Tensor& ah, const Tensor& po
+ 
+     {
+         auto post_mixer_scope = work_.scope();
+-        ffn(mh, mtp_->ffn, x, {}, work_, s, true, false, InputBasis::Primal, false, experts_);
++        ffn(mh, mtp_->ffn, x, {}, work_, s, true, false, InputBasis::Primal, false, experts_,
++            config_.hadamard_block_size);
+     }
+ 
+     Tensor flat_mtp_hidden = mtp_hidden.view({dimension(config_.hidden_size), T});
+@@ -580,14 +584,15 @@ void TextContext::mtp_prefill_chunk(const Tensor& ids, const Tensor& hidden,
+ 
+         Tensor o = work_.alloc(DType::BF16, {dimension(config_.hidden_size), 1});
+         project(a.view({dimension(config_.attention->query_width()), 1}), mtp_->output, o, work_,
+-                s);
++                s, InputBasis::Primal, config_.hadamard_block_size);
+         ops::residual_add(o, x_last, s);
+ 
+         Tensor mh = work_.alloc(DType::BF16, {dimension(config_.hidden_size), 1});
+         ops::rmsnorm(x_last, mtp_->post_attention_norm, config_.rms_norm_eps, true, mh, s);
+         {
+             auto post_mixer_scope = work_.scope();
+-            ffn(mh, mtp_->ffn, x_last, {}, work_, s, true, false, InputBasis::Primal, false, experts_);
++            ffn(mh, mtp_->ffn, x_last, {}, work_, s, true, false, InputBasis::Primal, false,
++                experts_, config_.hadamard_block_size);
+         }
+         ops::rmsnorm(x_last, mtp_->final_norm, config_.rms_norm_eps, true, *final_hidden, s);
+         proposal_argmax(*final_hidden, *logits, *draft_token);
+@@ -605,7 +610,8 @@ void TextContext::proposal_argmax(const Tensor& hidden, Tensor& logits, Tensor&
+                                      static_cast<std::uint64_t>(T));
+     if (proposal_head_ != nullptr) {
+         Tensor proposal_logits = work_.alloc(DType::BF16, {proposal_head_n_, T});
+-        project(hidden, *proposal_head_, proposal_logits, work_, ctx_.stream);
++        project(hidden, *proposal_head_, proposal_logits, work_, ctx_.stream, InputBasis::Primal,
++                config_.hadamard_block_size);
+         ops::argmax(proposal_logits, proposal_tokens,
+                     proposal_head_ids_
+                         ? proposal_head_n_
+@@ -617,7 +623,8 @@ void TextContext::proposal_argmax(const Tensor& hidden, Tensor& logits, Tensor&
+         }
+     } else {
+         Tensor output_logits = matrix_window(logits, T);
+-        project(hidden, mtp_->output_head, output_logits, work_, ctx_.stream);
++        project(hidden, mtp_->output_head, output_logits, work_, ctx_.stream, InputBasis::Primal,
++                config_.hadamard_block_size);
+         ops::argmax(output_logits, proposal_tokens,
+                     dimension(parameters_.model.resources().public_token_count), ctx_.stream);
+     }
+@@ -733,11 +740,13 @@ void TextContext::ordinary_decode_batch(const Tensor& ids, const Tensor& cache_p
+         ScopedValue<std::int32_t> width_binding(active_sequence_width_, 1);
+ 
+         Tensor x = work_.alloc(DType::BF16, {dimension(config_.hidden_size), batch});
+-        embed_tokens(ids, *embed_, parameters_.text.token_embedding_signs, x, stream);
++        embed_tokens(ids, *embed_, parameters_.text.token_embedding_signs, x, stream,
++                     config_.hadamard_block_size);
+         NullTap tap;
+         run_layers(x, Phase::Verify, tap);
+         ops::rmsnorm(x, *final_norm_, config_.rms_norm_eps, true, hidden, stream);
+-        project(hidden, *lm_head_, logits, work_, stream);
++        project(hidden, *lm_head_, logits, work_, stream, InputBasis::Primal,
++                config_.hadamard_block_size);
+     }
+     work_.reset();
+ }
+@@ -787,7 +796,8 @@ void TextContext::target_verify_batch_impl(const Tensor& ids, const Tensor& cach
+ 
+         Tensor x        = work_.alloc(DType::BF16, {dimension(config_.hidden_size), columns});
+         Tensor flat_ids = ids.view({columns});
+-        embed_tokens(flat_ids, *embed_, parameters_.text.token_embedding_signs, x, stream);
++        embed_tokens(flat_ids, *embed_, parameters_.text.token_embedding_signs, x, stream,
++                     config_.hadamard_block_size);
+         if constexpr (Tap::enabled) { tap.begin(x); }
+         run_layers(x, Phase::Verify, tap);
+         if constexpr (requires { tap.capture_positions(cache_positions, stream); }) {
+@@ -797,7 +807,8 @@ void TextContext::target_verify_batch_impl(const Tensor& ids, const Tensor& cach
+         Tensor flat_logits = logits.view({dimension(config_.vocab_size), columns});
+         Tensor flat_tokens = target_tokens.view({columns});
+         ops::rmsnorm(x, *final_norm_, config_.rms_norm_eps, true, flat_hidden, stream);
+-        project(flat_hidden, *lm_head_, flat_logits, work_, stream);
++        project(flat_hidden, *lm_head_, flat_logits, work_, stream, InputBasis::Primal,
++                config_.hadamard_block_size);
+         ops::argmax(flat_logits, flat_tokens,
+                     dimension(parameters_.model.resources().public_token_count), stream);
+     }
+@@ -892,7 +903,8 @@ void TextContext::attn_mix(const BlockParameters& w, Tensor& x, int fidx, Phase
+         h = workspace::matrix(work_, DType::BF16, dimension(config_.hidden_size), T);
+     }
+     if (input_basis == InputBasis::Rotated) {
+-        ops::rmsnorm_hadamard(x, w.input_norm, config_.rms_norm_eps, true, input_signs, h, s);
++        ops::rmsnorm_hadamard(x, w.input_norm, config_.rms_norm_eps, true, input_signs, h, s,
++                              config_.hadamard_block_size);
+     } else if (!fused_nvfp4) {
+         ops::rmsnorm(x, w.input_norm, config_.rms_norm_eps, true, h, s);
+     }
+@@ -914,7 +926,8 @@ void TextContext::attn_mix(const BlockParameters& w, Tensor& x, int fidx, Phase
+                                                  single->weight, q_flat, gate_flat, k_flat, v_flat,
+                                                  single->policy, work_, s);
+     } else {
+-        attention_projection(h, p, q_flat, gate_flat, k_flat, v_flat, work_, s, input_basis);
++        attention_projection(h, p, q_flat, gate_flat, k_flat, v_flat, work_, s, input_basis,
++                             config_.hadamard_block_size);
+     }
+ 
+     const auto results = workspace::text_attention_results(work_, config_, T);
+@@ -984,11 +997,14 @@ void TextContext::attn_mix(const BlockParameters& w, Tensor& x, int fidx, Phase
+     const bool wide = wide_residual_verification(ph, row_width(T), row_width(T));
+     Tensor gated    = a.view({dimension(config_.attention->query_width()), T});
+     if (rotated_output) {
+-        ops::sigmoid_mul_hadamard(gate, a, p.output.hadamard_signs, gated, s);
+-        project_add(gated, p.output, x, work_, s, InputBasis::Rotated, wide);
++        ops::sigmoid_mul_hadamard(gate, a, p.output.hadamard_signs, gated, s,
++                                 config_.hadamard_block_size);
++        project_add(gated, p.output, x, work_, s, InputBasis::Rotated, wide,
++                    config_.hadamard_block_size);
+         return;
+     }
+-    project_add(gated, p.output, x, work_, s, InputBasis::Primal, wide);
++    project_add(gated, p.output, x, work_, s, InputBasis::Primal, wide,
++                config_.hadamard_block_size);
+ }
+ 
+ void TextContext::gdn_mix(const BlockParameters& w, Tensor& x, int gidx, Phase ph) {
+@@ -1001,7 +1017,8 @@ void TextContext::gdn_mix(const BlockParameters& w, Tensor& x, int gidx, Phase p
+     Tensor g           = control.g;
+     Tensor beta        = control.beta;
+     const InputBasis projection_basis = gdn_norm_control(x, w.input_norm, config_.rms_norm_eps, p,
+-                                                         h, g, beta, work_, ctx_.execution_view());
++                                                         h, g, beta, work_, ctx_.execution_view(),
++                                                         config_.hadamard_block_size);
+ 
+     const auto projection = workspace::gdn_projection(work_, config_, T);
+     Tensor z  = projection.output_gate.view({dimension(config_.gdn->linear_value_head_dim),
+@@ -1043,17 +1060,19 @@ void TextContext::gdn_mix(const BlockParameters& w, Tensor& x, int gidx, Phase p
+             gdn_projection_record(projection_input, p, *config_.gdn, conv_states, valid,
+                                   *active_linear_state_source_slots_, records.conv, query_output,
+                                   key_output, value_output, gate_output, work_, s,
+-                                  projection_basis);
++                                  projection_basis, config_.hadamard_block_size);
+         } else {
+             gdn_projection_snapshot(
+                 projection_input, p, *config_.gdn, conv_states, valid,
+                 *active_linear_state_source_slots_, *active_linear_state_destination_slots_,
+-                query_output, key_output, value_output, gate_output, work_, s, projection_basis);
++                query_output, key_output, value_output, gate_output, work_, s, projection_basis,
++                config_.hadamard_block_size);
+         }
+     } else {
+         Tensor qkv    = workspace::gdn_prefill_conv(work_, config_, T);
+         Tensor z_flat = z.view({dimension(config_.gdn->value_width()), T});
+-        gdn_projection(h, p, qkv, z_flat, work_, s, projection_basis);
++        gdn_projection(h, p, qkv, z_flat, work_, s, projection_basis,
++                       config_.hadamard_block_size);
+         const GdnStateRef gdn_pool = gdn_state(static_cast<std::uint32_t>(gidx));
+         Tensor conv_state_in       = gdn_pool.pool->conv_slot(gdn_pool.local, linear_state_source_slot_);
+         Tensor conv_state_out =
+@@ -1129,13 +1148,15 @@ void TextContext::gdn_mix(const BlockParameters& w, Tensor& x, int gidx, Phase p
+     Tensor normalized = on.view({dimension(config_.gdn->value_width()), T});
+     if (rotated(p.output.hadamard_signs)) {
+         ops::gated_rmsnorm_hadamard(o, p.norm, z, config_.rms_norm_eps, p.output.hadamard_signs,
+-                                    normalized, s);
+-        project_add(normalized, p.output, x, work_, s, InputBasis::Rotated);
++                                    normalized, s, config_.hadamard_block_size);
++        project_add(normalized, p.output, x, work_, s, InputBasis::Rotated, false,
++                    config_.hadamard_block_size);
+         return;
+     }
+     ops::gated_rmsnorm(o, p.norm, z, ops::GateActivation::Silu, config_.rms_norm_eps, on, s);
+     project_add(normalized, p.output, x, work_, s, InputBasis::Primal,
+-                wide_residual_verification(ph, row_width(T), row_width(T)));
++                wide_residual_verification(ph, row_width(T), row_width(T)),
++                config_.hadamard_block_size);
+ }
+ 
+ ops::SparseMoeHints TextContext::next_projection_hints(int layer) const {
+@@ -1149,15 +1170,16 @@ void TextContext::mlp_tail(const BlockParameters& weights, Tensor& x, Phase phas
+     Tensor h = workspace::post_mixer_hidden(work_, config_, x.ne[1]);
+     if (const Tensor* signs = ffn_input_signs(weights.ffn)) {
+         ops::rmsnorm_hadamard(x, weights.post_attention_norm, config_.rms_norm_eps, true, *signs, h,
+-                              ctx_.stream);
++                              ctx_.stream, config_.hadamard_block_size);
+         ffn(h, weights.ffn, x, hints, work_, ctx_.stream, false, phase == Phase::Verify,
+-            InputBasis::Rotated, false, experts_);
++            InputBasis::Rotated, false, experts_, config_.hadamard_block_size);
+         return;
+     }
+     ops::rmsnorm(x, weights.post_attention_norm, config_.rms_norm_eps, true, h, ctx_.stream);
+     ffn(h, weights.ffn, x, hints, work_, ctx_.stream, false, phase == Phase::Verify,
+         InputBasis::Primal,
+-        wide_residual_verification(phase, row_width(x.ne[1]), row_width(x.ne[1])), experts_);
++        wide_residual_verification(phase, row_width(x.ne[1]), row_width(x.ne[1])), experts_,
++        config_.hadamard_block_size);
+ }
+ 
+ TextContext::GdnShard TextContext::gdn_shard(std::uint32_t layer) const {
+@@ -1586,7 +1608,8 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
+             ScopedEnvelope scoped_envelope(active_causal_attention_envelope_, chunk_envelope);
+ 
+             Tensor x = roots.residual;
+-            embed_tokens(ids_device, *embed_, parameters_.text.token_embedding_signs, x, s);
++            embed_tokens(ids_device, *embed_, parameters_.text.token_embedding_signs, x, s,
++                         config_.hadamard_block_size);
+             if (!local_scatter_indices.empty()) {
+                 Tensor indices_device = roots.scatter_indices;
+                 copy_i32(local_scatter_indices.data(), indices_device, s);
+@@ -1630,7 +1653,8 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
+             if (is_last) {
+                 Tensor last_xf = xf.slice(1, len - 1, 1);
+                 Tensor logits  = matrix_window(io_.logits, 1);
+-                project(last_xf, *lm_head_, logits, work_, s);
++                project(last_xf, *lm_head_, logits, work_, s, InputBasis::Primal,
++                        config_.hadamard_block_size);
+                 // The token's logprob records, gathered before sampling adds it to the penalty
+                 // counts; a device no-op unless the request asked for them.
+                 if (sampling_config_ != nullptr && io_.logprob_active.data != nullptr) {
+@@ -1693,7 +1717,7 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
+                     mtp_input_embeddings =
+                         work_.alloc(DType::BF16, {dimension(config_.hidden_size), len});
+                     embed_tokens(mtp_ids, *embed_, parameters_.text.token_embedding_signs,
+-                                 mtp_input_embeddings, s);
++                                 mtp_input_embeddings, s, config_.hadamard_block_size);
+                     if (vision_chunk.control != nullptr) {
+                         const qwen3_5::MtpVisualOverlap overlap = qwen3_5::shifted_visual_overlap(
+                             vision_chunk.control->scatter_indices, alignment_tokens, mtp_window);
+diff --git a/src/models/qwen3_5/load.cpp b/src/models/qwen3_5/load.cpp
+index 5e026e1..64ef3e7 100644
+--- a/src/models/qwen3_5/load.cpp
++++ b/src/models/qwen3_5/load.cpp
+@@ -68,7 +68,7 @@ LoadPlan plan_load(const artifact::Reader& reader, LoadOptions options,
+     out->config  = parse_config(reader.directory(), options);
+     artifact::Binder binder(reader);
+     out->resources = loading::bind_resources(binder, out->config);
+-    loading::Bindings bindings(binder, options);
++    loading::Bindings bindings(binder, options, out->config.text.hadamard_block_size);
+     const auto& text = out->config.text;
+     if (options.expert_residency == ExpertResidency::Disk && out->artifact_path.empty()) {
+         throw std::invalid_argument("disk expert residency requires the artifact entry path");
+diff --git a/src/models/qwen3_5/load/bindings.h b/src/models/qwen3_5/load/bindings.h
+index a3301e6..849b330 100644
+--- a/src/models/qwen3_5/load/bindings.h
++++ b/src/models/qwen3_5/load/bindings.h
+@@ -25,9 +25,11 @@ struct PendingWeight {
+ 
+ class Bindings {
+ public:
+-    explicit Bindings(artifact::Binder& binder, const LoadOptions& options = {})
++    explicit Bindings(artifact::Binder& binder, const LoadOptions& options = {},
++                      std::uint32_t hadamard_block_size = 1024)
+         : binder(binder), expert_residency(options.expert_residency),
+-          resident_mtp_experts(options.mtp_experts_q4) {}
++          resident_mtp_experts(options.mtp_experts_q4),
++          hadamard_block_size_(hadamard_block_size) {}
+ 
+     [[nodiscard]] WeightId parameter(std::string name, artifact::Shape shape,
+                                      std::vector<std::string> inputs   = {},
+@@ -58,6 +60,7 @@ public:
+     std::vector<PendingWeight> weights;
+ 
+ private:
++    std::uint32_t hadamard_block_size_ = 1024;
+     // One device weight per distinct sign binding, however many Uses name it.
+     WeightId hadamard_signs(const artifact::Binding& binding, std::uint64_t width,
+                             const std::string& use);
+diff --git a/src/models/qwen3_5/load/prepare.cpp b/src/models/qwen3_5/load/prepare.cpp
+index bf467a0..8a2be29 100644
+--- a/src/models/qwen3_5/load/prepare.cpp
++++ b/src/models/qwen3_5/load/prepare.cpp
+@@ -156,8 +156,9 @@ WeightId Bindings::parameter(std::string name, artifact::Shape shape,
+ 
+ WeightId Bindings::hadamard_signs(const artifact::Binding& binding, std::uint64_t width,
+                                   const std::string& use) {
+-    if (width == 0 || width % 1024 != 0) {
+-        throw artifact::ArtifactError(use + ": Hadamard rotation needs a multiple of 1024 columns");
++    if ((hadamard_block_size_ != 512 && hadamard_block_size_ != 1024) || width == 0 ||
++        width % hadamard_block_size_ != 0) {
++        throw artifact::ArtifactError(use + ": Hadamard rotation width must be a multiple of the declared block size");
+     }
+     std::string key = std::to_string(width);
+     for (const auto& part : binding.parts) {
 diff --git a/src/ops/gdn_gating_proj/bf16/bf16_gdn_gating_proj_kernels.cu b/src/ops/gdn_gating_proj/bf16/bf16_gdn_gating_proj_kernels.cu
 index 80ee532..e7b7d28 100644
 --- a/src/ops/gdn_gating_proj/bf16/bf16_gdn_gating_proj_kernels.cu
@@ -215,6 +886,277 @@ index d2fab2d..a41be4f 100644
      throw std::invalid_argument("GDN projected-conv received an unregistered geometry");
  }
  
+diff --git a/src/ops/kernel/hadamard_producers.cuh b/src/ops/kernel/hadamard_producers.cuh
+index 6e8456c..3521b08 100644
+--- a/src/ops/kernel/hadamard_producers.cuh
++++ b/src/ops/kernel/hadamard_producers.cuh
+@@ -304,4 +304,50 @@ __launch_bounds__(WarpsPerCta* kWarpSize) __global__
+     }
+ }
+ 
++template <int WarpsPerCta>
++__launch_bounds__(WarpsPerCta* kWarpSize) __global__
++void embed_gather_t2_hadamard_512_kernel(const std::int32_t* __restrict__ ids,
++                                         const std::uint8_t* __restrict__ codes,
++                                         const __half* __restrict__ scales,
++                                         const __nv_bfloat16* __restrict__ signs,
++                                         __nv_bfloat16* __restrict__ out,
++                                         std::int64_t items, std::int32_t width) {
++    const int lane = static_cast<int>(threadIdx.x) & (kWarpSize - 1);
++    const int warp = static_cast<int>(threadIdx.x) / kWarpSize;
++    const std::int64_t item = static_cast<std::int64_t>(blockIdx.x) * WarpsPerCta + warp;
++    if (item >= items) return;
++    const std::int32_t blocks_per_row = width / kHadamardSmallBlock;
++    const std::int64_t token = item / blocks_per_row;
++    const int block = static_cast<int>(item - token * blocks_per_row);
++    const std::int64_t row = ids[token];
++    const std::uint8_t* row_codes = codes + row * (width / 4);
++    const __half* row_scales = scales + row * (width / 128);
++    const int block_base = block * kHadamardSmallBlock;
++    float v[kHadamardSmallLaneVectors][8];
++#pragma unroll
++    for (int r = 0; r < kHadamardSmallLaneVectors; ++r) {
++        const int first = block_base + hadamard_lane_offset(lane, r);
++        const unsigned bits = *reinterpret_cast<const std::uint16_t*>(row_codes + first / 4);
++        const float scale = __half2float(row_scales[first / 128]);
++#pragma unroll
++        for (int j = 0; j < 8; ++j) {
++            const unsigned code = (bits >> (2 * j)) & 3U;
++            v[r][j] = code == 1U ? scale : (code == 3U ? -scale : 0.0f);
++        }
++    }
++    hadamard_512_butterfly(v, lane);
++    const __nv_bfloat16* block_signs = signs + block_base;
++    __nv_bfloat16* out_block = out + token * width + block_base;
++#pragma unroll
++    for (int r = 0; r < kHadamardSmallLaneVectors; ++r) {
++        float s[8];
++        hadamard_unpack8(load_vec<uint4>(block_signs + hadamard_lane_offset(lane, r)), s);
++#pragma unroll
++        for (int j = 0; j < 8; ++j) {
++            v[r][j] = __fmul_rn(v[r][j], kHadamardSmallNormalizer) * s[j];
++        }
++        store_vec(out_block + hadamard_lane_offset(lane, r), hadamard_pack8(v[r]));
++    }
++}
++
+ } // namespace ninfer::ops
+diff --git a/src/ops/kernel/hadamard_transform.cuh b/src/ops/kernel/hadamard_transform.cuh
+index a404a81..de4bcfa 100644
+--- a/src/ops/kernel/hadamard_transform.cuh
++++ b/src/ops/kernel/hadamard_transform.cuh
+@@ -23,6 +23,49 @@ inline constexpr int kHadamardTransformLaneElements = kHadamardTransformBlock /
+ inline constexpr int kHadamardTransformLaneVectors  = kHadamardTransformLaneElements / 8;
+ inline constexpr float kHadamardTransformNormalizer = 0.03125f; // 2^-5 = 1 / sqrt(1024)
+ 
++// The small Bonsai 2B v3 converter records 512-point Hadamard blocks. Keeping
++// this as a separate kernel specialization preserves the original 27B 1024
++// arithmetic/rounding behavior rather than silently mixing two bases.
++inline constexpr int kHadamardSmallBlock = 512;
++inline constexpr int kHadamardSmallLaneVectors = kHadamardSmallBlock / (kWarpSize * 8);
++inline constexpr float kHadamardSmallNormalizer = 0.04419417382415922f;
++
++__device__ __forceinline__ void
++hadamard_512_butterfly(float (&v)[kHadamardSmallLaneVectors][8], int lane) {
++#pragma unroll
++    for (int stride = 1; stride < 8; stride <<= 1) {
++#pragma unroll
++        for (int r = 0; r < kHadamardSmallLaneVectors; ++r) {
++#pragma unroll
++            for (int j = 0; j < 8; ++j) {
++                if ((j & stride) == 0) {
++                    const float lo = v[r][j], hi = v[r][j + stride];
++                    v[r][j] = __fadd_rn(lo, hi);
++                    v[r][j + stride] = __fsub_rn(lo, hi);
++                }
++            }
++        }
++    }
++#pragma unroll
++    for (int stride = 1; stride < kWarpSize; stride <<= 1) {
++#pragma unroll
++        for (int r = 0; r < kHadamardSmallLaneVectors; ++r) {
++#pragma unroll
++            for (int j = 0; j < 8; ++j) {
++                const float peer = __shfl_xor_sync(kFullWarpMask, v[r][j], stride);
++                v[r][j] = (lane & stride) == 0 ? __fadd_rn(v[r][j], peer)
++                                               : __fsub_rn(peer, v[r][j]);
++            }
++        }
++    }
++#pragma unroll
++    for (int j = 0; j < 8; ++j) {
++        const float lo = v[0][j], hi = v[1][j];
++        v[0][j] = __fadd_rn(lo, hi);
++        v[1][j] = __fsub_rn(lo, hi);
++    }
++}
++
+ // Byte offset of lane vector r inside a 1024-element block.
+ __device__ __forceinline__ int hadamard_lane_offset(int lane, int r) {
+     return r * (kWarpSize * 8) + lane * 8;
+@@ -227,4 +270,44 @@ __launch_bounds__(WarpsPerCta* kWarpSize) __global__
+     }
+ }
+ 
++template <bool SignsAfter, int WarpsPerCta>
++__launch_bounds__(WarpsPerCta* kWarpSize) __global__
++void hadamard_transform_512_kernel(const __nv_bfloat16* __restrict__ x,
++                                   const __nv_bfloat16* __restrict__ signs,
++                                   __nv_bfloat16* out, std::int64_t items,
++                                   std::int32_t blocks_per_column) {
++    const int lane = static_cast<int>(threadIdx.x) & (kWarpSize - 1);
++    const int warp = static_cast<int>(threadIdx.x) / kWarpSize;
++    const std::int64_t item = static_cast<std::int64_t>(blockIdx.x) * WarpsPerCta + warp;
++    if (item >= items) return;
++    const std::int64_t column = item / blocks_per_column;
++    const int block = static_cast<int>(item - column * blocks_per_column);
++    const std::int64_t base = column * static_cast<std::int64_t>(blocks_per_column) *
++                                  kHadamardSmallBlock + block * kHadamardSmallBlock;
++    const __nv_bfloat16* block_signs = signs + block * kHadamardSmallBlock;
++    float v[kHadamardSmallLaneVectors][8];
++    float s[kHadamardSmallLaneVectors][8];
++#pragma unroll
++    for (int r = 0; r < kHadamardSmallLaneVectors; ++r) {
++        const int offset = hadamard_lane_offset(lane, r);
++        hadamard_unpack8(load_vec<uint4>(x + base + offset), v[r]);
++        hadamard_unpack8(load_vec<uint4>(block_signs + offset), s[r]);
++        if constexpr (!SignsAfter) {
++#pragma unroll
++            for (int j = 0; j < 8; ++j) v[r][j] *= s[r][j];
++        }
++    }
++    hadamard_512_butterfly(v, lane);
++#pragma unroll
++    for (int r = 0; r < kHadamardSmallLaneVectors; ++r) {
++#pragma unroll
++        for (int j = 0; j < 8; ++j) {
++            float value = __fmul_rn(v[r][j], kHadamardSmallNormalizer);
++            if constexpr (SignsAfter) value *= s[r][j];
++            v[r][j] = value;
++        }
++        store_vec(out + base + hadamard_lane_offset(lane, r), hadamard_pack8(v[r]));
++    }
++}
++
+ } // namespace ninfer::ops
+diff --git a/src/ops/launcher/causal_conv1d.cu b/src/ops/launcher/causal_conv1d.cu
+index 3191b87..6c59ab8 100644
+--- a/src/ops/launcher/causal_conv1d.cu
++++ b/src/ops/launcher/causal_conv1d.cu
+@@ -127,6 +127,10 @@ void causal_conv1d_smallt_split_launch(const Tensor& x, const Tensor& weight,
+                                        Tensor& out0, Tensor& out1, Tensor& out2,
+                                        CausalConvSplitGeometry geometry, cudaStream_t stream) {
+     switch (geometry) {
++    case CausalConvSplitGeometry::Rows2048x2048x2048:
++        smallt_split_launch<2048, 2048, 2048>(x, weight, conv_state_in, conv_state_out, out0, out1,
++                                              out2, stream);
++        return;
+     case CausalConvSplitGeometry::Rows2048x2048x4096:
+         smallt_split_launch<2048, 2048, 4096>(x, weight, conv_state_in, conv_state_out, out0, out1,
+                                               out2, stream);
+@@ -175,6 +179,10 @@ void causal_conv1d_prefill_split_launch(const Tensor& x, const Tensor& weight,
+                                         Tensor& out0, Tensor& out1, Tensor& out2,
+                                         CausalConvSplitGeometry geometry, cudaStream_t stream) {
+     switch (geometry) {
++    case CausalConvSplitGeometry::Rows2048x2048x2048:
++        prefill_split_launch<2048, 2048, 2048>(x, weight, conv_state_in, conv_state_out, out0, out1,
++                                               out2, stream);
++        return;
+     case CausalConvSplitGeometry::Rows2048x2048x4096:
+         prefill_split_launch<2048, 2048, 4096>(x, weight, conv_state_in, conv_state_out, out0, out1,
+                                                out2, stream);
+diff --git a/src/ops/launcher/causal_conv1d.h b/src/ops/launcher/causal_conv1d.h
+index db76fe3..d21665c 100644
+--- a/src/ops/launcher/causal_conv1d.h
++++ b/src/ops/launcher/causal_conv1d.h
+@@ -13,6 +13,7 @@ namespace ninfer::ops::detail {
+ // Registered split partitions, named by their row profile. The wrapper resolves one of these from
+ // the destination row counts and refuses anything else.
+ enum class CausalConvSplitGeometry {
++    Rows2048x2048x2048,
+     Rows2048x2048x4096,
+     Rows2048x2048x6144,
+ };
+diff --git a/src/ops/launcher/hadamard_transform.cu b/src/ops/launcher/hadamard_transform.cu
+index 58d1508..cf68d2c 100644
+--- a/src/ops/launcher/hadamard_transform.cu
++++ b/src/ops/launcher/hadamard_transform.cu
+@@ -123,6 +123,24 @@ void embedding_rotated_t2_launch(const Tensor& ids, const Weight& table, const T
+     CUDA_CHECK(cudaGetLastError());
+ }
+ 
++void embedding_rotated_t2_512_launch(const Tensor& ids, const Weight& table, const Tensor& signs,
++                                     Tensor& out, cudaStream_t stream) {
++    const std::int32_t width = out.ne[0];
++    const std::int64_t items =
++        static_cast<std::int64_t>(ids.ne[0]) * (width / kHadamardSmallBlock);
++    const std::int64_t ctas = (items + kWarpsPerCta - 1) / kWarpsPerCta;
++    if (ctas > std::numeric_limits<unsigned>::max()) {
++        throw std::overflow_error("embedding_rotated 512: grid exceeds CUDA launch limit");
++    }
++    embed_gather_t2_hadamard_512_kernel<kWarpsPerCta>
++        <<<static_cast<unsigned>(ctas), kWarpsPerCta * kWarpSize, 0, stream>>>(
++            static_cast<const std::int32_t*>(ids.data),
++            static_cast<const std::uint8_t*>(table.qdata), static_cast<const __half*>(table.scales),
++            static_cast<const __nv_bfloat16*>(signs.data), static_cast<__nv_bfloat16*>(out.data),
++            items, width);
++    CUDA_CHECK(cudaGetLastError());
++}
++
+ void hadamard_transform_launch(const Tensor& x, const Tensor& signs, bool inverse, Tensor& out,
+                                cudaStream_t stream) {
+     const std::int32_t k                 = x.ne[0];
+@@ -140,4 +158,28 @@ void hadamard_transform_launch(const Tensor& x, const Tensor& signs, bool invers
+     CUDA_CHECK(cudaGetLastError());
+ }
+ 
++void hadamard_transform_512_launch(const Tensor& x, const Tensor& signs, bool inverse, Tensor& out,
++                                   cudaStream_t stream) {
++    const std::int32_t k = x.ne[0];
++    const std::int32_t blocks = k / kHadamardSmallBlock;
++    const std::int64_t items = (x.numel() / k) * blocks;
++    const std::int64_t ctas = (items + kWarpsPerCta - 1) / kWarpsPerCta;
++    if (ctas > std::numeric_limits<unsigned>::max()) {
++        throw std::overflow_error("hadamard_transform 512: grid exceeds CUDA launch limit");
++    }
++    const auto* src = static_cast<const __nv_bfloat16*>(x.data);
++    const auto* sign = static_cast<const __nv_bfloat16*>(signs.data);
++    auto* dst = static_cast<__nv_bfloat16*>(out.data);
++    if (inverse) {
++        hadamard_transform_512_kernel<true, kWarpsPerCta>
++            <<<static_cast<unsigned>(ctas), kWarpsPerCta * kWarpSize, 0, stream>>>(
++                src, sign, dst, items, blocks);
++    } else {
++        hadamard_transform_512_kernel<false, kWarpsPerCta>
++            <<<static_cast<unsigned>(ctas), kWarpsPerCta * kWarpSize, 0, stream>>>(
++                src, sign, dst, items, blocks);
++    }
++    CUDA_CHECK(cudaGetLastError());
++}
++
+ } // namespace ninfer::ops::detail
+diff --git a/src/ops/launcher/hadamard_transform.h b/src/ops/launcher/hadamard_transform.h
+index 32a5969..4b736cb 100644
+--- a/src/ops/launcher/hadamard_transform.h
++++ b/src/ops/launcher/hadamard_transform.h
+@@ -19,6 +19,8 @@ inline constexpr std::int32_t kGatedRmsnormHadamardFusedRows    = 16;
+ 
+ void hadamard_transform_launch(const Tensor& x, const Tensor& signs, bool inverse, Tensor& out,
+                                cudaStream_t stream);
++void hadamard_transform_512_launch(const Tensor& x, const Tensor& signs, bool inverse, Tensor& out,
++                                   cudaStream_t stream);
+ void silu_mul_hadamard_launch(const Tensor& plane, const Tensor& signs, Tensor& out,
+                               cudaStream_t stream);
+ void rmsnorm_hadamard_5120_launch(const Tensor& x, const Tensor& weight, float eps,
+@@ -32,5 +34,7 @@ void sigmoid_mul_hadamard_launch(const Tensor& gate, const Tensor& x, const Tens
+                                  Tensor& out, cudaStream_t stream);
+ void embedding_rotated_t2_launch(const Tensor& ids, const Weight& table, const Tensor& signs,
+                                  Tensor& out, cudaStream_t stream);
++void embedding_rotated_t2_512_launch(const Tensor& ids, const Weight& table, const Tensor& signs,
++                                     Tensor& out, cudaStream_t stream);
+ 
+ } // namespace ninfer::ops::detail
 diff --git a/src/ops/linear/t2/t2_dispatch.cpp b/src/ops/linear/t2/t2_dispatch.cpp
 index b358260..af4e89b 100644
 --- a/src/ops/linear/t2/t2_dispatch.cpp
@@ -251,6 +1193,79 @@ index b358260..af4e89b 100644
          if (n == 5120) {
              if (t == 1 && decode_simt) { return launch_t2_gemv_r8_w1_k6144; }
              return small_t();
+diff --git a/src/ops/softmax_attention/dense/causal_cache/causal_softmax_attention.cpp b/src/ops/softmax_attention/dense/causal_cache/causal_softmax_attention.cpp
+index acbac25..ec93c2f 100644
+--- a/src/ops/softmax_attention/dense/causal_cache/causal_softmax_attention.cpp
++++ b/src/ops/softmax_attention/dense/causal_cache/causal_softmax_attention.cpp
+@@ -54,7 +54,8 @@ std::int32_t causal_attention_chunk_tokens(std::int32_t q_heads, std::int32_t wi
+ void require_causal_geometry(AttentionHeadGeometry geometry, const char* op) {
+     if (!valid_attention_head_geometry(geometry) || geometry.head_dim != kHeadDim ||
+         !((geometry.query_heads == 24 && geometry.kv_heads == 4) ||
+-          (geometry.query_heads == 16 && geometry.kv_heads == 2))) {
++          (geometry.query_heads == 16 && geometry.kv_heads == 2) ||
++          (geometry.query_heads == 8 && geometry.kv_heads == 2))) {
+         throw std::invalid_argument(std::string(op) + ": unsupported head geometry");
+     }
+ }
+@@ -422,6 +423,16 @@ namespace detail {
+ CausalAttentionRoute causal_attention_resolve_route(std::int32_t q_heads, std::int32_t width,
+                                                     std::int32_t batch_size, KvCacheStorage storage,
+                                                     CausalAttentionExecutionEnvelope envelope) {
++    // Bonsai2B uses the general prompt kernel for decode and prefill alike.
++    // Unlike the 16/24-head routes, no 8-head specialized small-T CUDA image is
++    // registered. The prompt implementation handles one-token input correctly.
++    if (q_heads == 8) {
++        if (storage != KvCacheStorage::Int8Group64 && storage != KvCacheStorage::BFloat16) {
++            throw std::invalid_argument(
++                "causal_softmax_attention: Bonsai2B prompt supports BF16 or INT8 KV only");
++        }
++        return CausalAttentionRoute::Prompt;
++    }
+     if (envelope.small_prefill && batch_size == 1 && width > kMaximumVerifyTokens &&
+         width <= kMaximumSingleRowVerifyTokens) {
+         const std::uint32_t keys_per_row =
+diff --git a/src/ops/softmax_attention/dense/causal_cache/geometry.cuh b/src/ops/softmax_attention/dense/causal_cache/geometry.cuh
+index ebf44ee..003eb16 100644
+--- a/src/ops/softmax_attention/dense/causal_cache/geometry.cuh
++++ b/src/ops/softmax_attention/dense/causal_cache/geometry.cuh
+@@ -14,5 +14,7 @@ struct CausalAttentionGeometry : AttentionHeadMapping<QHeadsValue, KVHeadsValue>
+ 
+ using CausalD256H24Kv4 = CausalAttentionGeometry<24, 4, 1>;
+ using CausalD256H16Kv2 = CausalAttentionGeometry<16, 2, 2>;
++// Bonsai 2B's full-attention blocks: eight query heads, two KV heads, d256.
++using CausalD256H8Kv2  = CausalAttentionGeometry<8, 2, 2>;
+ 
+ } // namespace ninfer::ops
+diff --git a/src/ops/softmax_attention/dense/causal_cache/prompt.cu b/src/ops/softmax_attention/dense/causal_cache/prompt.cu
+index 3abc42d..5d6612e 100644
+--- a/src/ops/softmax_attention/dense/causal_cache/prompt.cu
++++ b/src/ops/softmax_attention/dense/causal_cache/prompt.cu
+@@ -347,6 +347,12 @@ void causal_attention_prompt_attention_launch(const Tensor& q, const Tensor& pos
+             stream);
+         return;
+     }
++    if (q.ne[1] == CausalD256H8Kv2::QHeads) {
++        causal_attention_prompt_attention_launch_for<CausalD256H8Kv2>(
++            q, positions, scale, cache, metadata, nullptr, max_visible_keys, workspace, out, fast,
++            stream);
++        return;
++    }
+     causal_attention_prompt_attention_launch_for<CausalD256H16Kv2>(
+         q, positions, scale, cache, metadata, nullptr, max_visible_keys, workspace, out, fast,
+         stream);
+@@ -389,6 +395,12 @@ void causal_attention_prompt_launch(const Tensor& q, const Tensor& k, const Tens
+                 stream);
+             return;
+         }
++        if (q.ne[1] == CausalD256H8Kv2::QHeads) {
++            causal_attention_prompt_attention_launch_for<CausalD256H8Kv2>(
++                q, positions, scale, cache, metadata, valid, max_visible_keys, workspace, out, fast,
++                stream);
++            return;
++        }
+         causal_attention_prompt_attention_launch_for<CausalD256H16Kv2>(
+             q, positions, scale, cache, metadata, valid, max_visible_keys, workspace, out, fast,
+             stream);
 diff --git a/src/ops/weight_input.cpp b/src/ops/weight_input.cpp
 index 2c3fe53..7a762dc 100644
 --- a/src/ops/weight_input.cpp
@@ -373,8 +1388,22 @@ index 4be9fc1..ddc4d8b 100644
              bytes = std::max(bytes,
                               linear_workspace_capacity_bytes(QType::T2_G128_FP16, rows, input_rows,
                                                               policy, min_tokens, max_tokens));
+diff --git a/src/ops/wrapper/causal_conv1d_silu.cpp b/src/ops/wrapper/causal_conv1d_silu.cpp
+index 96c18c6..069f8cb 100644
+--- a/src/ops/wrapper/causal_conv1d_silu.cpp
++++ b/src/ops/wrapper/causal_conv1d_silu.cpp
+@@ -159,6 +159,9 @@ detail::CausalConvSplitGeometry resolve_split_geometry(const Tensor& x, const Te
+         throw std::invalid_argument("causal_conv1d: split destinations must match the x column "
+                                     "count");
+     }
++    if (x.ne[0] == 6144 && out0.ne[0] == 2048 && out1.ne[0] == 2048 && out2.ne[0] == 2048) {
++        return detail::CausalConvSplitGeometry::Rows2048x2048x2048;
++    }
+     if (x.ne[0] == 8192 && out0.ne[0] == 2048 && out1.ne[0] == 2048 && out2.ne[0] == 4096) {
+         return detail::CausalConvSplitGeometry::Rows2048x2048x4096;
+     }
 diff --git a/src/ops/wrapper/gdn_gating_proj.cpp b/src/ops/wrapper/gdn_gating_proj.cpp
-index 4b8900d..6ad1f3b 100644
+index 4b8900d..d60b0d7 100644
 --- a/src/ops/wrapper/gdn_gating_proj.cpp
 +++ b/src/ops/wrapper/gdn_gating_proj.cpp
 @@ -57,6 +57,10 @@ GdnControlParentGeometry require_bf16_parent(const Weight& parent) {
@@ -388,11 +1417,104 @@ index 4b8900d..6ad1f3b 100644
      throw std::invalid_argument("gdn_gating_proj: unsupported ab_weight geometry");
  }
  
+@@ -144,15 +148,24 @@ void gdn_norm_gating_proj(const Tensor& x, const Tensor& norm_weight, float eps,
+     if (!(eps > 0.0F) || !std::isfinite(eps)) {
+         throw std::invalid_argument("gdn_norm_gating_proj: eps must be positive and finite");
+     }
+-    require_sequence_tensor(x, DType::BF16, 5120, tokens, op, "x");
+-    require_vector_tensor(norm_weight, DType::BF16, 5120, op, "norm_weight");
+-    require_sequence_tensor(h, DType::BF16, 5120, tokens, op, "h");
+-    require_vector_tensor(A_log, DType::FP32, 48, op, "A_log");
+-    require_vector_tensor(dt_bias, DType::FP32, 48, op, "dt_bias");
+-    require_sequence_tensor(g, DType::FP32, 48, tokens, op, "g");
+-    require_sequence_tensor(beta, DType::FP32, 48, tokens, op, "beta");
+-    require_bf16_weight(a_weight, 48, 5120, "a_weight");
+-    require_bf16_weight(b_weight, 48, 5120, "b_weight");
++    const bool qwen27 = a_weight.n == 48 && a_weight.k == 5120 &&
++                        b_weight.n == 48 && b_weight.k == 5120;
++    const bool bonsai2b = a_weight.n == 16 && a_weight.k == 2048 &&
++                          b_weight.n == 16 && b_weight.k == 2048;
++    if (!qwen27 && !bonsai2b) {
++        throw std::invalid_argument("gdn_norm_gating_proj: unsupported control geometry");
++    }
++    const std::int32_t hidden = a_weight.k;
++    const std::int32_t heads = a_weight.n;
++    require_sequence_tensor(x, DType::BF16, hidden, tokens, op, "x");
++    require_vector_tensor(norm_weight, DType::BF16, hidden, op, "norm_weight");
++    require_sequence_tensor(h, DType::BF16, hidden, tokens, op, "h");
++    require_vector_tensor(A_log, DType::FP32, heads, op, "A_log");
++    require_vector_tensor(dt_bias, DType::FP32, heads, op, "dt_bias");
++    require_sequence_tensor(g, DType::FP32, heads, tokens, op, "g");
++    require_sequence_tensor(beta, DType::FP32, heads, tokens, op, "beta");
++    require_bf16_weight(a_weight, heads, hidden, "a_weight");
++    require_bf16_weight(b_weight, heads, hidden, "b_weight");
+     require_execution(execution, op);
+ 
+     detail::bf16_gdn_norm_gating_dispatch(x, norm_weight, eps, h, a_weight, b_weight, A_log,
+@@ -195,16 +208,25 @@ void gdn_norm_gating_proj_rotated(const Tensor& x, const Tensor& norm_weight, fl
+         throw std::invalid_argument(
+             "gdn_norm_gating_proj_rotated: eps must be positive and finite");
+     }
+-    require_sequence_tensor(x, DType::BF16, 5120, tokens, op, "x");
+-    require_vector_tensor(norm_weight, DType::BF16, 5120, op, "norm_weight");
+-    require_vector_tensor(signs, DType::BF16, 5120, op, "signs");
+-    require_sequence_tensor(h, DType::BF16, 5120, tokens, op, "h");
+-    require_vector_tensor(A_log, DType::FP32, 48, op, "A_log");
+-    require_vector_tensor(dt_bias, DType::FP32, 48, op, "dt_bias");
+-    require_sequence_tensor(g, DType::FP32, 48, tokens, op, "g");
+-    require_sequence_tensor(beta, DType::FP32, 48, tokens, op, "beta");
+-    require_bf16_weight(a_weight, 48, 5120, "a_weight");
+-    require_bf16_weight(b_weight, 48, 5120, "b_weight");
++    const bool qwen27 = a_weight.n == 48 && a_weight.k == 5120 &&
++                        b_weight.n == 48 && b_weight.k == 5120;
++    const bool bonsai2b = a_weight.n == 16 && a_weight.k == 2048 &&
++                          b_weight.n == 16 && b_weight.k == 2048;
++    if (!qwen27 && !bonsai2b) {
++        throw std::invalid_argument("gdn_norm_gating_proj_rotated: unsupported control geometry");
++    }
++    const std::int32_t hidden = a_weight.k;
++    const std::int32_t heads  = a_weight.n;
++    require_sequence_tensor(x, DType::BF16, hidden, tokens, op, "x");
++    require_vector_tensor(norm_weight, DType::BF16, hidden, op, "norm_weight");
++    require_vector_tensor(signs, DType::BF16, hidden, op, "signs");
++    require_sequence_tensor(h, DType::BF16, hidden, tokens, op, "h");
++    require_vector_tensor(A_log, DType::FP32, heads, op, "A_log");
++    require_vector_tensor(dt_bias, DType::FP32, heads, op, "dt_bias");
++    require_sequence_tensor(g, DType::FP32, heads, tokens, op, "g");
++    require_sequence_tensor(beta, DType::FP32, heads, tokens, op, "beta");
++    require_bf16_weight(a_weight, heads, hidden, "a_weight");
++    require_bf16_weight(b_weight, heads, hidden, "b_weight");
+     require_execution(execution, op);
+     if ((reinterpret_cast<std::uintptr_t>(signs.data) & 15U) != 0 ||
+         (reinterpret_cast<std::uintptr_t>(h.data) & 15U) != 0) {
 diff --git a/src/ops/wrapper/gdn_input_proj.cpp b/src/ops/wrapper/gdn_input_proj.cpp
-index 6c92fad..1e63f13 100644
+index 6c92fad..90f6bda 100644
 --- a/src/ops/wrapper/gdn_input_proj.cpp
 +++ b/src/ops/wrapper/gdn_input_proj.cpp
-@@ -867,12 +867,17 @@ void t2_two_parent_project(const Tensor& x, const Weight& qk_weight, const Weigh
+@@ -264,7 +264,8 @@ void require_record_capacity_domain(std::int32_t batch_size, std::int32_t min_wi
+     }
+ }
+ 
+-void require_rowsplit(const Weight& weight, QType qtype, std::int32_t rows, const char* label) {
++void require_rowsplit(const Weight& weight, QType qtype, std::int32_t rows, const char* label,
++                      std::int32_t hidden = 5120) {
+     const bool no_high   = weight.qhigh == nullptr && weight.high_plane_bytes == 0;
+     const bool q4_planes = qtype != QType::Q4_G64_FP16 || no_high;
+     const bool t2_planes = qtype != QType::T2_G128_FP16 || no_high;
+@@ -275,9 +276,9 @@ void require_rowsplit(const Weight& weight, QType qtype, std::int32_t rows, cons
+     if (weight.qtype != qtype || !is_row_split(weight.layout) ||
+         weight.scale_dtype != DType::FP16 ||
+         weight.group_size != static_cast<std::uint32_t>(group) || weight.group != group ||
+-        !t2_planes || weight.ndim != 2 || weight.n != rows || weight.k != 5120 ||
+-        weight.shape[0] != rows || weight.shape[1] != 5120 || weight.padded_shape[0] != rows ||
+-        weight.padded_shape[1] != 5120 || !q4_planes || !q5_planes ||
++        !t2_planes || weight.ndim != 2 || weight.n != rows || weight.k != hidden ||
++        weight.shape[0] != rows || weight.shape[1] != hidden || weight.padded_shape[0] != rows ||
++        weight.padded_shape[1] != hidden || !q4_planes || !q5_planes ||
+         !aligned_to(weight.qdata, 16) || !aligned_to(weight.scales, 4) ||
+         (qtype == QType::Q5_G64_FP16 && !aligned_to(weight.qhigh, 16))) {
+         throw std::invalid_argument(std::string("gdn_input_proj: invalid ") + label);
+@@ -867,16 +868,22 @@ void t2_two_parent_project(const Tensor& x, const Weight& qk_weight, const Weigh
                             Tensor& qkv, Tensor& z, LinearPolicy policy, WorkspaceArena& workspace,
                             cudaStream_t stream) {
      constexpr std::int32_t kQkRows    = 4096;
@@ -413,8 +1535,15 @@ index 6c92fad..1e63f13 100644
 +    require_matrix(x, kHidden, cols, "x");
      require_matrix(qkv, kQkvRows, cols, "qkv");
      require_matrix(z, kZRows, cols, "z");
-     require_rowsplit(qk_weight, QType::T2_G128_FP16, kQkRows, "qk weight");
-@@ -910,19 +915,21 @@ void t2_two_parent_project(const Tensor& x, const Weight& qk_weight, const Weigh
+-    require_rowsplit(qk_weight, QType::T2_G128_FP16, kQkRows, "qk weight");
+-    require_rowsplit(value_z_weight, QType::T2_G128_FP16, kValueRows + kZRows, "value/z weight");
++    require_rowsplit(qk_weight, QType::T2_G128_FP16, kQkRows, "qk weight", kHidden);
++    require_rowsplit(value_z_weight, QType::T2_G128_FP16, kValueRows + kZRows,
++                     "value/z weight", kHidden);
+     if (sm70_takes(x, qk_weight, &value_z_weight)) {
+         sm70_project_gdn(x, qk_weight, &value_z_weight, qkv, z, policy, workspace, stream);
+         return;
+@@ -910,19 +917,21 @@ void t2_two_parent_project(const Tensor& x, const Weight& qk_weight, const Weigh
  // integer route's activation planes where it takes the width, otherwise the q/k and value planes of
  // the A16 route (whose T2 linears take no workspace).
  std::size_t t2_two_parent_projection_bytes(std::int32_t min_columns, std::int32_t max_columns,
@@ -440,7 +1569,7 @@ index 6c92fad..1e63f13 100644
          }
          bytes = std::max(bytes, layout.peak_bytes(1));
      }
-@@ -982,11 +989,13 @@ std::size_t gdn_input_proj_split_workspace_capacity_bytes(
+@@ -982,11 +991,13 @@ std::size_t gdn_input_proj_split_workspace_capacity_bytes(
          throw std::invalid_argument("gdn_input_proj workspace: invalid token interval");
      }
      if (qk_qtype == QType::T2_G128_FP16 || value_z_qtype == QType::T2_G128_FP16) {
@@ -457,7 +1586,7 @@ index 6c92fad..1e63f13 100644
      }
      const bool registered = qk_qtype == QType::Q4_G64_FP16 && qk_rows == 4096 &&
                              value_z_qtype == QType::Q5_G64_FP16 && value_z_rows == 12288 &&
-@@ -1290,15 +1299,17 @@ void gdn_input_proj_conv_snapshot(const Tensor& x, const Weight& qk_weight,
+@@ -1290,19 +1301,21 @@ void gdn_input_proj_conv_snapshot(const Tensor& x, const Weight& qk_weight,
                                    Tensor& value, Tensor& z, LinearPolicy policy, WorkspaceArena& ws,
                                    cudaStream_t stream) {
      validate_policy(policy);
@@ -479,9 +1608,15 @@ index 6c92fad..1e63f13 100644
      const ConvGeometry geometry        = require_snapshot_input(x, kHidden);
 -    const bool ternary                 = t2_two_parent(qk_weight, value_z_weight);
      require_rowsplit(qk_weight, ternary ? QType::T2_G128_FP16 : QType::Q4_G64_FP16,
-                      kQueryRows + kKeyRows, "qk weight");
+-                     kQueryRows + kKeyRows, "qk weight");
++                     kQueryRows + kKeyRows, "qk weight", kHidden);
      require_rowsplit(value_z_weight, ternary ? QType::T2_G128_FP16 : QType::Q5_G64_FP16,
-@@ -1363,15 +1374,17 @@ void gdn_input_proj_conv_record(const Tensor& x, const Weight& qk_weight,
+-                     kParentRows, "value/z weight");
++                     kParentRows, "value/z weight", kHidden);
+     require_snapshot_operands(conv_weight, conv_states, valid_columns, initial_state_slots,
+                               snapshot_base_slots, kChannels, geometry);
+     require_conv_tensor(query, kQueryRows, geometry.width, geometry.batch,
+@@ -1363,19 +1376,21 @@ void gdn_input_proj_conv_record(const Tensor& x, const Weight& qk_weight,
                                  LinearPolicy policy, WorkspaceArena& workspace,
                                  cudaStream_t stream) {
      validate_policy(policy);
@@ -503,20 +1638,249 @@ index 6c92fad..1e63f13 100644
      const ConvGeometry geometry        = require_record_input(x, kHidden);
 -    const bool ternary                 = t2_two_parent(qk_weight, value_z_weight);
      require_rowsplit(qk_weight, ternary ? QType::T2_G128_FP16 : QType::Q4_G64_FP16,
-                      kQueryRows + kKeyRows, "qk weight");
+-                     kQueryRows + kKeyRows, "qk weight");
++                     kQueryRows + kKeyRows, "qk weight", kHidden);
      require_rowsplit(value_z_weight, ternary ? QType::T2_G128_FP16 : QType::Q5_G64_FP16,
+-                     kParentRows, "value/z weight");
++                     kParentRows, "value/z weight", kHidden);
+     require_record_operands(conv_weight, conv_states, valid_columns, initial_state_slots, kChannels,
+                             geometry);
+     require_conv_tensor(conv_record, kChannels, geometry.width, geometry.batch,
+diff --git a/src/ops/wrapper/hadamard_transform.cpp b/src/ops/wrapper/hadamard_transform.cpp
+index 495c20a..a7abf34 100644
+--- a/src/ops/wrapper/hadamard_transform.cpp
++++ b/src/ops/wrapper/hadamard_transform.cpp
+@@ -2,6 +2,8 @@
+ #include "ninfer/ops/hadamard_transform.h"
+ #include "ninfer/ops/gated_rmsnorm.h"
+ #include "ninfer/ops/rmsnorm.h"
++#include "ninfer/ops/silu_mul.h"
++#include "ninfer/ops/sigmoid_mul.h"
+ 
+ #include "ops/launcher/hadamard_transform.h"
+ 
+@@ -14,7 +16,11 @@
+ namespace ninfer::ops {
+ namespace {
+ 
+-constexpr std::int32_t kBlock = 1024;
++void require_block(std::int32_t block_size) {
++    if (block_size != 512 && block_size != 1024) {
++        throw std::invalid_argument("hadamard block size must be 512 or 1024");
++    }
++}
+ 
+ std::int64_t checked_numel(const Tensor& tensor, const char* label) {
+     std::int64_t total = 1;
+@@ -37,7 +43,9 @@ bool aligned16(const void* pointer) {
+ 
+ } // namespace
+ 
+-void silu_mul_hadamard(const Tensor& plane, const Tensor& signs, Tensor& out, cudaStream_t stream) {
++void silu_mul_hadamard(const Tensor& plane, const Tensor& signs, Tensor& out, cudaStream_t stream,
++                       std::int32_t block_size) {
++    require_block(block_size);
+     if (plane.dtype != DType::BF16 || signs.dtype != DType::BF16 || out.dtype != DType::BF16) {
+         throw std::invalid_argument("silu_mul_hadamard: plane/signs/out must be BF16");
+     }
+@@ -45,8 +53,8 @@ void silu_mul_hadamard(const Tensor& plane, const Tensor& signs, Tensor& out, cu
+     (void)checked_numel(out, "out");
+     (void)checked_numel(signs, "signs");
+     const std::int32_t width = out.ne[0];
+-    if (width % kBlock != 0) {
+-        throw std::invalid_argument("silu_mul_hadamard: out.ne[0] must be a multiple of 1024");
++    if (width % block_size != 0) {
++        throw std::invalid_argument("silu_mul_hadamard: out.ne[0] must be a multiple of the rotation block");
+     }
+     if (plane.ne[0] != 2 * width || plane.ne[1] != out.ne[1] || plane.ne[2] != out.ne[2] ||
+         plane.ne[3] != out.ne[3]) {
+@@ -72,11 +80,19 @@ void silu_mul_hadamard(const Tensor& plane, const Tensor& signs, Tensor& out, cu
+     if (signs.data == plane.data || signs.data == out.data) {
+         throw std::invalid_argument("silu_mul_hadamard: signs must not alias plane or out");
+     }
+-    detail::silu_mul_hadamard_launch(plane, signs, out, stream);
++    if (block_size == 512) {
++        const Tensor gate = plane.slice(0, 0, width);
++        const Tensor up = plane.slice(0, width, width);
++        silu_mul(gate, up, out, stream);
++        hadamard_transform(out, signs, false, out, stream, block_size);
++    } else {
++        detail::silu_mul_hadamard_launch(plane, signs, out, stream);
++    }
+ }
+ 
+ void hadamard_transform(const Tensor& x, const Tensor& signs, bool inverse, Tensor& out,
+-                        cudaStream_t stream) {
++                        cudaStream_t stream, std::int32_t block_size) {
++    require_block(block_size);
+     if (x.dtype != DType::BF16 || signs.dtype != DType::BF16 || out.dtype != DType::BF16) {
+         throw std::invalid_argument("hadamard_transform: x/signs/out must be BF16");
+     }
+@@ -89,8 +105,8 @@ void hadamard_transform(const Tensor& x, const Tensor& signs, bool inverse, Tens
+         }
+     }
+     const std::int32_t k = x.ne[0];
+-    if (k % kBlock != 0) {
+-        throw std::invalid_argument("hadamard_transform: ne[0] must be a multiple of 1024");
++    if (k % block_size != 0) {
++        throw std::invalid_argument("hadamard_transform: ne[0] must be a multiple of the rotation block");
+     }
+     if (signs.ne[0] != k || signs.ne[1] != 1 || signs.ne[2] != 1 || signs.ne[3] != 1) {
+         throw std::invalid_argument("hadamard_transform: signs must be 1-D with ne[0] == x.ne[0]");
+@@ -107,7 +123,11 @@ void hadamard_transform(const Tensor& x, const Tensor& signs, bool inverse, Tens
+     if (!aligned16(x.data) || !aligned16(signs.data) || !aligned16(out.data)) {
+         throw std::invalid_argument("hadamard_transform: x/signs/out must be 16-byte aligned");
+     }
+-    detail::hadamard_transform_launch(x, signs, inverse, out, stream);
++    if (block_size == 512) {
++        detail::hadamard_transform_512_launch(x, signs, inverse, out, stream);
++    } else {
++        detail::hadamard_transform_launch(x, signs, inverse, out, stream);
++    }
+ }
+ 
+ namespace {
+@@ -116,17 +136,20 @@ bool aligned4(const void* pointer) { return (reinterpret_cast<std::uintptr_t>(po
+ 
+ // The fused producers take a 1-D BF16 sign vector whose width K is a multiple of 1024, and write
+ // a contiguous, 16-byte aligned BF16 output of whole K-wide columns.
+-std::int32_t require_rotation(const char* op, const Tensor& signs, const Tensor& out) {
++std::int32_t require_rotation(const char* op, const Tensor& signs, const Tensor& out,
++                              std::int32_t block_size) {
++    require_block(block_size);
+     if (signs.dtype != DType::BF16 || out.dtype != DType::BF16) {
+         throw std::invalid_argument(std::string(op) + ": signs/out must be BF16");
+     }
+     (void)checked_numel(signs, "signs");
+     const std::int64_t count = checked_numel(out, "out");
+     const std::int32_t width = signs.ne[0];
+-    if (signs.ne[1] != 1 || signs.ne[2] != 1 || signs.ne[3] != 1 || width % kBlock != 0 ||
++    if (signs.ne[1] != 1 || signs.ne[2] != 1 || signs.ne[3] != 1 ||
++        width % block_size != 0 ||
+         count % width != 0) {
+         throw std::invalid_argument(std::string(op) +
+-                                    ": signs must be 1-D, a multiple of 1024 wide, and divide out "
++                                    ": signs must be 1-D, a multiple of the rotation block wide, and divide out "
+                                     "into whole columns");
+     }
+     if (!signs.is_contiguous() || !out.is_contiguous() || signs.data == nullptr ||
+@@ -147,12 +170,13 @@ Tensor columns_view(const Tensor& tensor, std::int32_t width) {
+ } // namespace
+ 
+ void rmsnorm_hadamard(const Tensor& x, const Tensor& weight, float eps, bool unit_offset,
+-                      const Tensor& signs, Tensor& out, cudaStream_t stream) {
+-    const std::int32_t width = require_rotation("rmsnorm_hadamard", signs, out);
++                      const Tensor& signs, Tensor& out, cudaStream_t stream,
++                      std::int32_t block_size) {
++    const std::int32_t width = require_rotation("rmsnorm_hadamard", signs, out, block_size);
+     if (x.ne[0] != width) {
+         throw std::invalid_argument("rmsnorm_hadamard: x.ne[0] must equal the sign width");
+     }
+-    if (width == detail::kRmsnormHadamardFusedWidth && x.dtype == DType::BF16 &&
++    if (block_size == 1024 && width == detail::kRmsnormHadamardFusedWidth && x.dtype == DType::BF16 &&
+         weight.dtype == DType::BF16 && x.is_contiguous() && weight.is_contiguous() &&
+         x.numel() == out.numel() && weight.numel() == width && x.data != nullptr &&
+         weight.data != nullptr && aligned4(x.data) && aligned4(weight.data) && std::isfinite(eps) &&
+@@ -167,19 +191,20 @@ void rmsnorm_hadamard(const Tensor& x, const Tensor& weight, float eps, bool uni
+     }
+     rmsnorm(x, weight, eps, unit_offset, out, stream);
+     Tensor rows = columns_view(out, width);
+-    hadamard_transform(rows, signs, false, rows, stream);
++    hadamard_transform(rows, signs, false, rows, stream, block_size);
+ }
+ 
+ void gated_rmsnorm_hadamard(const Tensor& x, const Tensor& weight, const Tensor& z, float eps,
+-                            const Tensor& signs, Tensor& out, cudaStream_t stream) {
+-    const std::int32_t width = require_rotation("gated_rmsnorm_hadamard", signs, out);
++                            const Tensor& signs, Tensor& out, cudaStream_t stream,
++                            std::int32_t block_size) {
++    const std::int32_t width = require_rotation("gated_rmsnorm_hadamard", signs, out, block_size);
+     const std::int32_t d     = x.ne[0];
+     if (d <= 0 || width % d != 0) {
+         throw std::invalid_argument(
+             "gated_rmsnorm_hadamard: the sign width must be a whole number of x rows");
+     }
+     const std::int32_t heads = width / d;
+-    if (d == detail::kGatedRmsnormHadamardFusedHeadDim &&
++    if (block_size == 1024 && d == detail::kGatedRmsnormHadamardFusedHeadDim &&
+         heads % detail::kGatedRmsnormHadamardFusedRows == 0 && x.dtype == DType::BF16 &&
+         z.dtype == DType::BF16 && weight.dtype == DType::BF16 && x.is_contiguous() &&
+         z.is_contiguous() && weight.is_contiguous() && x.numel() == out.numel() &&
+@@ -199,12 +224,12 @@ void gated_rmsnorm_hadamard(const Tensor& x, const Tensor& weight, const Tensor&
+     Tensor rows = out.view({x.ne[0], x.ne[1], x.ne[2], x.ne[3]});
+     gated_rmsnorm(x, weight, z, GateActivation::Silu, eps, rows, stream);
+     Tensor columns = columns_view(out, width);
+-    hadamard_transform(columns, signs, false, columns, stream);
++    hadamard_transform(columns, signs, false, columns, stream, block_size);
+ }
+ 
+ void sigmoid_mul_hadamard(const Tensor& gate, const Tensor& x, const Tensor& signs, Tensor& out,
+-                          cudaStream_t stream) {
+-    (void)require_rotation("sigmoid_mul_hadamard", signs, out);
++                          cudaStream_t stream, std::int32_t block_size) {
++    (void)require_rotation("sigmoid_mul_hadamard", signs, out, block_size);
+     if (gate.dtype != DType::BF16 || x.dtype != DType::BF16) {
+         throw std::invalid_argument("sigmoid_mul_hadamard: gate/x must be BF16");
+     }
+@@ -226,12 +251,26 @@ void sigmoid_mul_hadamard(const Tensor& gate, const Tensor& x, const Tensor& sig
+         x_begin < out_begin + out.bytes()) {
+         throw std::invalid_argument("sigmoid_mul_hadamard: out must alias x exactly or not at all");
+     }
+-    detail::sigmoid_mul_hadamard_launch(gate, x, signs, out, stream);
++    if (block_size == 512) {
++        if (out.data != x.data) {
++            const auto status = cudaMemcpyAsync(out.data, x.data, x.bytes(),
++                                                cudaMemcpyDeviceToDevice, stream);
++            if (status != cudaSuccess) {
++                throw std::runtime_error(std::string("sigmoid_mul_hadamard copy: ") +
++                                         cudaGetErrorString(status));
++            }
++        }
++        Tensor shaped_out = out.view({x.ne[0], x.ne[1], x.ne[2], x.ne[3]});
++        sigmoid_mul(gate, shaped_out, stream);
++        hadamard_transform(out, signs, false, out, stream, block_size);
++    } else {
++        detail::sigmoid_mul_hadamard_launch(gate, x, signs, out, stream);
++    }
+ }
+ 
+ void embedding_rotated(const Tensor& ids, const Weight& table, const Tensor& signs, Tensor& out,
+-                       cudaStream_t stream) {
+-    const std::int32_t width = require_rotation("embedding_rotated", signs, out);
++                       cudaStream_t stream, std::int32_t block_size) {
++    const std::int32_t width = require_rotation("embedding_rotated", signs, out, block_size);
+     if (ids.dtype != DType::I32 || !ids.is_contiguous() || ids.data == nullptr || ids.ne[1] != 1 ||
+         ids.ne[2] != 1 || ids.ne[3] != 1) {
+         throw std::invalid_argument("embedding_rotated: ids must be contiguous I32 [T]");
+@@ -246,7 +285,11 @@ void embedding_rotated(const Tensor& ids, const Weight& table, const Tensor& sig
+             "embedding_rotated: table must be a row-split t2_g128_fp16 [vocab, K] weight");
+     }
+     if (ids.ne[0] == 0) { return; }
+-    detail::embedding_rotated_t2_launch(ids, table, signs, out, stream);
++    if (block_size == 512) {
++        detail::embedding_rotated_t2_512_launch(ids, table, signs, out, stream);
++    } else {
++        detail::embedding_rotated_t2_launch(ids, table, signs, out, stream);
++    }
+ }
+ 
+ } // namespace ninfer::ops
 diff --git a/tests/ops/linear/test_t2_a16.cpp b/tests/ops/linear/test_t2_a16.cpp
-index 606df43..c050418 100644
+index 606df43..7533063 100644
 --- a/tests/ops/linear/test_t2_a16.cpp
 +++ b/tests/ops/linear/test_t2_a16.cpp
-@@ -38,6 +38,23 @@ int t2_a16_conformance() {
-     failures += run_shape("T2_A16", ActivationCompute::A16, make_t2_g128_fp16_weight,
-                           {248320, 5120, 213U, Comparison::SampledRows, false, kDecode});
+@@ -41,16 +41,49 @@ int t2_a16_conformance() {
+     return failures;
+ }
  
-+    // Bonsai 2 2B actual v3 dimensions, including both a fused source parent
-+    // and the per-row input width of its down projection. Exercise decode,
-+    // 16-token small prefill, and the 33-column MMA transition.
++// Bonsai 2B actual v3 dimensions: a focused numerical suite, separate from
++// the expensive 27B vocabulary and prefill matrices in the full conformance.
++int t2_a16_bonsai2b() {
++    int failures = 0;
 +    constexpr std::array kSmall{a16(1), a16(16), a16(33)};
++    failures += run_shape("T2_A16_Bonsai2B", ActivationCompute::A16,
++                          make_t2_g128_fp16_weight,
++                          {512, 2048, 223U, Comparison::Full, false, kSmall});
 +    failures += run_shape("T2_A16_Bonsai2B", ActivationCompute::A16,
 +                          make_t2_g128_fp16_weight,
 +                          {2048, 2048, 215U, Comparison::Full, false, kSmall});
@@ -530,9 +1894,97 @@ index 606df43..c050418 100644
 +                          make_t2_g128_fp16_weight,
 +                          {2048, 6144, 221U, Comparison::Full, false, kSmall});
 +
-     return failures;
++    // The real 2B output head has 248,320 vocabulary rows. Check its special
++    // large-N decode grid against independently unpacked CPU reference rows.
++    constexpr std::array kHeadDecode{a16(1)};
++    failures += run_shape("T2_A16_Bonsai2B_Head", ActivationCompute::A16,
++                          make_t2_g128_fp16_weight,
++                          {248320, 2048, 227U, Comparison::SampledRows, false, kHeadDecode});
++
++    return failures;
++}
++
+ } // namespace
+ 
+-int main() {
++int main(int argc, char** argv) {
+     if (!ninfer::test::linear::cuda_available()) {
+         std::cout << "SKIP: no usable CUDA device\n";
+         return 77;
+     }
+ 
+     try {
+-        const int failures = t2_a16_conformance();
++        const int failures = argc == 2 && std::string_view(argv[1]) == "--bonsai2b"
++                                 ? t2_a16_bonsai2b()
++                                 : t2_a16_conformance();
+         std::cout << (failures == 0 ? "OK" : "FAIL") << " T2_A16 Linear\n";
+         return failures == 0 ? 0 : 1;
+     } catch (const std::exception& error) {
+diff --git a/tests/ops/softmax_attention/causal_cache.cpp b/tests/ops/softmax_attention/causal_cache.cpp
+index 97b3fc6..9ef8e05 100644
+--- a/tests/ops/softmax_attention/causal_cache.cpp
++++ b/tests/ops/softmax_attention/causal_cache.cpp
+@@ -4643,6 +4643,28 @@ int run_softmax_attention_dflash2_tests() {
+     return failures == 0 ? 0 : 1;
  }
  
++int run_softmax_attention_bonsai2b_tests() {
++    if (cuda_unavailable()) {
++        std::cout << "SKIP: no usable CUDA device\n";
++        return 77;
++    }
++    // The 8-query/2-KV head shape has no specialized small-T kernel. Validate
++    // that its prompt-based decode and prefill use the correct GQA head map,
++    // cache append and cached continuation against the FP64 reference.
++    constexpr Geometry bonsai2b{"d256-h8-kv2", 8, 2};
++    int failures = 0;
++    for (const auto storage : {KvCacheStorage::BFloat16, KvCacheStorage::Int8Group64}) {
++        failures += run_a1_case(bonsai2b, storage, {1, 63, 64, 8021u},
++                                MappingPattern::Identity);
++        failures += run_a1_case(bonsai2b, storage, {17, 31, 48, 8022u},
++                                MappingPattern::Fragmented);
++        failures += run_a3_case(bonsai2b, storage, {1, 127, 128, 8023u},
++                                MappingPattern::Offset);
++    }
++    std::cout << (failures == 0 ? "PASS" : "FAIL") << " causal_softmax_attention Bonsai2B\n";
++    return failures == 0 ? 0 : 1;
++}
++
+ int run_softmax_attention_causal_cache_tests() {
+     if (cuda_unavailable()) {
+         std::cout << "SKIP: no usable CUDA device\n";
+diff --git a/tests/ops/softmax_attention/main.cpp b/tests/ops/softmax_attention/main.cpp
+index 5370f37..830ef0d 100644
+--- a/tests/ops/softmax_attention/main.cpp
++++ b/tests/ops/softmax_attention/main.cpp
+@@ -4,6 +4,7 @@
+ #include <string_view>
+ 
+ int run_softmax_attention_causal_cache_tests();
++int run_softmax_attention_bonsai2b_tests();
+ int run_softmax_attention_dflash2_tests();
+ int run_softmax_attention_int8_prompt_tests();
+ int run_softmax_attention_prompt_split_tests();
+@@ -42,6 +43,8 @@ int run_guarded(const char* what, int (*suite)()) {
+ } // namespace
+ 
+ int main(int argc, char** argv) {
++    if (argc == 2 && std::string_view(argv[1]) == "--bonsai2b-only")
++        return run_guarded("Bonsai2B d256-h8-kv2", run_softmax_attention_bonsai2b_tests);
+     if (argc == 2 && std::string_view(argv[1]) == "--quantized-depth-only")
+         return run_guarded("quantized depth", run_softmax_attention_quantized_depth_tests);
+     if (argc == 2 && std::string_view(argv[1]) == "--wide-only")
+@@ -93,7 +96,8 @@ int main(int argc, char** argv) {
+             << "usage: ninfer_softmax_attention_test "
+                "[--dflash2-only|--nvfp4-only|--k8v4-only|--rk4v4-e8-only|--rk2v4-e8-only|"
+                "--int8-prompt-only|--prompt-splits-only|--small-t-pipelined-only|--fp8-prompt-only|"
+-               "--pack-gqa-only|--wide-only|--parallel-tiles-only|--quantized-depth-only]\n";
++               "--pack-gqa-only|--wide-only|--parallel-tiles-only|--quantized-depth-only|"
++               "--bonsai2b-only]\n";
+         return 2;
+     }
+     const int causal = run_guarded("causal cache", run_softmax_attention_causal_cache_tests);
 diff --git a/tests/ops/test_attn_input_proj.cpp b/tests/ops/test_attn_input_proj.cpp
 index 13e9eb7..e117b01 100644
 --- a/tests/ops/test_attn_input_proj.cpp
@@ -619,6 +2071,34 @@ index 13e9eb7..e117b01 100644
      if (inputs_only) { return run_weight_inputs() == 0 ? 0 : 1; }
      if (!dflash2_only) {
          failures += run_q4_q5();
+diff --git a/tests/ops/test_causal_conv1d_silu.cpp b/tests/ops/test_causal_conv1d_silu.cpp
+index a98be26..691a53a 100644
+--- a/tests/ops/test_causal_conv1d_silu.cpp
++++ b/tests/ops/test_causal_conv1d_silu.cpp
+@@ -695,12 +695,22 @@ int batched_snapshot_case(std::int32_t C, std::int32_t width,
+ 
+ } // namespace
+ 
+-int main() {
++int main(int argc, char** argv) {
+     if (cuda_unavailable()) {
+         std::cout << "SKIP: no usable CUDA device\n";
+         return 77;
+     }
+ 
++    if (argc == 2 && std::string(argv[1]) == "--bonsai2b") {
++        int failures = 0;
++        for (std::int32_t tokens : {1, 16, 17, 65}) {
++            failures += split_case(6144, 2048, 2048, 2048, tokens, false, false,
++                                   8200U + static_cast<std::uint32_t>(tokens));
++        }
++        std::cout << (failures == 0 ? "OK" : "FAIL") << " causal_conv1d_silu Bonsai2B\n";
++        return failures == 0 ? 0 : 1;
++    }
++
+     int failures = 0;
+ 
+     // The 27B geometry exercises every ordinary positive-T route boundary and one interior point
 diff --git a/tests/ops/test_gdn_gating_proj.cpp b/tests/ops/test_gdn_gating_proj.cpp
 index 8241e79..86d434a 100644
 --- a/tests/ops/test_gdn_gating_proj.cpp
@@ -743,3 +2223,227 @@ index e81aad8..29ba379 100644
      int failures = 0;
      failures += run_q4_q5();
      failures += run_t2();
+diff --git a/tests/ops/test_hadamard_transform.cpp b/tests/ops/test_hadamard_transform.cpp
+index c2b5a66..375e784 100644
+--- a/tests/ops/test_hadamard_transform.cpp
++++ b/tests/ops/test_hadamard_transform.cpp
+@@ -8,9 +8,12 @@
+ 
+ #include <bit>
+ #include <cmath>
++#include <cstdlib>
+ #include <cstdint>
+ #include <iostream>
++#include <stdexcept>
+ #include <string>
++#include <string_view>
+ #include <vector>
+ 
+ using namespace ninfer;
+@@ -18,7 +21,8 @@ using namespace ninfer::test;
+ 
+ namespace {
+ 
+-constexpr int kBlock = 1024;
++// Independent naive CPU oracle serves both model metadata-selected rotation blocks.
++int kBlock = 1024;
+ 
+ // The transform is orthonormal, so FP32 butterflies add ~1e-6 relative error and the BF16 output
+ // rounding dominates: the same reduction criterion the norms use.
+@@ -47,7 +51,7 @@ std::vector<double> hadamard_oracle(const std::vector<float>& input,
+                 }
+                 const double sign_after =
+                     inverse ? static_cast<double>(signs[block * kBlock + i]) : 1.0;
+-                output[base + i] = sum * (1.0 / 32.0) * sign_after;
++                output[base + i] = sum * (1.0 / std::sqrt(double(kBlock))) * sign_after;
+             }
+         }
+     }
+@@ -80,7 +84,7 @@ std::vector<double> hadamard_butterfly_oracle(const std::vector<float>& input,
+                 }
+             }
+             for (int i = 0; i < kBlock; ++i) {
+-                output[base + i] = work[i] * (1.0 / 32.0) *
++                output[base + i] = work[i] * (1.0 / std::sqrt(double(kBlock))) *
+                                    (inverse ? static_cast<double>(signs[block * kBlock + i]) : 1.0);
+             }
+         }
+@@ -133,7 +137,7 @@ int run_case(const std::string& label, std::int32_t k, std::int64_t columns, boo
+     DecodeGraphDefinition definition;
+     DecodeGraphExecutable graph;
+     const auto launch = [&] {
+-        ops::hadamard_transform(x, sign_tensor, inverse, out, device.stream);
++        ops::hadamard_transform(x, sign_tensor, inverse, out, device.stream, kBlock);
+     };
+     int failures = 0;
+     for (int phase = 0; phase < (replay ? 2 : 1); ++phase) {
+@@ -191,8 +195,8 @@ int run_round_trip(std::int32_t k, std::int64_t columns, std::uint32_t seed) {
+     Tensor y(rotated.p, DType::BF16, {k, static_cast<std::int32_t>(columns)});
+     Tensor z(restored.p, DType::BF16, {k, static_cast<std::int32_t>(columns)});
+     DeviceContext device;
+-    ops::hadamard_transform(x, sign_tensor, false, y, device.stream);
+-    ops::hadamard_transform(y, sign_tensor, true, z, device.stream);
++    ops::hadamard_transform(x, sign_tensor, false, y, device.stream, kBlock);
++    ops::hadamard_transform(y, sign_tensor, true, z, device.stream, kBlock);
+     cuda_synchronize(device.stream);
+     std::vector<double> reference(count);
+     for (std::size_t i = 0; i < count; ++i) reference[i] = static_cast<double>(input[i]);
+@@ -237,7 +241,7 @@ int run_silu_mul_case(std::int32_t width, std::int64_t columns, bool replay, std
+     DecodeGraphDefinition definition;
+     DecodeGraphExecutable graph;
+     const auto launch = [&] {
+-        ops::silu_mul_hadamard(plane_tensor, sign_tensor, out, device.stream);
++        ops::silu_mul_hadamard(plane_tensor, sign_tensor, out, device.stream, kBlock);
+     };
+     if (replay) {
+         definition.capture(device.stream, launch);
+@@ -294,9 +298,9 @@ int run_rmsnorm_hadamard_case(std::int32_t width, std::int64_t columns, bool uni
+         tc(composed.p, DType::BF16, {width, t}), tf(fused.data(), DType::BF16, {width, t});
+     DeviceContext device;
+     ops::rmsnorm(tx, tw, 1.0e-6F, unit_offset, tn, device.stream);
+-    ops::hadamard_transform(tn, ts, false, tc, device.stream);
++    ops::hadamard_transform(tn, ts, false, tc, device.stream, kBlock);
+     const auto launch = [&] {
+-        ops::rmsnorm_hadamard(tx, tw, 1.0e-6F, unit_offset, ts, tf, device.stream);
++        ops::rmsnorm_hadamard(tx, tw, 1.0e-6F, unit_offset, ts, tf, device.stream, kBlock);
+     };
+     DecodeGraphDefinition definition;
+     DecodeGraphExecutable graph;
+@@ -346,8 +350,8 @@ int run_gated_rmsnorm_hadamard_case(std::int32_t heads, std::int64_t columns, st
+     DeviceContext device;
+     ops::gated_rmsnorm(tx, tw, tz, ops::GateActivation::Silu, 1.0e-6F, tn, device.stream);
+     Tensor tn_columns = tn.view({width, t});
+-    ops::hadamard_transform(tn_columns, ts, false, tc, device.stream);
+-    ops::gated_rmsnorm_hadamard(tx, tw, tz, 1.0e-6F, ts, tf, device.stream);
++    ops::hadamard_transform(tn_columns, ts, false, tc, device.stream, kBlock);
++    ops::gated_rmsnorm_hadamard(tx, tw, tz, 1.0e-6F, ts, tf, device.stream, kBlock);
+     cuda_synchronize(device.stream);
+     const std::string label =
+         "gated_rmsnorm_hadamard heads=" + std::to_string(heads) + " T=" + std::to_string(columns);
+@@ -382,8 +386,8 @@ int run_sigmoid_mul_hadamard_case(std::int32_t width, std::int64_t columns, bool
+         tf(in_place ? device_x.p : fused.data(), DType::BF16, {width, t});
+     DeviceContext device;
+     ops::sigmoid_mul(tg, tm, device.stream);
+-    ops::hadamard_transform(tm, ts, false, tc, device.stream);
+-    ops::sigmoid_mul_hadamard(tg, tx, ts, tf, device.stream);
++    ops::hadamard_transform(tm, ts, false, tc, device.stream, kBlock);
++    ops::sigmoid_mul_hadamard(tg, tx, ts, tf, device.stream, kBlock);
+     cuda_synchronize(device.stream);
+     const std::string label = "sigmoid_mul_hadamard K=" + std::to_string(width) +
+                               " T=" + std::to_string(columns) + (in_place ? " in place" : "");
+@@ -395,14 +399,114 @@ int run_sigmoid_mul_hadamard_case(std::int32_t width, std::int64_t columns, bool
+     return failures;
+ }
+ 
++// A stored T2 row is rotated: decode four signed two-bit codes per byte, apply one
++// FP16 scale per 128 columns and inverse Walsh with sign-after.  This oracle does
++// not reuse the GPU producer or transform implementation.
++int run_embedding_rotated_t2_512(std::int32_t width) {
++    constexpr std::int32_t vocab = 4;
++    const std::vector<std::int32_t> ids = {3, 0, 2};
++    std::vector<std::uint8_t> codes(vocab * width / 4, 0);
++    std::vector<std::uint16_t> scales(vocab * width / 128, 0x3800u); // FP16: 0.5
++    std::vector<float> decoded(width * ids.size());
++    for (std::int32_t row = 0; row < vocab; ++row) {
++        for (std::int32_t j = 0; j < width; ++j) {
++            const int raw = (j * 7 + row * 5) % 3;
++            const std::uint8_t two_bit = raw == 2 ? 3 : static_cast<std::uint8_t>(raw);
++            codes[static_cast<std::size_t>(row) * width / 4 + j / 4] |=
++                static_cast<std::uint8_t>(two_bit << (2 * (j % 4)));
++        }
++    }
++    for (std::size_t t = 0; t < ids.size(); ++t) {
++        for (std::int32_t j = 0; j < width; ++j) {
++            const std::uint8_t byte = codes[static_cast<std::size_t>(ids[t]) * width / 4 + j / 4];
++            const int raw = (byte >> (2 * (j % 4))) & 3;
++            decoded[t * width + j] = (raw == 3 ? -0.5F : raw == 1 ? 0.5F : 0.0F);
++        }
++    }
++    const auto signs = random_signs(width, 13221U);
++    auto d_codes = to_device(codes);
++    auto d_scales = to_device(scales);
++    auto d_ids = to_device(ids);
++    auto d_signs = to_device_bf16(signs);
++    GuardedDeviceBuffer output(width * ids.size() * sizeof(std::uint16_t));
++    output.fill(0xff);
++    Weight table{};
++    table.qtype = QType::T2_G128_FP16;
++    table.layout = QuantLayout::RowSplit;
++    table.scale_dtype = DType::FP16;
++    table.qdata = d_codes.p;
++    table.scales = d_scales.p;
++    table.k = width;
++    table.n = vocab;
++    Tensor token_tensor(d_ids.p, DType::I32, {static_cast<int>(ids.size())});
++    Tensor sign_tensor(d_signs.p, DType::BF16, {width});
++    Tensor dst(output.data(), DType::BF16, {width, static_cast<int>(ids.size())});
++    DeviceContext device;
++    ops::embedding_rotated(token_tensor, table, sign_tensor, dst, device.stream, 512);
++    cuda_synchronize(device.stream);
++    const auto expected = hadamard_butterfly_oracle(decoded, signs, width, ids.size(), true);
++    int failures = verify_reduction("T2 rotated embedding 512", from_device_bf16(output.data(),
++                                    decoded.size()), expected, hadamard_bf16_criterion());
++    failures += output.verify_guards("T2 rotated embedding guards");
++    return failures;
++}
++
++int run_invalid_block_rejection() {
++    const auto signs = random_signs(512, 20118U);
++    DeviceBuffer input = to_device_bf16(std::vector<float>(512, 1.0F));
++    DeviceBuffer s = to_device_bf16(signs);
++    DeviceBuffer o(512 * sizeof(std::uint16_t));
++    Tensor x(input.p, DType::BF16, {512}), sign(s.p, DType::BF16, {512});
++    Tensor out(o.p, DType::BF16, {512});
++    DeviceContext device;
++    try {
++        ops::hadamard_transform(x, sign, false, out, device.stream, 256);
++    } catch (const std::invalid_argument&) {
++        return 0;
++    }
++    std::cerr << "unsupported 256-point transform accepted\n";
++    return 1;
++}
++
+ } // namespace
+ 
+-int main() {
++int main(int argc, char** argv) {
+     if (cuda_unavailable()) {
+         std::cout << "SKIP: no usable CUDA device\n";
+         return 77;
+     }
+ 
++    if (argc == 2 && std::string_view(argv[1]) == "--block512") {
++        kBlock = 512;
++        int failures = verify_oracles_agree();
++        for (std::int32_t k : {512, 2048, 6144}) {
++            failures += run_case("hadamard512 forward", k, 1, false, false, false, 8100U + k);
++            failures += run_case("hadamard512 inverse", k, 9, true, false, true, 8200U + k);
++            failures += run_round_trip(k, 3, 8300U + k);
++        }
++        failures += run_case("hadamard512 in-place replay", 2048, 2, false, true,
++                             true, 8309U);
++        failures += run_silu_mul_case(6144, 3, false, 8400U);
++        failures += run_rmsnorm_hadamard_case(2048, 2, true, false, 8401U);
++        failures += run_gated_rmsnorm_hadamard_case(16, 3, 8402U);
++        failures += run_sigmoid_mul_hadamard_case(2048, 2, false, 8403U);
++        failures += run_embedding_rotated_t2_512(512);
++        failures += run_embedding_rotated_t2_512(2048);
++        failures += run_invalid_block_rejection();
++        std::cout << (failures ? "FAIL" : "OK") << " hadamard_transform 512\n";
++        return failures ? 1 : 0;
++    }
++    if (argc == 2 && std::string_view(argv[1]) == "--block1024-smoke") {
++        int failures = verify_oracles_agree();
++        failures += run_case("hadamard 1024 forward", 1024, 3, false, false, false, 9100U);
++        failures += run_case("hadamard 1024 inverse", 5120, 2, true, true, false, 9101U);
++        failures += run_round_trip(6144, 2, 9102U);
++        failures += run_silu_mul_case(1024, 3, false, 9103U);
++        failures += run_invalid_block_rejection();
++        std::cout << (failures ? "FAIL" : "OK") << " hadamard_transform 1024 smoke\n";
++        return failures ? 1 : 0;
++    }
++    if (argc != 1) { std::cerr << "usage: test_hadamard_transform [--block512|--block1024-smoke]\n"; return 2; }
+     int failures                 = verify_oracles_agree();
+     const std::int32_t widths[]  = {1024, 5120, 6144, 17408};
+     const std::int64_t columns[] = {1, 2, 7, 8, 15, 16, 31, 32, 64, 128, 1024};

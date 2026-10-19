@@ -1,59 +1,103 @@
-# Companion Bonsai 2B v3 small-shape patch (experimental)
+# Companion Bonsai 2B v3 exact-shape and 512-point Hadamard patch
 
-This is an in-progress patch for the **separate** `ninfer-all` Companion repository,
-recorded here without committing to or pushing that upstream fork. It is not a claim
-of successful end-to-end Bonsai 2B generation.
+This patch applies to the **separate** `ninfer-all` Companion upstream fork at
+baseline `b2913b6`. It is stored in this main Ada repository; the Companion
+working tree has deliberately **not** been committed or pushed. The complete
+patch is `tools/companion/bonsai2b-smallshape-experimental.patch` (2,449 lines,
+44 changed files at this checkpoint). It includes `include/ninfer/ops`,
+`src/models/qwen3_5`, `src/ops` and `tests/ops` — **not** just the original
+small-geometry GPU changes.
 
-## Baseline and verified input
+Apply to a clean matching checkout using `git apply --check <patch>` followed
+by `git apply <patch>`. The existing dirty Companion checkout already has these
+changes; `git apply --reverse --check <patch>` PASSED on 2026-10-20. Do not
+apply a second time there.
 
-- Companion baseline: `b2913b6`, branch `master`.
-- Model: `/home/ran/ninfer-work/real-models/bonsai2_2b_v3.ninfer`.
-- Whole-file SHA-256: `0601756954b5fc24e9056b56e80bad6f40f8db9985e47ddf421eb833e76d7b63`.
-- Original Companion executable loaded 608.4 MiB of model weights, but rejected
-  the frontend with `text/layers/0: input projection: unsupported logical projection geometry`.
+## Verified model and discovered root cause
 
-Apply the patch to a **clean checkout of that Companion baseline** with
-`git apply --check <path>/tools/companion/bonsai2b-smallshape-experimental.patch`,
-then `git apply` with the same patch. Do not apply it twice to the already-modified
-Companion working tree. The patch currently matches the existing dirty working tree
-(`git apply --reverse --check` passed).
+- Input: `/home/ran/ninfer-work/real-models/bonsai2_2b_v3.ninfer`;
+  650,907,136 bytes; downloader verified whole-file SHA-256
+  `0601756954b5fc24e9056b56e80bad6f40f8db9985e47ddf421eb833e76d7b63`.
+- v3 metadata explicitly contains `hadamard_block_size = 512`.
+- Previously: real load (608.4 MiB), warmup and HTTP 200, but incoherent
+  multilingual output under both BF16/INT8 KV. The Companion runtime was
+  applying 1024-point rotations to the 512-point converted checkpoint.
+- Fixed: separate real CUDA 512-point butterfly/embedding code paths,
+  normalization `1/sqrt(512)`, explicit per-model block-size from v3 metadata
+  through Qwen3.5 Load/Bindings/Runtime and op APIs. 1024-point kernels remain
+  separately available and are still the default when metadata does not
+  specify otherwise. No process-global rotation environment variable.
+- The explicit 512 route covers token embeddings, input projections,
+  attention, GDN control/conv/output, RMSNorm/gated RMSNorm/Sigmoid, FFN
+  gate/up/down and output head. Where 1024 fused producers cannot represent
+  512, operations use exact 512-composition fallbacks.
+- Added Bonsai2B geometries for ternary T2 linear, GDN 16/2048 gates,
+  6144-channel conv, attention 8 Q/2 KV heads with head_dim 256 and
+  query/gate/key/value projections. Existing 27B geometries remain supported.
 
-## Implemented experimental routes
+## Focused numerical tests — PASS
 
-- Weight binding accepts 2048-hidden Bonsai2B GDN controls and input parents.
-- T2 rowsplit linear adds small widths including the 2048-input/512-output case.
-- GDN query/key/value/z T2 split, 6144-channel projected convolution, and
-  16-head BF16 gating use exact Bonsai2B geometry (not 27B shape assertions).
-- Full-attention T2 split supports query/gate 2048, key/value 512, input 2048.
-- Added oracle-backed Bonsai2B modes to `test_t2_a16`, `test_gdn_input_proj`,
-  `test_gdn_gating_proj`, and `test_attn_input_proj`.
+Independent CUDA `sm_89` `nvcc` compile: 512 Hadamard launcher and T2
+embedding PASS; C++ syntax checks for all seven changed Qwen3.5 model
+translation units PASS. For real model linking, the 76 Qwen3.5 translation
+units from loading/runtime were separately recompiled into **private** archives
+without writing to Ninja's build directory, and the ad-hoc `ninfer-serve`
+executable successfully linked. This is a diagnostic executable, **not** the
+formal `build-ada-companion/apps/ninfer-serve` build.
 
-## Validation checkpoint
+`tmp-nvcc/bonsai2b-adhoc/test-hadamard-h512 --block512` PASS, using CPU
+reference/oracles for forward/inverse Walsh, round trips, in-place operation,
+T2 rotated embedding (512 and 2048 widths), SwiGLU, RMSNorm, gated RMSNorm,
+sigmoid and invalid 256-point block-size rejection.
 
-- `git diff --check` and reverse-apply check passed.
-- Host C++ `g++ -fsyntax-only` checks passed for the changed wrappers,
-  routing/planner sources, and dedicated projection tests.
-- Independent `nvcc -arch=sm_89 -c` completed for the modified GDN gating and
-  GDN projected-convolution CUDA translation units.
-- The existing `build-ada-companion` Ninja job is rebuilding hundreds of CUDA
-  objects due to recovery of its state file. **Do not start another concurrent
-  Ninja build into the same directory.** At this checkpoint, the new application
-  binary and GPU oracle tests have not yet been run against these changes.
+`tmp-nvcc/bonsai2b-adhoc/test-hadamard-h512 --block1024-smoke` PASS:
+original 1024 path including 5120/6144 widths and fused producer comparison.
 
-When that build is complete, execute focused tests from the Companion checkout
-using the generated test executables (target names vary by build configuration):
-`--bonsai2b` on GDN input, GDN gating and attention input tests; run the
-small-shape T2 numerical tests; then start the actual v3 model with:
+Other pre-existing focused GPU tests passed before the 512 change:
+`test-t2-a16 --bonsai2b`, `test-gdn-input --bonsai2b`, `test-gdn-gating
+--bonsai2b`, `test-attn-input --bonsai2b`, `test-causal-conv --bonsai2b`,
+`test-softmax`. Their outputs and GPU oracle executables remain in
+`tmp-nvcc/bonsai2b-adhoc/` and were not pointlessly rerun here.
 
-```sh
-build-ada-companion/apps/ninfer-serve \
-  /home/ran/ninfer-work/real-models/bonsai2_2b_v3.ninfer \
-  --host 127.0.0.1 --port 18098 \
-  --max-context 1024 --kv-capacity 1024 \
-  --host-kv-mib 256 --max-concurrency 1 \
-  --default-max-tokens 32 --kv-dtype int8 --greedy \
-  --no-thinking --no-cuda-graph --log-level info
-```
+## Real Bonsai2B generation — PASSED with private executable
 
-Continue from the **next actual** loader/frontend/operator or numerical failure;
-the patch is a checkpoint, not a finished Companion backend.
+Executable: `tmp-nvcc/bonsai2b-adhoc/ninfer-serve-512-metadata` using full,
+SHA-256-verified Bonsai 2B v3 weights, GPU RTX 4070 Ti SUPER sm_89,
+`--max-context 1024 --kv-capacity 1024 --host-kv-mib 256 --greedy
+--no-thinking --no-cuda-graph`.
+
+BF16 KV HTTP Chat Completions (3/3 HTTP200, finish `stop`):
+
+| Prompt | Exact model response |
+|---|---|
+| Say hello. | Hello! How can I help you today? |
+| What is 1+1? Answer only the number. | 2 |
+| Respond with only green. | Green. |
+
+INT8 KV HTTP Chat Completions (5/5 HTTP200, finish `stop`):
+
+| Prompt | Exact model response |
+|---|---|
+| Say hello. | Hello! How can I help you today? |
+| What is 1+1? Answer only the number. | 2 |
+| What is the capital of France? Reply with the city name. | Paris |
+| I said: apple. Repeat only the fruit. | apple |
+| Three messages: remember 37, answer OK, then recall | 37 |
+
+Logs: `tmp-nvcc/bonsai2b-adhoc/real-512-metadata-{bf16,int8}.log`.
+Both test services were gracefully shut down. The original broken output
+is preserved in previous `real-startup-fixed.d.log` and
+`real-bf16-smoke.log` for comparison.
+
+## Remaining acceptance and isolation
+
+The already-running `build-ada-companion` Ninja PID 662841 must complete its
+own build before executing a formal rebuilt `apps/ninfer-serve`. **Do not run
+another Ninja targeting that directory concurrently, stop its process, or
+overwrite its `.o`/libraries.** Retest the formal binary once up to date;
+substantial quality/performance/context tests and other Companion models are
+not implied by these focused semantic requests.
+
+This checkpoint patch must not be confused with full v3 Vision inference,
+27B Groupwise/NVFP4 serving, TP2 native multi-GPU execution, or Strata ×
+ActKV, which are separate remaining features in the main task.
