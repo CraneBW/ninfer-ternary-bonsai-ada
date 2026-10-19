@@ -64,7 +64,53 @@ Nvfp4WeightGeometry validate_nvfp4_weight(const Weight& weight, const char* oper
     }
 
     const auto* payload = static_cast<const std::byte*>(weight.payload);
-    if (weight.qdata != payload || weight.scales != payload + geometry.scale_plane_offset) {
+    if (weight.qdata == payload && weight.scales == payload + geometry.scale_plane_offset) {
+        return geometry;
+    }
+    // V3 may bind an M128-aligned logical row interval from a shared physical
+    // NVFP4 parent. Its code and scale intervals have different base offsets:
+    // [all parent codes][all parent scales][parent divisor]. Validate the
+    // *entire* parent geometry and slice coordinates, not only alignment,
+    // before allowing the kernels to use the two independently sliced planes.
+    const std::uint64_t total_bytes = weight.payload_bytes;
+    const std::uint64_t divisor_bytes = sizeof(float);
+    const std::uint64_t divisor_denominator = checked_mul(9, static_cast<std::uint64_t>(weight.k), operation);
+    if (total_bytes < divisor_bytes ||
+        checked_mul(total_bytes - divisor_bytes, 16, operation) % divisor_denominator != 0) {
+        throw std::invalid_argument(std::string(operation) + ": invalid NVFP4 plane geometry");
+    }
+    const std::uint64_t parent_rows =
+        checked_mul(total_bytes - divisor_bytes, 16, operation) / divisor_denominator;
+    if (parent_rows < static_cast<std::uint64_t>(weight.n) || parent_rows % 128 != 0) {
+        throw std::invalid_argument(std::string(operation) + ": invalid NVFP4 parent geometry");
+    }
+    const std::uint64_t parent_elements =
+        checked_mul(parent_rows, static_cast<std::uint64_t>(weight.k), operation);
+    const std::uint64_t parent_codes = parent_elements / 2;
+    const std::uint64_t parent_scale_offset = align_up(parent_codes, 256, operation);
+    if (checked_add(checked_add(parent_scale_offset, parent_elements / 16, operation),
+                    divisor_bytes, operation) != total_bytes) {
+        throw std::invalid_argument(std::string(operation) + ": invalid NVFP4 parent payload");
+    }
+    const auto base_address = reinterpret_cast<std::uintptr_t>(payload);
+    const auto code_address = reinterpret_cast<std::uintptr_t>(weight.qdata);
+    const auto scale_address = reinterpret_cast<std::uintptr_t>(weight.scales);
+    if (code_address < base_address || scale_address < base_address ||
+        code_address - base_address > parent_codes) {
+        throw std::invalid_argument(std::string(operation) + ": invalid NVFP4 plane geometry");
+    }
+    const std::uint64_t code_offset = code_address - base_address;
+    const std::uint64_t row_bytes = static_cast<std::uint64_t>(weight.k) / 2;
+    if (code_offset % row_bytes != 0) {
+        throw std::invalid_argument(std::string(operation) + ": invalid NVFP4 row offset");
+    }
+    const std::uint64_t first_row = code_offset / row_bytes;
+    const std::uint64_t expected_scale_offset = parent_scale_offset +
+        first_row * static_cast<std::uint64_t>(weight.k) / 16;
+    if (first_row % 128 != 0 || first_row + weight.n > parent_rows ||
+        scale_address - base_address != expected_scale_offset ||
+        code_offset + geometry.code_plane_bytes > parent_codes ||
+        expected_scale_offset + geometry.scale_plane_bytes > total_bytes - divisor_bytes) {
         throw std::invalid_argument(std::string(operation) + ": invalid NVFP4 plane geometry");
     }
     return geometry;

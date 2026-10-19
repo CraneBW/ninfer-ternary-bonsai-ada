@@ -12,6 +12,7 @@
 #include <iostream>
 #include <span>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -250,14 +251,27 @@ int run_bf16_linear() {
 
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
     if (ninfer::test::cuda_unavailable()) {
         std::cout << "SKIP: no usable CUDA device\n";
         return 77;
     }
 
     try {
-        const int failures = run_bf16_linear();
+        int failures = 0;
+        if (argc == 2 && std::string_view(argv[1]) == "--v3-individual") {
+            DeviceWeight query(make_patterned(6144, 5120, 8709U));
+            DeviceWeight kv(make_patterned(1024, 5120, 8710U));
+            for (const int tokens : {1, 9}) {
+                failures += run_bf16_linear_case(query, tokens);
+                failures += run_bf16_linear_case(kv, tokens);
+            }
+        } else if (argc == 1) {
+            failures = run_bf16_linear();
+        } else {
+            std::cerr << "usage: test_bf16_a16 [--v3-individual]\n";
+            return 2;
+        }
         std::cout << (failures == 0 ? "OK" : "FAIL") << " BF16_A16 Linear\n";
         return failures == 0 ? 0 : 1;
     } catch (const std::exception& error) {

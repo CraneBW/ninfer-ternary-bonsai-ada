@@ -5,15 +5,21 @@
 
 #include <cstdint>
 #include <stdexcept>
+#include <string>
 
 namespace ninfer::ops::detail {
 
 Bf16Launch select_bf16_a16_launch(std::int32_t n, std::int32_t k, std::int32_t t) {
+    if (t > 0 && k == 5120 && (n == 1024 || n == 6144)) {
+        return launch_bf16_v3_individual;
+    }
     const bool n256_k5120 = n == 256 && k == 5120;
     const bool supported_problem =
         (n == 14336 && k == 5120) || (n == 5120 && k == 6144) || n256_k5120;
     if (!supported_problem || t <= 0) {
-        throw std::invalid_argument("bf16 linear: unsupported shape or T");
+        throw std::invalid_argument("bf16 linear: unsupported shape or T (N=" +
+                                    std::to_string(n) + ", K=" + std::to_string(k) +
+                                    ", T=" + std::to_string(t) + ")");
     }
     if (n256_k5120) { return launch_bf16_n256_k5120; }
     if (t == 1) { return launch_bf16_decode; }
@@ -36,6 +42,13 @@ Bf16Launch select_bf16_launch(std::int32_t n, std::int32_t k, std::int32_t t, Li
 
 void bf16_dispatch(const Tensor& x, const Weight& weight, Tensor& out, LinearPolicy policy,
                    cudaStream_t stream) {
+    if (weight.k == 5120 && (weight.n == 1024 || weight.n == 6144)) {
+        if (policy != LinearPolicy::A16Only) {
+            throw std::invalid_argument("bf16 v3 individual projection requires A16");
+        }
+        launch_bf16_v3_individual(x, weight, out, stream);
+        return;
+    }
     const Bf16Launch launch = select_bf16_launch(weight.n, weight.k, x.ne[1], policy);
     launch(x, weight, out, stream);
 }

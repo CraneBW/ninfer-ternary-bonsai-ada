@@ -136,6 +136,17 @@ inline constexpr bool is_nvfp4_linear_problem(std::int32_t output_rows, std::int
             input_rows == Nvfp4Residual17408Geometry::kInputRows);
 }
 
+// V3 semantic bindings may select individual M128-aligned rows of the fused
+// GDN, attention and gate/up parents. These exact row-view geometries share
+// the same blockscale codec, but have no standalone W4A4 specialization.
+// Execute them through the mathematically equivalent BF16-input GEMV route.
+inline constexpr bool is_nvfp4_v3_row_view(std::int32_t output_rows,
+                                            std::int32_t input_rows) {
+    return input_rows == 5120 &&
+           (output_rows == 1024 || output_rows == 2048 ||
+            output_rows == 6144 || output_rows == 17408);
+}
+
 inline Nvfp4Problem resolve_nvfp4_problem(std::int32_t output_rows, std::int32_t input_rows) {
     if (output_rows == Nvfp4AttnInputGeometry::kOutputRows &&
         input_rows == Nvfp4AttnInputGeometry::kInputRows) {

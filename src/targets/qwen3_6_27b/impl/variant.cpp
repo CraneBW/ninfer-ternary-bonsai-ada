@@ -47,7 +47,14 @@ void validate_token_interval(std::int32_t first, std::int32_t last) {
     }
 }
 
+// AllowA4 is permission to use Blackwell TMA, not a requirement of the v3
+// checkpoint. Ada/Ampere kernels can consume the same NVFP4 codes with BF16
+// activations; requesting unavailable W4A4 here fails during first warmup.
+#if defined(NINFER_SM89) || defined(NINFER_SM86) || defined(NINFER_SM75)
+constexpr ops::LinearPolicy kNvfp4TextPolicy = ops::LinearPolicy::A16Only;
+#else
 constexpr ops::LinearPolicy kNvfp4TextPolicy = ops::LinearPolicy::AllowA4;
+#endif
 constexpr ops::LinearPolicy kFp8TextPolicy   = ops::LinearPolicy::AllowA8;
 
 ops::LinearPolicy text_policy(const Weight& weight) {

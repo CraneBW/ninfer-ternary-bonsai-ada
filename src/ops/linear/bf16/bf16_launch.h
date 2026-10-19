@@ -17,6 +17,9 @@ inline constexpr std::int32_t kBf16LinearSmallTDispatchEnd = 27;
 using Bf16Launch = void (*)(const Tensor&, const Weight&, Tensor&, cudaStream_t);
 
 void launch_bf16_decode(const Tensor& x, const Weight& weight, Tensor& out, cudaStream_t stream);
+// Exact Qwen3.6 v3 independent BF16 projection parents (query and KV rows).
+void launch_bf16_v3_individual(const Tensor& x, const Weight& weight, Tensor& out,
+                               cudaStream_t stream);
 void launch_bf16_small_t(const Tensor& x, const Weight& weight, Tensor& out, cudaStream_t stream);
 void launch_bf16_mma(const Tensor& x, const Weight& weight, Tensor& out, cudaStream_t stream);
 void launch_bf16_n256_k5120(const Tensor& x, const Weight& weight, Tensor& out,

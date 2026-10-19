@@ -52,4 +52,39 @@ void launch_nvfp4_decode(const Tensor& x, const Weight& weight, Tensor& out, cud
     }
 }
 
+void launch_nvfp4_v3_row_view(const Tensor& x, const Weight& weight, Tensor& out,
+                              cudaStream_t stream) {
+    if (!is_nvfp4_v3_row_view(weight.n, weight.k) || x.ne[0] != weight.k ||
+        out.ne[0] != weight.n || x.ne[1] <= 0 || out.ne[1] != x.ne[1]) {
+        throw std::invalid_argument("nvfp4 v3 row view: unsupported shape");
+    }
+    // The existing exact GEMV kernel accepts both raw plane pointers and the
+    // two divisors. A row view merely adjusts the base of each plane; no
+    // conversion, repacking, or shape-guessing is performed.
+    for (std::int32_t t = 0; t < x.ne[1]; ++t) {
+        const Tensor token_x(static_cast<__nv_bfloat16*>(x.data) +
+                                 static_cast<std::int64_t>(t) * weight.k,
+                             DType::BF16, {weight.k, 1});
+        Tensor token_out(static_cast<__nv_bfloat16*>(out.data) +
+                             static_cast<std::int64_t>(t) * weight.n,
+                         DType::BF16, {weight.n, 1});
+        switch (weight.n) {
+        case 1024:
+            launch_exact<Nvfp4GemvGeometry<1024, 5120>>(token_x, weight, token_out, stream);
+            break;
+        case 2048:
+            launch_exact<Nvfp4GemvGeometry<2048, 5120>>(token_x, weight, token_out, stream);
+            break;
+        case 6144:
+            launch_exact<Nvfp4GemvGeometry<6144, 5120>>(token_x, weight, token_out, stream);
+            break;
+        case 17408:
+            launch_exact<Nvfp4GemvGeometry<17408, 5120>>(token_x, weight, token_out, stream);
+            break;
+        default:
+            throw std::invalid_argument("nvfp4 v3 row view: unsupported output width");
+        }
+    }
+}
+
 } // namespace ninfer::ops::detail

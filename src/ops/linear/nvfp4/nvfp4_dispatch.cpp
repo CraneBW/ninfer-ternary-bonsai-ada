@@ -67,6 +67,12 @@ std::size_t nvfp4_linear_workspace_capacity_bytes(std::int32_t output_rows, std:
     if (min_tokens <= 0 || max_tokens < min_tokens) {
         throw std::invalid_argument("nvfp4 linear workspace: invalid token interval");
     }
+    if (is_nvfp4_v3_row_view(output_rows, input_rows)) {
+        if (policy != LinearPolicy::A16Only && policy != LinearPolicy::AllowA4) {
+            throw std::invalid_argument("nvfp4 v3 row view: unsupported policy");
+        }
+        return 0;
+    }
     (void)resolve_route(output_rows, input_rows, policy, min_tokens);
     return resolve_route(output_rows, input_rows, policy, max_tokens) == Nvfp4LinearRoute::W4A4
                ? nvfp4_w4a4_workspace_capacity_bytes(max_tokens, input_rows)
@@ -76,6 +82,13 @@ std::size_t nvfp4_linear_workspace_capacity_bytes(std::int32_t output_rows, std:
 void nvfp4_dispatch(const Tensor& x, const Weight& weight, Tensor& out, LinearPolicy policy,
                     WorkspaceArena* workspace, cudaStream_t stream) {
     validate_nvfp4_weight(weight, "nvfp4 linear");
+    if (is_nvfp4_v3_row_view(weight.n, weight.k)) {
+        if (policy != LinearPolicy::A16Only && policy != LinearPolicy::AllowA4) {
+            throw std::invalid_argument("nvfp4 v3 row view: unsupported policy");
+        }
+        launch_nvfp4_v3_row_view(x, weight, out, stream);
+        return;
+    }
     if (!is_nvfp4_linear_problem(weight.n, weight.k) || x.ne[1] <= 0) {
         throw std::invalid_argument("nvfp4 linear: unsupported shape");
     }

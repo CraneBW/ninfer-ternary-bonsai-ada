@@ -32,7 +32,9 @@ Nvfp4LinearSwiGluRoute resolve_route(LinearPolicy policy, std::int32_t tokens) {
     if (policy == LinearPolicy::A16Only) {
         if (tokens == 1) { return Nvfp4LinearSwiGluRoute::DecodeFusedA16; }
         if (tokens <= 16) { return Nvfp4LinearSwiGluRoute::SmallTFusedA16; }
-        throw std::invalid_argument("nvfp4 linear_swiglu A16 is registered only through T=16");
+        // The registered fused A16 kernel stops at 16 tokens; composition
+        // with chunked A16 linear + BF16 SwiGLU covers longer contexts.
+        return Nvfp4LinearSwiGluRoute::LinearW4A4Post;
     }
     if (tokens == 1) { return Nvfp4LinearSwiGluRoute::DecodeFusedA16; }
     if (tokens <= 4) { return Nvfp4LinearSwiGluRoute::SmallTFusedA16; }
@@ -49,13 +51,14 @@ struct Nvfp4LinearSwiGluWorkspace {
 };
 
 template <class Allocator>
-Nvfp4LinearSwiGluWorkspace allocate_baseline_workspace(Allocator& allocator, std::int32_t tokens) {
+Nvfp4LinearSwiGluWorkspace allocate_baseline_workspace(Allocator& allocator, std::int32_t tokens,
+                                                        LinearPolicy policy) {
     Nvfp4LinearSwiGluWorkspace out;
     out.projected =
         allocator.alloc(DType::BF16, {Nvfp4MlpGateUpGeometry::kOutputRows, tokens}, 256);
     const std::size_t linear_bytes = linear_workspace_capacity_bytes(
         QType::NVFP4, Nvfp4MlpGateUpGeometry::kOutputRows, Nvfp4MlpGateUpGeometry::kInputRows,
-        LinearPolicy::AllowA4, tokens, tokens);
+        policy, tokens, tokens);
     out.linear = allocator.alloc_bytes(linear_bytes, 256);
     return out;
 }
@@ -65,9 +68,9 @@ Nvfp4W4a4Workspace allocate_fused_workspace(Allocator& allocator, std::int32_t t
     return allocate_nvfp4_w4a4_workspace(allocator, tokens, Nvfp4MlpGateUpGeometry::kInputRows);
 }
 
-std::size_t baseline_workspace_bytes(std::int32_t tokens) {
+std::size_t baseline_workspace_bytes(std::int32_t tokens, LinearPolicy policy) {
     WorkspaceLayoutBuilder layout;
-    (void)allocate_baseline_workspace(layout, tokens);
+    (void)allocate_baseline_workspace(layout, tokens, policy);
     return layout.peak_bytes(1);
 }
 
@@ -87,7 +90,10 @@ std::size_t nvfp4_linear_swiglu_workspace_capacity_bytes(LinearPolicy policy,
     }
     (void)resolve_route(policy, min_tokens);
     (void)resolve_route(policy, max_tokens);
-    if (policy == LinearPolicy::A16Only || max_tokens <= 4) { return 0; }
+    if (policy == LinearPolicy::A16Only) {
+        return max_tokens > 16 ? baseline_workspace_bytes(max_tokens, policy) : 0;
+    }
+    if (max_tokens <= 4) { return 0; }
 
     std::size_t maximum = 0;
     if (min_tokens <= kFusedMaxTokens && max_tokens >= 5) {
@@ -105,7 +111,7 @@ std::size_t nvfp4_linear_swiglu_workspace_capacity_bytes(LinearPolicy policy,
         --last_baseline;
     }
     if (last_baseline >= std::max(min_tokens, kFusedMaxTokens + 1)) {
-        maximum = std::max(maximum, baseline_workspace_bytes(last_baseline));
+            maximum = std::max(maximum, baseline_workspace_bytes(last_baseline, policy));
     }
     return maximum;
 }
@@ -139,9 +145,9 @@ void nvfp4_linear_swiglu_dispatch(const Tensor& x, const Weight& weight, Tensor&
     }
 
     auto scope                         = workspace.scope();
-    Nvfp4LinearSwiGluWorkspace scratch = allocate_baseline_workspace(workspace, x.ne[1]);
+    Nvfp4LinearSwiGluWorkspace scratch = allocate_baseline_workspace(workspace, x.ne[1], policy);
     WorkspaceArena linear_workspace(scratch.linear);
-    linear(x, weight, scratch.projected, LinearPolicy::AllowA4, linear_workspace, stream);
+    linear(x, weight, scratch.projected, policy, linear_workspace, stream);
     constexpr std::int32_t kIntermediate = Nvfp4MlpGateUpGeometry::kOutputRows / 2;
     silu_mul(scratch.projected.slice(0, 0, kIntermediate),
              scratch.projected.slice(0, kIntermediate, kIntermediate), out, stream);

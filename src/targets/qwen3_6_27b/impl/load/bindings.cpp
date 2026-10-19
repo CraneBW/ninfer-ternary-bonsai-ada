@@ -220,6 +220,52 @@ Weight materialized_weight(const artifact::MaterializedArtifact& materialized,
             plan.first_row < 0 || plan.first_row + rows > plan.parent_rows) {
             throw artifact::ArtifactError("v3 logical weight range conflicts with parent shape");
         }
+        if (plan.format == NumericFormat::NVFP4) {
+            // A v3 parent packs 128-row-aligned semantic children into a single
+            // blockscale-k16-m128x4 tensor. Its scale plane is NOT interleaved
+            // with the code plane, so generic row slicing is incorrect.
+            if (plan.first_row % 128 != 0 || rows % 128 != 0 || columns % 64 != 0) {
+                throw artifact::ArtifactError("v3 NVFP4 logical view is not M128/K64 aligned");
+            }
+            require_positive_finite(plan.weight_scale_divisor_bits, "v3 NVFP4 weight divisor");
+            require_positive_finite(plan.input_scale_divisor_bits, "v3 NVFP4 input divisor");
+            const std::array<std::uint64_t, 2> parent_shape{
+                static_cast<std::uint64_t>(plan.parent_rows),
+                static_cast<std::uint64_t>(columns)};
+            const artifact::BlockScaleGeometry g =
+                artifact::block_scale_geometry(NumericFormat::NVFP4, parent_shape);
+            const auto* base = static_cast<const std::byte*>(materialized.device_data(plan.object));
+            if (base == nullptr) {
+                throw artifact::ArtifactError("v3 NVFP4 parent was not materialized on CUDA");
+            }
+            const std::uint64_t code_offset =
+                static_cast<std::uint64_t>(plan.first_row) * columns / 2;
+            const std::uint64_t scale_offset = g.scale_plane_offset +
+                static_cast<std::uint64_t>(plan.first_row) * columns / 16;
+            if (code_offset + static_cast<std::uint64_t>(rows) * columns / 2 > g.code_plane_bytes ||
+                scale_offset + static_cast<std::uint64_t>(rows) * columns / 16 >
+                    g.weight_divisor_offset) {
+                throw artifact::ArtifactError("v3 NVFP4 semantic view exceeds parent planes");
+            }
+            Weight view{};
+            view.payload = base;
+            view.payload_bytes = g.encoded_bytes;
+            view.qtype = QType::NVFP4;
+            view.group_size = 16;
+            view.ndim = 2;
+            view.qdata = base + code_offset;
+            view.scales = base + scale_offset;
+            view.n = rows;
+            view.k = columns;
+            view.group = 16;
+            view.layout = QuantLayout::BlockScaleK16M128x4;
+            view.scale_dtype = DType::FP8_E4M3FN;
+            view.shape[0] = view.padded_shape[0] = rows;
+            view.shape[1] = view.padded_shape[1] = columns;
+            view.weight_scale_divisor = std::bit_cast<float>(plan.weight_scale_divisor_bits);
+            view.input_scale_divisor = std::bit_cast<float>(plan.input_scale_divisor_bits);
+            return view;
+        }
         Weight weight = artifact::materialized_weight(materialized, plan.object, plan.format,
                                                       plan.parent_rows, plan.parent_columns);
         if (rows != plan.parent_rows || plan.first_row != 0) {
@@ -1698,6 +1744,31 @@ ArtifactLoadPlan bind_v3_text_artifact(artifact::Binder& binder, const nlohmann:
         out.selected_rows  = static_cast<std::int32_t>(source.rows);
         if (source.input_columns_object) {
             out.input_columns = handles.at(*source.input_columns_object);
+        }
+        if (source.format == NumericFormat::NVFP4) {
+            if (source.layout != artifact::StorageLayout::BlockScaleK16M128x4V1 ||
+                !source.input_divisor_object || source.parent_rows % 128 != 0 ||
+                source.first_row % 128 != 0 || source.rows % 128 != 0 ||
+                source.columns % 64 != 0) {
+                throw artifact::ArtifactError(
+                    std::string(parameter) + ": invalid NVFP4 parent/Use divisor geometry");
+            }
+            const std::array<std::uint64_t, 2> parent_shape{source.parent_rows,
+                                                             source.columns};
+            const auto geometry =
+                artifact::block_scale_geometry(NumericFormat::NVFP4, parent_shape);
+            const auto weight_bits = read_u32_le(
+                binder.payload(out.object).data, geometry.weight_divisor_offset,
+                std::string(parameter) + " weight divisor");
+            const auto divisor_bits = read_u32_le(
+                binder.payload(handles.at(*source.input_divisor_object)).data, 0,
+                std::string(parameter) + " activation_input_divisor");
+            // Header-only plans are also bound from deliberately sparse v3 test
+            // files whose payload bytes are zero. Keep the exact source words in
+            // the plan and validate they are positive/finite when the real CUDA
+            // ModelView is materialized; metadata geometry is checked above.
+            out.weight_scale_divisor_bits = weight_bits;
+            out.input_scale_divisor_bits = divisor_bits;
         }
         return out;
     };

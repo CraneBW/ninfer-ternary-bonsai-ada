@@ -36,4 +36,30 @@ void launch_bf16_decode(const Tensor& x, const Weight& weight, Tensor& out, cuda
     throw std::invalid_argument("bf16 linear decode: unsupported exact problem");
 }
 
+void launch_bf16_v3_individual(const Tensor& x, const Weight& weight, Tensor& out,
+                               cudaStream_t stream) {
+    if (weight.k != 5120 || (weight.n != 1024 && weight.n != 6144) || x.ne[0] != 5120 ||
+        out.ne[0] != weight.n || x.ne[1] <= 0 || out.ne[1] != x.ne[1]) {
+        throw std::invalid_argument("bf16 v3 individual projection: invalid geometry");
+    }
+    // Reuse the FP32-accumulating production BF16 GEMV, one token at a time.
+    // This fallback preserves source rows and needs no extra workspace; the
+    // original larger fused BF16 problems retain their tuned GEMM kernels.
+    for (std::int32_t t = 0; t < x.ne[1]; ++t) {
+        Tensor token_input(static_cast<__nv_bfloat16*>(x.data) +
+                               static_cast<std::int64_t>(t) * weight.k,
+                           DType::BF16, {weight.k, 1});
+        Tensor token_output(static_cast<__nv_bfloat16*>(out.data) +
+                                static_cast<std::int64_t>(t) * weight.n,
+                            DType::BF16, {weight.n, 1});
+        if (weight.n == 1024) {
+            launch_geometry<Bf16GemvGeometry<1024, 5120>>(
+                token_input, weight, token_output, stream);
+        } else {
+            launch_geometry<Bf16GemvGeometry<6144, 5120>>(
+                token_input, weight, token_output, stream);
+        }
+    }
+}
+
 } // namespace ninfer::ops::detail
