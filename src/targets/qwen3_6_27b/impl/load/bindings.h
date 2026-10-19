@@ -19,6 +19,7 @@
 #include <cstdint>
 #include <nlohmann/json.hpp>
 #include <optional>
+#include <span>
 #include <string>
 #include <utility>
 #include <variant>
@@ -47,6 +48,11 @@ struct WeightPlan {
     std::int32_t selected_rows = 0;
     std::optional<artifact::ObjectHandle> input_columns;
 };
+
+// The v3 GSQ GDN output physically stores permuted input columns. Validate
+// the device-side map before any GGUF kernel indexes activations through it.
+void validate_v3_input_columns(std::span<const std::int32_t> columns,
+                               std::size_t expected_width);
 
 struct MlpPlan {
     WeightPlan gate_up;

@@ -74,6 +74,75 @@ void verify(int tokens) {
     std::printf("GGUF Q8_0 T=%d max_abs_error=%.6f PASS\n", tokens, worst);
 }
 
+void verify_gathered_columns(int tokens) {
+    // Real GSQ GDN output uses a permutation of the 6144 physical input
+    // columns. Test that both the vector decoder and MMQ prefill obey the
+    // *same* non-identity gather instead of silently using x[i].
+    constexpr int n = 128, k = 512, block_values = 32, block_bytes = 34;
+    constexpr std::size_t row_bytes = (k / block_values) * block_bytes;
+    std::vector<std::uint8_t> encoded(n * row_bytes, 0);
+    std::vector<std::int32_t> columns(k);
+    std::vector<__nv_bfloat16> activations(k * tokens);
+    std::vector<float> oracle(n * tokens, 0.0f);
+    for (int i = 0; i < k; ++i) {
+        columns[i] = (i * 197 + 23) % k; // permutation; 197 is coprime to 512
+    }
+    for (int token = 0; token < tokens; ++token) {
+        for (int i = 0; i < k; ++i) {
+            const int value = (i * 7 + token * 11) % 17 - 8;
+            activations[token * k + i] = __float2bfloat16(static_cast<float>(value));
+        }
+    }
+    for (int row = 0; row < n; ++row) {
+        for (int block = 0; block < k / block_values; ++block) {
+            auto* code = encoded.data() + row * row_bytes + block * block_bytes;
+            code[0] = 0;
+            code[1] = 0x3c; // GGUF Q8_0 FP16 scale = exactly 1.0
+            for (int i = 0; i < block_values; ++i) {
+                const int physical = block * block_values + i;
+                const int weight = (physical * 3 + row * 5) % 17 - 8;
+                code[2 + i] = static_cast<std::uint8_t>(static_cast<std::int8_t>(weight));
+                for (int token = 0; token < tokens; ++token) {
+                    oracle[token * n + row] +=
+                        weight * __bfloat162float(activations[token * k + columns[physical]]);
+                }
+            }
+        }
+    }
+    ninfer::DeviceBuffer weight_gpu(encoded.size());
+    ninfer::DeviceBuffer input_gpu(activations.size() * sizeof(__nv_bfloat16));
+    ninfer::DeviceBuffer map_gpu(columns.size() * sizeof(std::int32_t));
+    ninfer::DeviceBuffer output_gpu(oracle.size() * sizeof(__nv_bfloat16));
+    weight_gpu.copy_from_host(encoded.data(), encoded.size());
+    input_gpu.copy_from_host(activations.data(), activations.size() * sizeof(__nv_bfloat16));
+    map_gpu.copy_from_host(columns.data(), columns.size() * sizeof(std::int32_t));
+    ninfer::Weight weight{};
+    weight.qtype = ninfer::QType::GGUF_Q8_0;
+    weight.layout = ninfer::QuantLayout::GgufBlocks;
+    weight.qdata = weight_gpu.p;
+    weight.n = n;
+    weight.k = k;
+    weight.input_columns = static_cast<const std::int32_t*>(map_gpu.p);
+    ninfer::Tensor x(input_gpu.p, ninfer::DType::BF16, {k, tokens});
+    ninfer::Tensor y(output_gpu.p, ninfer::DType::BF16, {n, tokens});
+    ninfer::WorkspaceArena workspace(
+        ninfer::ops::detail::gguf_linear_workspace_capacity_bytes(
+            weight.qtype, n, k, 1, tokens));
+    ninfer::ops::detail::gguf_linear_dispatch(x, weight, y, workspace, nullptr);
+    require(cudaDeviceSynchronize() == cudaSuccess, "gathered GGUF CUDA execution");
+    std::vector<__nv_bfloat16> actual(oracle.size());
+    output_gpu.copy_to_host(actual.data(), actual.size() * sizeof(__nv_bfloat16));
+    float worst = 0.0f;
+    for (std::size_t i = 0; i < actual.size(); ++i) {
+        const float got = __bfloat162float(actual[i]);
+        const float error = std::fabs(got - oracle[i]);
+        worst = std::max(worst, error);
+        require(std::isfinite(got) && error <= 6.0f + 0.015f * std::fabs(oracle[i]),
+                "GGUF input_columns gather numerical mismatch");
+    }
+    std::printf("GGUF Q8_0 gathered T=%d max_abs_error=%.6f PASS\n", tokens, worst);
+}
+
 void verify_real_mixed_formats(const char* artifact_path) {
     // Test actual mixed-format GSQ-RCO checkpoint bytes from the already
     // downloaded prefix; the same CUDA bridge supplies GEMV and MMQ.
@@ -196,6 +265,8 @@ int main(int argc, char** argv) {
     try {
         verify(1);   // GGUF vector decode
         verify(16);  // GGUF integer tensor-core prefill
+        verify_gathered_columns(1);
+        verify_gathered_columns(16);
         if (argc == 2) { verify_real_mixed_formats(argv[1]); }
         return 0;
     } catch (const std::exception& e) {

@@ -16,6 +16,7 @@
 #include <fstream>
 #include <iostream>
 #include <random>
+#include <numeric>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -873,6 +874,42 @@ int verify_vision_workspace_planning() {
 } // namespace
 
 int main(int argc, char** argv) {
+    // Validate real v3 input_columns payload semantics independently of
+    // weight availability. Shape-only metadata validation cannot detect a
+    // duplicate or out-of-range activation gather index.
+    {
+        std::vector<std::int32_t> columns(TextConfig::value_dim);
+        std::iota(columns.begin(), columns.end(), 0);
+        std::reverse(columns.begin(), columns.end());
+        validate_v3_input_columns(columns, columns.size());
+        const auto rejects = [&](std::span<const std::int32_t> map) {
+            try {
+                validate_v3_input_columns(map, TextConfig::value_dim);
+            } catch (const ninfer::artifact::ArtifactError&) {
+                return true;
+            }
+            return false;
+        };
+        if (!rejects(std::span<const std::int32_t>(columns).first(columns.size() - 1))) {
+            std::cerr << "v3 input_columns accepted a short mapping\n";
+            return 1;
+        }
+        columns[0] = columns[1];
+        if (!rejects(columns)) {
+            std::cerr << "v3 input_columns accepted duplicate entries\n";
+            return 1;
+        }
+        columns[0] = -1;
+        if (!rejects(columns)) {
+            std::cerr << "v3 input_columns accepted negative indices\n";
+            return 1;
+        }
+        columns[0] = TextConfig::value_dim;
+        if (!rejects(columns)) {
+            std::cerr << "v3 input_columns accepted out-of-range indices\n";
+            return 1;
+        }
+    }
     if (const int result = verify_self_describing_shape(); result != 0) { return result; }
     if (const int result = verify_real_v3_gsq_header(); result != 0) { return result; }
     if (const int result = verify_real_qwen36_v3_headers(); result != 0) { return result; }

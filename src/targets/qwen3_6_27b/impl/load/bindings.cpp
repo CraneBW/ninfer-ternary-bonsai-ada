@@ -1970,11 +1970,45 @@ std::optional<HadamardSignsPlan> bind_hadamard_signs(artifact::Binder& binder) {
     return plan;
 }
 
+void validate_v3_input_columns(std::span<const std::int32_t> columns,
+                               std::size_t expected_width) {
+    if (columns.size() != expected_width || expected_width == 0) {
+        throw artifact::ArtifactError("v3 GDN input_columns has an invalid width");
+    }
+    std::vector<std::uint8_t> seen(expected_width, 0);
+    for (const std::int32_t column : columns) {
+        if (column < 0 || static_cast<std::size_t>(column) >= expected_width ||
+            seen[static_cast<std::size_t>(column)] != 0) {
+            throw artifact::ArtifactError(
+                "v3 GDN input_columns must be a permutation of the activation width");
+        }
+        seen[static_cast<std::size_t>(column)] = 1;
+    }
+}
+
 LoadedModelData::LoadedModelData(BindingPlan plan, artifact::MaterializedArtifact materialized)
     : backing(std::move(materialized)) {
     frontend = qwen3_6::take_frontend_resources(backing, plan.frontend);
     // Install the folded sign table for the whole materialization pass below.
     const FoldedSignsScope folded_signs_scope(plan.hadamard_signs, backing);
+
+    // Directory metadata validates the auxiliary's dtype and shape, but its
+    // *values* are stored at the end of the real GSQ v3 payload. Verify once
+    // per physical map after materialization and before using it as a GPU
+    // gather index; invalid values would otherwise access unrelated VRAM.
+    if (plan.v3_text) {
+        std::unordered_set<std::uint32_t> checked_maps;
+        std::vector<std::int32_t> host_columns(TextConfig::value_dim);
+        for (const TextLayerPlan& layer : plan.text_layers) {
+            if (layer.is_full_attention || !layer.gdn.output.input_columns) { continue; }
+            const auto handle = *layer.gdn.output.input_columns;
+            if (!checked_maps.insert(handle.index).second) { continue; }
+            CUDA_CHECK(cudaMemcpy(
+                host_columns.data(), backing.device_data(handle),
+                host_columns.size() * sizeof(std::int32_t), cudaMemcpyDeviceToHost));
+            validate_v3_input_columns(host_columns, TextConfig::value_dim);
+        }
+    }
 
     runtime.weights_arena = &backing.device_arena();
     runtime.features      = plan.features;
