@@ -904,7 +904,8 @@ void gdn_input_proj(const Tensor& x, const Weight& query_key_value_z_weight, Ten
 
 std::size_t gdn_input_proj_conv_snapshot_workspace_capacity_bytes(
     std::int32_t query_rows, std::int32_t key_rows, std::int32_t value_rows,
-    std::int32_t batch_size, std::int32_t min_width, std::int32_t max_width) {
+    std::int32_t batch_size, std::int32_t min_width, std::int32_t max_width,
+    bool folded_ternary_rotation) {
     const bool q4_q5 = query_rows == 2048 && key_rows == 2048 && value_rows == 6144;
     const bool w8    = query_rows == 2048 && key_rows == 2048 && value_rows == 4096;
     if (!q4_q5 && !w8) {
@@ -923,11 +924,12 @@ std::size_t gdn_input_proj_conv_snapshot_workspace_capacity_bytes(
         // The folded ternary parents project from the batched compose route, whose project lambda
         // takes the workspace overload of the projection: that one allocates its own [hidden,
         // aggregate columns] rotation buffer plus the int8 scratch beside the projected plane, and
-        // both live at the same time. The single-column note below explains why this reservation is
-        // unconditional even though the query carries no weights profile.
-        return composed_snapshot_capacity(
-            channels, batch_size * max_width,
-            detail::ternary_rotation_workspace_bytes(kFoldedGdnHidden, batch_size * max_width));
+        // both live at the same time.
+        const std::size_t rotation =
+            folded_ternary_rotation
+                ? detail::ternary_rotation_workspace_bytes(kFoldedGdnHidden, batch_size * max_width)
+                : 0;
+        return composed_snapshot_capacity(channels, batch_size * max_width, rotation);
     }
 
     std::int32_t largest_materialized_width = 0;
@@ -944,13 +946,15 @@ std::size_t gdn_input_proj_conv_snapshot_workspace_capacity_bytes(
         (void)resolve_w8_conv_plan(max_width, 1);
         if (max_width >= 17) { largest_materialized_width = max_width; }
     }
-    // Folded ternary parents never take the fused schedule, so they always need the projected
-    // workspace plus a [hidden, token] rotation buffer; reserve both. This query carries no
-    // weights profile (it is keyed on the row geometry, which the ternary parents share), so the
-    // reservation is unconditional; for a groupwise-int artifact it is just a larger leaf arena.
+    // Folded ternary parents never take the fused schedule, so every width materializes the
+    // projected plane, and the projection adds its [hidden, width] rotation buffer on top. The
+    // groupwise-int parents keep the resolver above: the fused widths need nothing at all.
+    const std::int32_t materialized_width =
+        folded_ternary_rotation ? max_width : largest_materialized_width;
+    if (materialized_width == 0) { return 0; }
     WorkspaceLayoutBuilder layout;
-    (void)allocate_projected_workspace(
-        layout, channels, largest_materialized_width == 0 ? max_width : largest_materialized_width);
+    (void)allocate_projected_workspace(layout, channels, materialized_width);
+    if (!folded_ternary_rotation) { return layout.peak_bytes(1); }
     return layout.peak_bytes(1) +
            detail::ternary_rotation_workspace_bytes(kFoldedGdnHidden, batch_size * max_width);
 }
@@ -988,7 +992,8 @@ std::size_t gdn_input_proj_conv_snapshot_workspace_capacity_bytes(
 
 std::size_t gdn_input_proj_conv_record_workspace_capacity_bytes(
     std::int32_t query_rows, std::int32_t key_rows, std::int32_t value_rows,
-    std::int32_t batch_size, std::int32_t min_width, std::int32_t max_width) {
+    std::int32_t batch_size, std::int32_t min_width, std::int32_t max_width,
+    bool folded_ternary_rotation) {
     const bool q4_q5 = query_rows == 2048 && key_rows == 2048 && value_rows == 6144;
     const bool w8    = query_rows == 2048 && key_rows == 2048 && value_rows == 4096;
     if (!q4_q5 && !w8) {
@@ -1002,8 +1007,10 @@ std::size_t gdn_input_proj_conv_record_workspace_capacity_bytes(
         (void)resolve_w8_conv_plan(min_width, batch_size);
         (void)resolve_w8_conv_plan(max_width, batch_size);
     }
-    // The record path projects straight into the caller's conv record, so the only transient byte
-    // it needs is the folded ternary rotation buffer (see the snapshot query above).
+    // The record path projects straight into the caller's conv record, so the groupwise-int profiles
+    // need nothing and the only transient byte the folded ternary ones need is the rotation buffer
+    // plus its activation-quantization scratch (see the snapshot query above).
+    if (!folded_ternary_rotation) { return 0; }
     return detail::ternary_rotation_workspace_bytes(kFoldedGdnHidden, batch_size * max_width);
 }
 

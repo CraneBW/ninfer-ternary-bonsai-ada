@@ -101,10 +101,19 @@ void gdn_input_proj(const Tensor& x, const Weight& query_key_value_z_weight, Ten
  * interval. B=1 preserves the format-specific fused/composed resolver. B=2..8 uses aggregate
  * projection plus one BF16 [C,B*W] projected plane. The query throws for an unregistered row
  * profile or unsupported B/W domain.
+ *
+ * `folded_ternary_rotation` selects the parent encoding, which the row geometry cannot tell apart
+ * because the folded ternary parents reuse the Q4/Q5 rows. The default describes the groupwise-int
+ * parents: their B=1 fused schedule needs no transient bytes at all and their composed schedule
+ * needs only the projected plane, exactly as before the ternary port. Pass true when the two split
+ * parents are folded (rotated-basis) ternary weights: those never take the fused schedule, so every
+ * width materializes the projected plane, and the projection additionally keeps a [hidden, B*W]
+ * rotation buffer and its activation-quantization scratch alive beside it.
  */
 [[nodiscard]] std::size_t gdn_input_proj_conv_snapshot_workspace_capacity_bytes(
     std::int32_t query_rows, std::int32_t key_rows, std::int32_t value_rows,
-    std::int32_t batch_size, std::int32_t min_width, std::int32_t max_width);
+    std::int32_t batch_size, std::int32_t min_width, std::int32_t max_width,
+    bool folded_ternary_rotation = false);
 
 /**
  * Returns the transient capacity for a registered [16384,5120] NVFP4 or row-scaled FP8 snapshot
@@ -193,10 +202,16 @@ void gdn_input_proj_conv_snapshot(const Tensor& x, const Weight& query_key_value
  * `batch_size` is exact, and the inclusive T interval must lie within ReplaySSM's B=1..8,
  * T=2..16 execution domain. These profiles require no transient storage because materialized
  * projection writes directly to caller-owned conv_record.
+ *
+ * `folded_ternary_rotation` selects the parent encoding, exactly as in the snapshot query above:
+ * groupwise-int parents (the default) need nothing, while folded ternary parents project through the
+ * compose route and keep the [hidden, B*W] rotation buffer plus its activation-quantization scratch
+ * alive for the duration of the projection.
  */
 [[nodiscard]] std::size_t gdn_input_proj_conv_record_workspace_capacity_bytes(
     std::int32_t query_rows, std::int32_t key_rows, std::int32_t value_rows,
-    std::int32_t batch_size, std::int32_t min_width, std::int32_t max_width);
+    std::int32_t batch_size, std::int32_t min_width, std::int32_t max_width,
+    bool folded_ternary_rotation = false);
 
 /**
  * Returns the transient capacity for a registered [16384,5120] NVFP4 or row-scaled FP8

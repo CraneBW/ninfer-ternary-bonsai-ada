@@ -62,6 +62,14 @@ ops::LinearPolicy text_policy(const Weight& weight) {
 
 constexpr std::size_t kMinimumLeafWorkspaceBytes = 1;
 
+// The folded ternary split parents reuse the Q4/Q5 row geometry but carry PTQ1_0/PQ2_0 at a 128-wide
+// group, so the geometry-keyed capacity queries cannot tell the two encodings apart and take an
+// explicit flag. The runtime answers them from the loaded weights and opts in here; the
+// profile-keyed queries below reserve the rotation unconditionally (see folded_rotation_bytes).
+bool folded_ternary_parent(const Weight& weight) {
+    return weight.qtype == QType::PTQ1_0_G128 || weight.qtype == QType::PQ2_0_G128;
+}
+
 // Folded (rotated-basis) ternary activation scratch: a [input_width, last] BF16 buffer that
 // ternary weights need before their matmul (P, then the signs, then the nominal Hadamard).
 //
@@ -84,7 +92,10 @@ std::size_t gdn_snapshot_workspace_bytes(const Tensor& hidden,
         return std::max(kMinimumLeafWorkspaceBytes,
                         ops::gdn_input_proj_conv_snapshot_workspace_capacity_bytes(
                             TextConfig::key_dim, TextConfig::key_dim, TextConfig::value_dim, batch,
-                            width, width));
+                            width, width,
+                            folded_ternary_parent(
+                                std::get<SplitGdnInputProjectionPayload>(weights.input_projection)
+                                    .query_key)));
     }
     const Weight& parent =
         std::get<FusedGdnInputProjectionPayload>(weights.input_projection).query_key_value_z;
@@ -102,7 +113,10 @@ std::size_t gdn_record_workspace_bytes(const Tensor& hidden,
         return std::max(kMinimumLeafWorkspaceBytes,
                         ops::gdn_input_proj_conv_record_workspace_capacity_bytes(
                             TextConfig::key_dim, TextConfig::key_dim, TextConfig::value_dim, batch,
-                            width, width));
+                            width, width,
+                            folded_ternary_parent(
+                                std::get<SplitGdnInputProjectionPayload>(weights.input_projection)
+                                    .query_key)));
     }
     const Weight& parent =
         std::get<FusedGdnInputProjectionPayload>(weights.input_projection).query_key_value_z;
@@ -438,10 +452,13 @@ std::size_t Variant::gdn_input_projection_snapshot_workspace_capacity_bytes(
     switch (weights_profile) {
     case WeightsProfile::Qwen36GroupwiseInt:
     case WeightsProfile::Qwen38GroupwiseInt:
+        // The folded ternary artifact shares this profile (see folded_rotation_bytes): the
+        // row geometry cannot say which artifact is loading, so the static layout reserves the
+        // ternary rotation for both. The runtime query above opts out for the int artifact.
         return std::max(kMinimumLeafWorkspaceBytes,
                         ops::gdn_input_proj_conv_snapshot_workspace_capacity_bytes(
                             TextConfig::key_dim, TextConfig::key_dim, TextConfig::value_dim,
-                            batch_size, first, last));
+                            batch_size, first, last, /*folded_ternary_rotation=*/true));
     case WeightsProfile::Qwen36Nvfp4:
         return std::max(kMinimumLeafWorkspaceBytes,
                         ops::gdn_input_proj_conv_snapshot_workspace_capacity_bytes(
@@ -463,10 +480,12 @@ std::size_t Variant::gdn_input_projection_record_workspace_capacity_bytes(
     switch (weights_profile) {
     case WeightsProfile::Qwen36GroupwiseInt:
     case WeightsProfile::Qwen38GroupwiseInt:
+        // See the snapshot query above: the profile is shared, so the static layout reserves the
+        // ternary rotation for both artifacts.
         return std::max(kMinimumLeafWorkspaceBytes,
                         ops::gdn_input_proj_conv_record_workspace_capacity_bytes(
                             TextConfig::key_dim, TextConfig::key_dim, TextConfig::value_dim,
-                            batch_size, first, last));
+                            batch_size, first, last, /*folded_ternary_rotation=*/true));
     case WeightsProfile::Qwen36Nvfp4:
         return std::max(kMinimumLeafWorkspaceBytes,
                         ops::gdn_input_proj_conv_record_workspace_capacity_bytes(
