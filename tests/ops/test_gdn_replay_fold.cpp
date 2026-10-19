@@ -341,9 +341,15 @@ int run_case(const FoldProfile profile, std::int32_t width, std::int32_t rows,
     const ops::GdnReplayFoldPlan fold_plan(records, state_pool.all_layers_view());
     if (width == 16 && rows == 8) {
         cuda_synchronize();
-        DeviceBuffer original(state_bytes);
-        cuda_check(cudaMemcpy(original.p, state_base, state_bytes, cudaMemcpyDeviceToDevice), "save graph initial state");
         DeviceContext context;
+        DeviceBuffer original(state_bytes);
+        // Keep the save on the replay stream. A device-to-device cudaMemcpy made on the legacy stream
+        // is neither ordered with the non-blocking replay stream nor guaranteed to have completed
+        // when it returns, so a replay could restore bytes the save had not written yet.
+        cuda_check(cudaMemcpyAsync(original.p, state_base, state_bytes, cudaMemcpyDeviceToDevice,
+                                   context.stream),
+                   "save graph initial state");
+        context.synchronize();
         DecodeGraphDefinition definition;
         DecodeGraphExecutable graph;
         definition.capture(context.stream,
