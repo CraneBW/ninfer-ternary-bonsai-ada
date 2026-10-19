@@ -216,11 +216,20 @@ covers, and the draft head cannot know it because the continuation lives in the 
 in the model's weights. The lookup indexes the request's token stream as it grows and trusts a run
 only when its two most recent occurrences continued identically for sixteen tokens, so a repeated
 template (a JSON key before a varied value, a phrase that recurs with a different ending) keeps the
-draft head's drafts instead of the lookup's. A prediction covers at least three tokens and never
-reaches past the agreed window, and it is verified by the target model exactly like an MTP draft,
-so the committed greedy output is unchanged and a wrong prediction costs at most the verify
-columns it occupies. It requires `--spec mtp` with a draft window of at least three, and combines
-with `--adaptive-mtp`; a round the lookup drafted still verifies at the adapted width.
+draft head's drafts instead of the lookup's. Agreement on the right is not enough by itself: a run
+that occurs once in the prompt, an example the request is imitating, matches the eight tokens while
+the text around it differs, so a hit also needs the sixteen tokens before the match to agree with
+the ones the request has already written. A copy corroborates on both sides -- the tokens it has
+reproduced stand before the matched run exactly as the earlier occurrence's own tokens do -- so the
+draft head keeps the first tokens of a copy and the lookup takes over once the copy has enough of
+itself behind the run. A prediction covers at least three tokens and never reaches past the agreed
+window, and it is verified by the target model exactly like an MTP draft, so the committed greedy
+output is unchanged and a wrong prediction costs at most the verify columns it occupies. On one
+Qwen3.8-27B build, copying an identifier manifest verbatim measured 260.0 t/s against 239.2 for the
+same fixed window, generated JSON at a 61,674-token prompt was level with the same window without
+the lookup (190.4 against 191.7 t/s; it cost 186.1 before the rule), and prose and copied prose were
+unchanged. It requires `--spec mtp` with a draft window of at least three,
+and combines with `--adaptive-mtp`; a round the lookup drafted still verifies at the adapted width.
 
 ## Common options
 

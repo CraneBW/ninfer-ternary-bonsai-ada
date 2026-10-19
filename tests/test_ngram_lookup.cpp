@@ -30,15 +30,18 @@ std::vector<TokenId> leading_tokens() {
 }
 
 std::vector<TokenId> passage_tokens() {
-    return {41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56};
+    std::vector<TokenId> tokens;
+    for (TokenId token = 41; token < 81; ++token) { tokens.push_back(token); }
+    return tokens;
 }
 
 } // namespace
 
 // --lookup-ngram exists to draft copied text. This fixture pins the contract the MTP round relies
 // on: a predicted token is the continuation of an earlier occurrence of the same eight-token run, a
-// request cannot predict the text it is standing on, an unseen run predicts nothing, and slicing
-// the appends (prefill pieces, one committed prefix at a time) indexes the same stream.
+// run counts as copied only once the tokens on both sides of the match agree, an unseen run predicts
+// nothing, an example in the prompt is not a copy however it is reached, and slicing the appends
+// (prefill pieces, one committed prefix at a time) indexes the same stream.
 int main() {
     const std::vector<TokenId> leading = leading_tokens();
     const std::vector<TokenId> passage = passage_tokens();
@@ -59,24 +62,30 @@ int main() {
     require(lookup.predict(std::span<TokenId>(prediction)) == 0,
             "an unseen context predicts nothing");
 
-    // The model reproduces the passage. Once its first eight tokens are committed, the lookup finds
-    // the earlier occurrence and offers that occurrence's continuation.
+    // The model reproduces the passage. The first copied tokens already complete a run whose earlier
+    // occurrence is in the prompt, but the tokens before that occurrence are the document's, not the
+    // ones the copy has written: the match alone is a local pattern, and its continuation is what
+    // the request is about to decide for itself.
     lookup.append(std::span<const TokenId>(passage.data(), 8));
+    require(lookup.predict(std::span<TokenId>(prediction)) == 0,
+            "a copy is not predicted before its left side corroborates the occurrence");
+
+    // Once enough of the copy stands before the run, both sides of the earlier occurrence agree and
+    // its continuation is the text the request is about to reproduce.
+    lookup.append(std::span<const TokenId>(passage.data() + 8, 16));
     const std::uint32_t predicted = lookup.predict(std::span<TokenId>(prediction));
-    require(predicted == 7, "a copied run predicts up to the prediction limit");
+    require(predicted == 7, "a corroborated copy predicts up to the prediction limit");
     for (std::uint32_t index = 0; index < predicted; ++index) {
-        require(prediction[index] == passage[8 + index],
+        require(prediction[index] == passage[24 + index],
                 "the prediction continues the earlier occurrence");
     }
 
     // Committing the prediction moves the run forward: the next prediction starts where the
-    // passage's earlier occurrence continued, which is the text that followed it, not a repeat of
-    // the tokens just committed.
+    // passage's earlier occurrence continued, not at a repeat of the tokens just committed.
     lookup.append(std::span<const TokenId>(prediction.data(), predicted));
     const std::uint32_t followed = lookup.predict(std::span<TokenId>(prediction));
-    require(followed >= 2, "the run keeps predicting what followed the occurrence");
-    require(prediction[0] == passage[15], "the last passage token comes first");
-    require(prediction[1] == trailing[0], "then the text that followed the passage");
+    require(followed == 7, "the run keeps predicting as the copy advances");
+    require(prediction[0] == passage[31], "the prediction advances with the copy");
 
     // A narrower ask is honored: the prediction never exceeds the room the round has for drafts.
     std::array<TokenId, 2> narrow{};
@@ -91,40 +100,48 @@ int main() {
     require(prose.predict(std::span<TokenId>(prediction)) == 0,
             "a context that never occurred predicts nothing");
 
+    // A single occurrence in the prompt is an example, not a copy. Generated JSON reaches the runs
+    // of the example again -- the request is writing its own object, which happens to share the
+    // eight tokens -- and one or two matching tokens on the left are coincidence, not corroboration.
+    // The earlier occurrence's continuation is another example, not the answer.
+    NgramLookup example;
+    std::vector<TokenId> example_text = leading;
+    example_text.push_back(900);
+    example_text.push_back(901);
+    example_text.insert(example_text.end(), passage.begin(), passage.begin() + 8);
+    example_text.push_back(6001);
+    example_text.insert(example_text.end(), 64, 7000);
+    example.append(std::span<const TokenId>(example_text));
+    example.append(std::span<const TokenId>(std::array<TokenId, 2>{900, 901}));
+    example.append(std::span<const TokenId>(passage.data(), 8));
+    require(example.predict(std::span<TokenId>(prediction)) == 0,
+            "an example in the prompt is not a copy in progress");
+
     // The same run followed by a different token the second time is a template (a JSON object with
-    // one varied field), not a copy: it is retired as soon as the divergence lands inside the
-    // agreement window, so a prediction never drafts the varied part.
+    // one varied field), not a copy: it is retired as soon as the divergence lands on the run, even
+    // when the request reaches it with a copy's worth of corroboration behind it.
     NgramLookup templated;
     std::vector<TokenId> template_text = leading;
-    template_text.insert(template_text.end(), passage.begin(), passage.end());
+    template_text.insert(template_text.end(), passage.begin(), passage.begin() + 8);
     template_text.push_back(6001);
     template_text.insert(template_text.end(), 64, 7000);
-    template_text.insert(template_text.end(), passage.begin(), passage.end());
+    template_text.insert(template_text.end(), passage.begin(), passage.begin() + 8);
     template_text.push_back(6002);
     templated.append(std::span<const TokenId>(template_text));
+    templated.append(std::span<const TokenId>(std::array<TokenId, 16>{7000, 7000, 7000, 7000, 7000, 7000,
+                                                                      7000, 7000, 7000, 7000, 7000, 7000,
+                                                                      7000, 7000, 7000, 7000}));
     templated.append(std::span<const TokenId>(passage.data(), 8));
     require(templated.predict(std::span<TokenId>(prediction)) == 0,
-            "a run whose continuation diverges inside the window is not a copy");
-
-    // A run that agrees for a whole prediction still drafts: the divergence has to land inside the
-    // agreement window before the lookup gives up on it. Eight identical tokens are the shortest
-    // shared continuation it can prove, and a prediction is never wider than that.
-    NgramLookup agreeing;
-    std::vector<TokenId> agreeing_text = leading;
-    agreeing_text.insert(agreeing_text.end(), passage.begin(), passage.end());
-    agreeing_text.insert(agreeing_text.end(), 64, 7000);
-    agreeing_text.insert(agreeing_text.end(), passage.begin(), passage.end());
-    agreeing_text.push_back(6002);
-    agreeing.append(std::span<const TokenId>(agreeing_text));
-    agreeing.append(std::span<const TokenId>(passage.data(), 8));
+            "a run whose continuation diverges on the run is not a copy");
 
     // The agreement window reaches past the first continuation token: a run whose continuation
     // agreed once and then diverged is a repeated phrase as well, and is retired before it can
     // draft the wrong continuation.
     NgramLookup diverging;
     std::vector<TokenId> diverging_text = leading;
-    const auto run_begin                  = passage.begin();
-    const auto run_end                    = passage.begin() + 8;
+    const auto run_begin                = passage.begin();
+    const auto run_end                  = passage.begin() + 8;
     diverging_text.insert(diverging_text.end(), run_begin, run_end);
     diverging_text.insert(diverging_text.end(), {61, 62, 63});
     diverging_text.insert(diverging_text.end(), 64, 7000);
@@ -132,6 +149,9 @@ int main() {
     diverging_text.insert(diverging_text.end(), {61, 62, 64});
     diverging_text.insert(diverging_text.end(), 65, 7001);
     diverging.append(std::span<const TokenId>(diverging_text));
+    diverging.append(std::span<const TokenId>(std::array<TokenId, 16>{7000, 7000, 7000, 7000, 7000, 7000,
+                                                                      7000, 7000, 7000, 7000, 7000, 7000,
+                                                                      7000, 7000, 7000, 7000}));
     diverging.append(std::span<const TokenId>(run_begin, 8));
     require(diverging.predict(std::span<TokenId>(prediction)) == 0,
             "a run that diverges past the first token is not a copy");
@@ -152,9 +172,10 @@ int main() {
         const std::size_t end = std::min(begin + 97, prompt.size());
         sliced.append(std::span<const TokenId>(prompt.data() + begin, end - begin));
     }
-    sliced.append(std::span<const TokenId>(passage.data(), 8));
+    sliced.append(std::span<const TokenId>(passage.data(), 24));
     require(sliced.predict(std::span<TokenId>(prediction)) == 7,
             "sliced appends index the same stream as one append");
+    require(prediction[0] == passage[24], "sliced appends corroborate the same occurrence");
 
     std::puts("ngram lookup tests passed");
     return 0;

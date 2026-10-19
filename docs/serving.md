@@ -43,8 +43,8 @@ select or alter the artifact.
 Vision is disabled by default: its weights and Vision-specific unified-workspace extent are not
 allocated, and media requests and token-count requests fail with HTTP 400 `vision_disabled`. Add
 `--vision` when the server must accept image or video input. Speculative residency is likewise
-frozen by `--spec mtp|dflash|dflash2` and `--draft-tokens`; omitting `--spec` loads no speculative backend.
-`--lm-head-draft` additionally loads the optimized proposal head. `--adaptive-mtp` keeps
+frozen by `--spec mtp|dflash|dflash2` and `--draft-tokens`; omitting `--spec` loads no speculative
+backend. `--lm-head-draft` additionally loads the optimized proposal head. `--adaptive-mtp` keeps
 `--draft-tokens` as the ceiling and lets each MTP round verify a narrower draft prefix when the
 measured survival of the drafts it proposed, weighted against the round's measured cost, favors one;
 the committed greedy output is unchanged. Three rounds in a row that committed every draft up to the
@@ -52,19 +52,21 @@ fourth land the request on the widest admissible width at once rather than climb
 window, and the maximum-width probation still contracts a wrong landing within two rounds. On one
 Qwen3.8-27B build, generated JSON at a 61,674-token prompt measured 184.4 t/s against 171.2 t/s for
 the climb and 187.4 against 187.3 t/s for a fixed seven-draft window; long-form prose at a
-61,650-token prompt measured 78.5 against 66.9 t/s for that fixed window. `--lookup-ngram` adds a second draft source to MTP: when
-the request's last eight tokens repeat a run that already occurred in its own context and the two
-occurrences continued identically, the continuation of the earlier one is proposed for the round
-(copied passages, repeated JSON lines, echoed tool arguments); those drafts are verified like any
-other, so the committed greedy output is unchanged. On one Qwen3.8-27B build it was measured at
-287.9 t/s against 266.3 t/s for the same fixed window when copying a random identifier manifest
-verbatim (every draft accepted), and neutral on prose and on copied prose, where the draft head
-already accepts most drafts. On generated JSON it cost about three percent: it replaces the head's
-proposal for a round rather than extending it, so it only pays when the continuation it offers is
-the one the model takes. DFlash on 35B-A3B and DFlash2 on Qwen3.8-27B can be combined
-with `--vision`; each accelerates generated-text decode after multimodal prefill, while Vision encode
-and prefill remain outside speculative acceleration. A later request cannot enable a capability
-omitted at startup.
+61,650-token prompt measured 78.5 against 66.9 t/s for that fixed window. `--lookup-ngram` adds a
+second draft source to MTP: when the request's last eight tokens repeat a run that already occurred
+in its own context and the two occurrences continued identically, the continuation of the earlier
+one is proposed for the round (copied passages, repeated JSON lines, echoed tool arguments); those
+drafts are verified like any other, so the committed greedy output is unchanged. A run counts as
+copied only when the tokens on both sides of the earlier occurrence agree, so an example in the
+prompt that the request happens to walk onto is not mistaken for a copy: the draft head keeps the
+first tokens of a copy and the lookup takes over once the copy has enough of itself behind the run.
+On one Qwen3.8-27B build, copying an identifier manifest verbatim measured 260.0 t/s against 239.2
+for the same fixed window, generated JSON at a 61,674-token prompt was level with the same window
+without the lookup (190.4 against 191.7 t/s; it cost 186.1 before the rule), and prose and copied
+prose were unchanged. DFlash on 35B-A3B and DFlash2 on Qwen3.8-27B can be combined
+with `--vision`; each accelerates generated-text decode after multimodal prefill, while Vision
+encode and prefill remain outside speculative acceleration. A later request cannot enable a
+capability omitted at startup.
 
 ## Endpoints
 

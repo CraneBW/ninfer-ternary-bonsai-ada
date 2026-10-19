@@ -19,6 +19,15 @@
 // keeps formatted output on the draft head's drafts. For a real copy the earlier occurrence
 // continues identically, so the run stays trusted.
 //
+// Agreement on the right is not enough on its own. A run that occurs once in the prompt has no
+// second occurrence to conflict with, and generated JSON walks back onto the runs of an example it
+// read: the eight tokens match, one or two tokens before them may match by coincidence, and the
+// example's continuation is another example. A copy corroborates on both sides, because the tokens
+// it has already reproduced stand before the matched run exactly as the earlier occurrence's own
+// tokens do, so a hit is offered only when kCorroboratingTokens tokens before the match agree too.
+// The first tokens of a copy are therefore drafted by the draft head, and the lookup takes over once
+// the copy has enough of itself behind the run.
+//
 // A hit still has to be verified by the target model like any other draft, so a wrong prediction
 // costs verify columns, never output tokens. Predictions are only offered when the run is long
 // enough to be worth trusting and continues for at least kMinimumPrediction tokens; otherwise the
@@ -44,6 +53,11 @@ public:
     // at eight, JSON objects with identical structure still agreed past it often enough to spend a
     // round on a wrong prediction.
     static constexpr std::uint32_t kAgreementTokens = 16;
+    // How many tokens before the matched occurrence must also agree for the run to count as a copy
+    // in progress. A local pattern (a JSON example in the prompt, a template line that recurs)
+    // matches the run itself while the tokens on its left diverge, and its continuation is the
+    // varied part; a copy is reproducing a span, so it matches on both sides of the run.
+    static constexpr std::uint32_t kCorroboratingTokens = 16;
     // A one-token prediction would displace a wider MTP proposal with a coin flip.
     static constexpr std::uint32_t kMinimumPrediction = 3;
     // Upper bound on what one lookup returns; the round's width bounds it further.
@@ -94,9 +108,21 @@ public:
     // continuation of an earlier occurrence of the last kContextTokens committed tokens.
     [[nodiscard]] std::uint32_t predict(std::span<TokenId> out) const {
         const std::size_t size = history_.size();
-        if (size <= kContextTokens || out.empty()) { return 0; }
-        const std::uint32_t position = find(size - kContextTokens);
-        if (position == kNoPosition) { return 0; }
+        if (size < kContextTokens + kCorroboratingTokens || out.empty()) { return 0; }
+        const std::size_t here       = size - kContextTokens;
+        const std::uint32_t position = find(here);
+        if (position == kNoPosition || static_cast<std::size_t>(position) >= here) { return 0; }
+        // A run that repeats but whose earlier occurrence is not preceded by the same tokens is a
+        // local pattern, not a copy in progress: the match alone says nothing about what comes next
+        // (a JSON example in the prompt, a template line that recurs). A copy corroborates itself on
+        // both sides of the match, because the tokens the request has already reproduced stand
+        // before the matched run exactly as the earlier occurrence's own tokens do.
+        std::size_t corroborating = 0;
+        while (corroborating < kCorroboratingTokens && position > corroborating && here > corroborating) {
+            if (history_[position - 1U - corroborating] != history_[here - 1U - corroborating]) { break; }
+            ++corroborating;
+        }
+        if (corroborating < kCorroboratingTokens) { return 0; }
         std::uint32_t predicted = 0;
         for (; predicted < out.size(); ++predicted) {
             const std::size_t source =
