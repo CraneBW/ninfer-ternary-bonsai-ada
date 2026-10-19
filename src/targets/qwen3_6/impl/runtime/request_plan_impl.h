@@ -737,12 +737,28 @@ std::optional<AdmissionCandidate> ProgramImplCore::inspect_lane(
         }
     }
 
+    // A capture that lands exactly on the reuse frontier is reserved before the request has
+    // prefilled a single token. Until its first committed chunk settles the materialization, a
+    // forked source state cannot be snapshotted, so such a group is only worth planning when the
+    // reuse takes the frontier over in place: a move of a consumed checkpoint, or a split or host
+    // restore of a retained one.
+    const bool reuses_in_place = [&] {
+        if (source == nullptr && shared_source == nullptr) { return true; }
+        const StateImageHandle selected =
+            source != nullptr ? selected_state(*source, plan->reuse, plan->selected_checkpoint)
+                              : shared_source->state;
+        if (state_store->residency(selected) != StateReplicaResidency::DeviceOnly) { return true; }
+        return source != nullptr &&
+               plan->source_mode == runtime::PrivateSourceMode::ConsumeToActive &&
+               !plan->state_fork_required;
+    }();
     plan->capture_groups.reserve(base.capture_groups.size());
     for (CaptureGroup group : base.capture_groups) {
         // A KVMem window-edge anchor is re-armed at its own frontier: the reused
         // prefix already carries the state that frontier describes, so renewing the
         // anchor costs one snapshot instead of a re-derivation from root.
-        const bool rearmed_window_anchor = group.long_anchor && group.frontier == plan->reuse_base;
+        const bool rearmed_window_anchor = group.long_anchor &&
+                                           group.frontier == plan->reuse_base && reuses_in_place;
         if (group.frontier < plan->reuse_base ||
             (group.frontier == plan->reuse_base && !rearmed_window_anchor)) {
             continue;

@@ -128,6 +128,12 @@ ninfer::EngineOptions private_long_anchor_engine_options(const char* artifact) {
     return options;
 }
 
+ninfer::EngineOptions rearmed_long_anchor_engine_options(const char* artifact) {
+    ninfer::EngineOptions options                    = private_long_anchor_engine_options(artifact);
+    options.context_cache.max_private_continuations = 4;
+    return options;
+}
+
 ninfer::EngineOptions last_alias_engine_options(const char* artifact) {
     ninfer::EngineOptions options;
     options.artifact_path                        = artifact;
@@ -1095,6 +1101,107 @@ int exercise_private_long_anchor_capture_and_replacement(const char* artifact) {
                   << " prompt=" << replaced.prompt.prompt_tokens
                   << " captures=" << stats.active_captures_completed
                   << " capture_aborts=" << stats.active_captures_aborted << '\n';
+        return 1;
+    }
+
+    return 0;
+}
+
+// A marker which lands exactly on the frontier the request is already reusing used to reserve its
+// capture before a single token had been prefilled, while the retained source still reached that
+// frontier through an unsettled StateImage fork, so the request died with "capture transaction is
+// not reservable". The plan has to leave such a group out instead of arming it.
+int exercise_rearmed_private_long_anchor(const char* artifact) {
+    ninfer::Engine engine(rearmed_long_anchor_engine_options(artifact));
+
+    const auto input = [](std::vector<std::string> turns, std::uint32_t marker_after) {
+        ninfer::PromptInput prompt;
+        for (std::string& text : turns) {
+            ninfer::ChatMessage message;
+            message.role = ninfer::ChatRole::User;
+            message.parts.push_back(ninfer::MessagePart{
+                .kind = ninfer::MessagePartKind::Text, .text = std::move(text), .media = {}});
+            prompt.messages.push_back(std::move(message));
+        }
+        prompt.options.enable_thinking = false;
+        prompt.context_cache.markers.push_back(ninfer::PromptCacheMarker{
+            .after_message_count = marker_after,
+            .kind                = ninfer::PromptCacheMarkerKind::PrivateLongAnchor,
+            .location            = ninfer::PromptCacheMarkerLocation::MessageBoundary,
+        });
+        return prompt;
+    };
+    const auto session = [](ninfer::PromptInput prompt) {
+        prompt.context_cache.session_key = "rearmed-private-long-anchor";
+        prompt.context_cache.retention   = ninfer::CacheRetentionHint::LiveSession;
+        return prompt;
+    };
+    ninfer::RequestOptions request;
+    request.execution.requested_output_tokens = 1;
+    request.execution.sampling.temperature    = 0.0F;
+    request.execution.allow_prefix_reuse      = true;
+    request.stop.include_model_defaults       = false;
+
+    constexpr std::string_view stable =
+        "This is the stable conversation prefix retained for a later branch.";
+    const ninfer::GenerationResult source = engine.generate(
+        engine.prepare(input({std::string(stable), "Follow the original branch."}, 1)), request);
+    if (source.generated_token_ids.size() != 1 ||
+        source.prefix_reuse_path != ninfer::PrefixReusePath::Root) {
+        std::cerr << "the first re-armed long-anchor request did not capture from Root\n";
+        return 1;
+    }
+
+    const ninfer::GenerationResult anchored =
+        engine.generate(engine.prepare(session(input({std::string(stable),
+                                                     "Follow the replacement branch.",
+                                                     "This suffix belongs only to the anchor."},
+                                                    2))),
+                        request);
+    if (anchored.generated_token_ids.size() != 1 ||
+        anchored.prefix_reuse_path != ninfer::PrefixReusePath::PrivateLongAnchor ||
+        anchored.reused_prompt_tokens == 0) {
+        std::cerr << "the anchored lineage did not reuse the first long anchor: path="
+                  << static_cast<int>(anchored.prefix_reuse_path)
+                  << " reused=" << anchored.reused_prompt_tokens << '\n';
+        return 1;
+    }
+
+    // Reuse the anchor this request's own marker covers, so the marker lands on the frontier the
+    // request already starts from.
+    const ninfer::GenerationResult reused =
+        engine.generate(engine.prepare(session(input({std::string(stable),
+                                                      "Follow the replacement branch.",
+                                                      "A second branch keeps the marker."},
+                                                     2))),
+                        request);
+    if (reused.generated_token_ids.size() != 1 ||
+        reused.prefix_reuse_path != ninfer::PrefixReusePath::PrivateLongAnchor ||
+        reused.reused_prompt_tokens <= anchored.reused_prompt_tokens ||
+        reused.reused_prompt_tokens >= reused.prompt.prompt_tokens) {
+        std::cerr << "a marker at the reused frontier did not survive the re-arm: path="
+                  << static_cast<int>(reused.prefix_reuse_path)
+                  << " anchored_reused=" << anchored.reused_prompt_tokens
+                  << " rearmed_reused=" << reused.reused_prompt_tokens
+                  << " prompt=" << reused.prompt.prompt_tokens << '\n';
+        return 1;
+    }
+
+    const ninfer::GenerationResult rearmed =
+        engine.generate(engine.prepare(session(input({std::string(stable),
+                                                      "Follow the replacement branch.",
+                                                      "A third branch keeps the marker too."},
+                                                     2))),
+                        request);
+    if (rearmed.generated_token_ids.size() != 1 ||
+        rearmed.prefix_reuse_path != ninfer::PrefixReusePath::PrivateLongAnchor ||
+        rearmed.reused_prompt_tokens < reused.reused_prompt_tokens ||
+        rearmed.reused_prompt_tokens >= rearmed.prompt.prompt_tokens) {
+        std::cerr << "the re-armed long anchor stopped being reusable: path="
+                  << static_cast<int>(rearmed.prefix_reuse_path)
+                  << " previous_reused=" << reused.reused_prompt_tokens
+                  << " rearmed_reused=" << rearmed.reused_prompt_tokens
+                  << " prompt=" << rearmed.prompt.prompt_tokens << '\n';
         return 1;
     }
     return 0;
@@ -2260,9 +2367,15 @@ int main() {
             std::cerr << "private-long-anchor requires a Qwen3.6 27B artifact\n";
             return 1;
         }
-        const int result = exercise_private_long_anchor_capture_and_replacement(artifact);
-        if (result == 0) { std::cout << "ok\n"; }
-        return result;
+        if (const int result = exercise_private_long_anchor_capture_and_replacement(artifact);
+            result != 0) {
+            return result;
+        }
+        if (const int result = exercise_rearmed_private_long_anchor(artifact); result != 0) {
+            return result;
+        }
+        std::cout << "ok\n";
+        return 0;
     }
     if (groupwise != nullptr && *groupwise != '\0') {
         if (const int result = exercise_artifact(groupwise, "qwen3_6_27b"); result != 0) {
