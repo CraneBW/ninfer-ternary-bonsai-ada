@@ -368,7 +368,9 @@ candidates:
   content boundary, and with one it means no implicit candidate at all;
 - `mode:"implicit"` requests that automatic candidate explicitly, even beside a declared boundary;
 - `mode:"explicit"` disables implicit writes for the request;
-- `prompt_cache_breakpoint:{"mode":"explicit"}` on supported content declares a candidate.
+- `prompt_cache_breakpoint:{"mode":"explicit"}` on supported content declares a candidate;
+  the optional `scope` selects where it lives: `"shared"` (the default) publishes a prefix for
+  every session, `"private"` records it on the requesting lineage only.
 
 One request carries at most four distinct writes. An implicit target occupies one slot unless it
 coincides with an explicit target; the remaining slots contain the latest explicit boundaries.
@@ -382,6 +384,41 @@ captures rather than hits. On an eight-turn agent session that rewrites its hist
 turns, dropping it beside the declared boundary cut completed captures from 29 to 17, removed the
 shared-prefix degradations and evictions (8 and 7, now 0 and 0) and raised reused prompt tokens from
 545,938 to 607,685, with no change in answers or in the reuse of append-only turns.
+
+### Shared and private checkpoints
+
+A declared boundary is a shared write by default: it publishes a prefix that any later request with
+the same rendered prefix can reuse. `scope:"private"` keeps the checkpoint on the request's own
+lineage instead. The scope changes ownership and retention, not reuse -- an exact prefix match hits
+in both cases.
+
+- a private boundary does not consume a `--max-shared-prefixes` slot, so many sessions can each
+  keep their own rewrite point without competing for the global pool;
+- each lineage keeps at most `--max-long-anchors-per-continuation` private anchors (default 2);
+  declaring further anchors rolls the oldest out;
+- private checkpoints are reclaimed under memory pressure exactly like shared residents, so
+  `--device-state-slots` and `--host-state-slots` still bound how many survive.
+
+A private boundary delivers the same reuse as a shared one. Measured on this build with a six-turn
+chat whose prompts run 41K to 62K tokens and which compacts its history at turn four: the rewrite
+round reused the 30,869-token frozen prefix and prefilled only the rewritten tail, 6.8 s against
+22.0 s cold, and the append-only turns reused 41,101 to 51,097 tokens. `prompt_cache_key` is not
+required for that -- the engine finds the prefix's own checkpoint either way -- but sending it names
+the lineage, which is why the frontend forwards it as the request's session key. Re-sending the
+marker on a turn that reuses a retained prefix does not capture a second checkpoint: the retained
+lineage keeps the frontier it already owns.
+
+Private checkpoints cost more when several sessions declare their own. Two concurrent sessions that
+each keep a private boundary at the same 30,869-token prefix hold two checkpoints where a shared
+boundary holds one, and under the pressure of two simultaneous long prefills the planner reclaimed
+one of them: with 8 device and 16 host state slots, three of the four rewrite rounds reused the
+prefix and one fell back to a cold prefill, and the planner reported the drop as
+`checkpoints_dropped` with a `private_owners_evicted` degradation. The same two sessions with
+`scope:"shared"` reused the prefix on all four rewrite rounds. Budget headroom, or share one frozen
+prefix, when several sessions rewrite their histories at once.
+
+A private boundary is the natural choice for one agent session that freezes its own history; a
+shared boundary is the choice when several sessions should warm the same frozen instructions.
 
 ### Keeping a prefix across a history rewrite
 
@@ -410,9 +447,13 @@ two host state images, and raising `--device-state-slots`/`--host-state-slots` (
 concurrency) buys more retention.
 
 These fields are optimization hints. A legal boundary that cannot be represented as an exact
-rendered-token frontier is ignored without changing prompt content. `prompt_cache_key` is not an
-Engine session key or prefix identity. Valid TTL/retention values are accepted, but NInfer does not
-promise their wall-clock residency; physical retention follows the resource scheduler.
+rendered-token frontier is ignored without changing prompt content. `prompt_cache_key` names the
+conversation lineage and is passed to the engine as the request's session key: a later turn with
+the same key continues that lineage's own checkpoint instead of forking a private copy beside it.
+Use one key per conversation -- two conversations that share a key share a lineage. Responses
+instead derives the lineage from `previous_response_id`. Valid TTL/retention values are accepted,
+but NInfer does not promise their wall-clock residency; physical retention follows the resource
+scheduler.
 
 ## OpenAI Responses Core
 
@@ -483,7 +524,7 @@ wire response contains typed `output` Items.
 | `background` | omitted or `false` |
 | `include` | omitted or an empty array |
 | `stream_options.include_obfuscation` | optional boolean; accepted as a transport hint, but this local server emits no padding |
-| cache and client hints | `prompt_cache_key`, `prompt_cache_options`, `prompt_cache_retention`, and explicit breakpoints follow [OpenAI prompt caching](#openai-prompt-caching); `safety_identifier` and `user` are accepted as client hints |
+| cache and client hints | `prompt_cache_key` (session lineage), `prompt_cache_options`, `prompt_cache_retention`, and explicit breakpoints follow [OpenAI prompt caching](#openai-prompt-caching); `safety_identifier` and `user` are accepted as client hints |
 
 Unknown top-level fields fail with `unknown_parameter`. Recognized but unsupported features fail
 with a field-specific 400 error instead of being silently ignored.
@@ -519,10 +560,10 @@ System and developer message Items retain their positions in the input array. To
 role lowering occurs only in the Qwen family frontend.
 
 An `input_text`, `input_image`, or tool-result part may carry
-`prompt_cache_breakpoint:{"mode":"explicit"}`. Write selection follows
-[OpenAI prompt caching](#openai-prompt-caching); boundaries affect reuse opportunities, not prompt
-identity or output semantics. String message status/phase metadata is accepted but has no Qwen
-prompt representation.
+`prompt_cache_breakpoint:{"mode":"explicit"}` and an optional `"scope":"shared"|"private"`. Write
+selection follows [OpenAI prompt caching](#openai-prompt-caching); boundaries affect reuse
+opportunities, not prompt identity or output semantics. String message status/phase metadata is
+accepted but has no Qwen prompt representation.
 
 `input_file`, `input_audio`, image `file_id`, non-`auto` image detail, reasoning metadata without raw
 reasoning text, partial tool Items, and other Item/content types are not supported. HTTP media URLs

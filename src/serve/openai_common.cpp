@@ -38,19 +38,35 @@ std::string responses_identifier(std::string_view prefix) {
 
 using Json = nlohmann::json;
 
-bool parse_openai_prompt_cache_breakpoint(const RequestJson& value, std::string_view param) {
+std::optional<ninfer::PromptCacheMarkerKind> parse_openai_prompt_cache_breakpoint(
+    const RequestJson& value, std::string_view param) {
     if (!value.contains("prompt_cache_breakpoint") ||
         value.at("prompt_cache_breakpoint").is_null()) {
-        return false;
+        return std::nullopt;
     }
     const RequestJson& breakpoint = value.at("prompt_cache_breakpoint");
     if (!breakpoint.is_object() || !breakpoint.contains("mode") ||
         !breakpoint.at("mode").is_string() ||
         breakpoint.at("mode").get<std::string>() != "explicit") {
-        bad_request("prompt_cache_breakpoint must be {mode:'explicit'}", std::string(param),
-                    "invalid_cache_breakpoint");
+        bad_request("prompt_cache_breakpoint must be {mode:'explicit'} with an optional scope of "
+                    "'shared' or 'private'",
+                    std::string(param), "invalid_cache_breakpoint");
     }
-    return true;
+    ninfer::PromptCacheMarkerKind kind = ninfer::PromptCacheMarkerKind::SharedStablePrefix;
+    if (breakpoint.contains("scope") && !breakpoint.at("scope").is_null()) {
+        if (!breakpoint.at("scope").is_string()) {
+            bad_request("prompt_cache_breakpoint.scope must be a string", std::string(param),
+                        "invalid_cache_breakpoint");
+        }
+        const std::string scope = breakpoint.at("scope").get<std::string>();
+        if (scope == "private") {
+            kind = ninfer::PromptCacheMarkerKind::PrivateLongAnchor;
+        } else if (scope != "shared") {
+            bad_request("prompt_cache_breakpoint.scope must be 'shared' or 'private'",
+                        std::string(param), "invalid_cache_breakpoint");
+        }
+    }
+    return kind;
 }
 
 OpenAIPromptCachePolicy parse_openai_prompt_cache_policy(const RequestJson& body) {
@@ -81,6 +97,13 @@ OpenAIPromptCachePolicy parse_openai_prompt_cache_policy(const RequestJson& body
     }
 
     OpenAIPromptCachePolicy policy;
+    if (body.contains("prompt_cache_key") && !body.at("prompt_cache_key").is_null()) {
+        std::string key = body.at("prompt_cache_key").get<std::string>();
+        if (key.empty()) {
+            bad_request("prompt_cache_key must not be empty", "prompt_cache_key");
+        }
+        policy.session_key = std::move(key);
+    }
     if (!body.contains("prompt_cache_options") || body.at("prompt_cache_options").is_null()) {
         return policy;
     }
@@ -163,8 +186,8 @@ void apply_openai_prompt_cache_policy(GenerationRequest& request, OpenAIPromptCa
         if (index < first_selected) {
             explicit_boundaries[index]->reset();
         } else {
-            explicit_boundaries[index]->value().kind =
-                ninfer::PromptCacheMarkerKind::SharedStablePrefix;
+            // Keep the kind the breakpoint declared: a shared write publishes a prefix for other
+            // sessions, a private write records a checkpoint on this request's own lineage.
             explicit_boundaries[index]->value().evidence =
                 ninfer::SharedCandidateEvidence::ExplicitBoundary;
         }

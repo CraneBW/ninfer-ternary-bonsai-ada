@@ -8,6 +8,7 @@
 #include <nlohmann/json.hpp>
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -21,10 +22,17 @@ enum class OpenAIPromptCacheAutomatic : std::uint8_t {
 
 struct OpenAIPromptCachePolicy {
     OpenAIPromptCacheAutomatic automatic = OpenAIPromptCacheAutomatic::Default;
+    // prompt_cache_key names the conversation lineage a request belongs to. The frontend turns it
+    // into a session key, so a re-entering turn continues the lineage's own checkpoint instead of
+    // forking a copy beside it.
+    std::optional<std::string> session_key;
 };
 
-[[nodiscard]] bool parse_openai_prompt_cache_breakpoint(const RequestJson& value,
-                                                        std::string_view param);
+// Returns the marker kind a prompt_cache_breakpoint declares, or nullopt when the field is absent.
+// A declared boundary is a write candidate of its own: scope 'shared' (the default) publishes a
+// prefix other sessions can reuse, scope 'private' records a checkpoint on this request's lineage.
+[[nodiscard]] std::optional<ninfer::PromptCacheMarkerKind> parse_openai_prompt_cache_breakpoint(
+    const RequestJson& value, std::string_view param);
 [[nodiscard]] OpenAIPromptCachePolicy parse_openai_prompt_cache_policy(const RequestJson& body);
 void apply_openai_prompt_cache_policy(GenerationRequest& request, OpenAIPromptCachePolicy policy);
 

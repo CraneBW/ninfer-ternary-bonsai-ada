@@ -780,7 +780,7 @@ int test_common_objects() {
 
 int test_prompt_cache_boundary_policy() {
     int failures = 0;
-    const auto boundary_parts = [](const Json& extra) {
+    const auto boundary_parts = [](const Json& breakpoint, const Json& extra = Json::object()) {
         Json body = base_request();
         body["messages"] =
             Json::array({Json{{"role", "user"},
@@ -788,7 +788,7 @@ int test_prompt_cache_boundary_policy() {
                                    {Json{{"type", "text"}, {"text", "frozen"}},
                                     Json{{"type", "text"},
                                          {"text", "stable"},
-                                         {"prompt_cache_breakpoint", Json{{"mode", "explicit"}}}}})}},
+                                         {"prompt_cache_breakpoint", breakpoint}}})}},
                          Json{{"role", "assistant"}, {"content", "OK"}},
                          Json{{"role", "user"}, {"content", "next"}}});
         for (const auto& item : extra.items()) { body[item.key()] = item.value(); }
@@ -808,13 +808,16 @@ int test_prompt_cache_boundary_policy() {
         return out;
     };
 
-    const std::vector<CacheBoundary> declared = markers(parse(boundary_parts(Json::object())));
+    const Json explicit_breakpoint = Json{{"mode", "explicit"}};
+    const std::vector<CacheBoundary> declared =
+        markers(parse(boundary_parts(explicit_breakpoint)));
     failures += check(
         declared.size() == 1 &&
+            declared[0].kind == ninfer::PromptCacheMarkerKind::SharedStablePrefix &&
             declared[0].evidence == ninfer::SharedCandidateEvidence::ExplicitBoundary,
         "a declared boundary is the request's only shared-prefix write");
-    const std::vector<CacheBoundary> requested = markers(
-        parse(boundary_parts(Json{{"prompt_cache_options", Json{{"mode", "implicit"}}}})));
+    const std::vector<CacheBoundary> requested = markers(parse(boundary_parts(
+        explicit_breakpoint, Json{{"prompt_cache_options", Json{{"mode", "implicit"}}}})));
     bool explicit_seen   = false;
     bool automatic_seen  = false;
     for (const CacheBoundary& marker : requested) {
@@ -823,6 +826,29 @@ int test_prompt_cache_boundary_policy() {
     }
     failures += check(requested.size() == 2 && explicit_seen && automatic_seen,
                       "an implicit request keeps its automatic candidate beside a declared boundary");
+
+    const std::vector<CacheBoundary> private_scope = markers(parse(
+        boundary_parts(Json{{"mode", "explicit"}, {"scope", "private"}})));
+    failures += check(private_scope.size() == 1 &&
+                          private_scope[0].kind ==
+                              ninfer::PromptCacheMarkerKind::PrivateLongAnchor &&
+                          private_scope[0].evidence ==
+                              ninfer::SharedCandidateEvidence::ExplicitBoundary,
+                      "scope private declares a checkpoint on the request lineage");
+    const ApiError bad_scope = api_error([&] {
+        parse(boundary_parts(Json{{"mode", "explicit"}, {"scope", "global"}}));
+    });
+    failures += check(bad_scope.status == 400 && bad_scope.code == "invalid_cache_breakpoint",
+                      "an unknown breakpoint scope is rejected");
+
+    const OpenAIChatRequest keyed =
+        parse(boundary_parts(explicit_breakpoint, Json{{"prompt_cache_key", "conv-42"}}));
+    failures += check(keyed.cache_session_key.has_value() && *keyed.cache_session_key == "conv-42",
+                      "prompt_cache_key names the request's session lineage");
+    const ApiError empty_key = api_error([&] {
+        parse(boundary_parts(explicit_breakpoint, Json{{"prompt_cache_key", ""}}));
+    });
+    failures += check(empty_key.status == 400, "an empty prompt_cache_key is rejected");
     return failures;
 }
 

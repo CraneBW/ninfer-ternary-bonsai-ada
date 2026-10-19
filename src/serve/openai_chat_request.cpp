@@ -353,8 +353,9 @@ void parse_content_parts(const Json& content, ChatTurn& turn, std::size_t index)
             bad_request("content type '" + type + "' is not supported", "messages",
                         "modality_not_supported");
         }
-        if (parse_openai_prompt_cache_breakpoint(part, "messages")) {
-            parsed.cache_boundary_after = CacheBoundary{};
+        if (const std::optional<ninfer::PromptCacheMarkerKind> kind =
+                parse_openai_prompt_cache_breakpoint(part, "messages")) {
+            parsed.cache_boundary_after = CacheBoundary{.kind = *kind};
         }
         turn.content.push_back(std::move(parsed));
     }
@@ -898,6 +899,7 @@ OpenAIChatRequest parse_chat_completion_request(const Json& body, const RequestL
     output.model = body.at("model").get<std::string>();
 
     const OpenAIPromptCachePolicy cache_policy = parse_openai_prompt_cache_policy(body);
+    output.cache_session_key                   = cache_policy.session_key;
 
     parse_tools(body, output.generation);
     parse_tool_choice(body, output.generation);

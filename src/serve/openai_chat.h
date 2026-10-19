@@ -20,6 +20,9 @@ struct GenerationOutcome;
 struct OpenAIChatRequest {
     std::string model;
     GenerationRequest generation;
+    // prompt_cache_key names the conversation lineage, so a re-entering turn continues its own
+    // checkpoint instead of forking a copy beside it.
+    std::optional<std::string> cache_session_key;
     bool stream                 = false;
     bool include_usage          = false;
     bool output_tokens_explicit = false;

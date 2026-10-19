@@ -145,10 +145,12 @@ ninfer::product::media_acquire::Source parse_video_source(const Json& part) {
     return source;
 }
 
-void apply_shared_breakpoint(ContentPart& part, const Json& wire, std::size_t& breakpoint_count) {
-    if (!parse_openai_prompt_cache_breakpoint(wire, "input")) { return; }
+void apply_breakpoint(ContentPart& part, const Json& wire, std::size_t& breakpoint_count) {
+    const std::optional<ninfer::PromptCacheMarkerKind> kind =
+        parse_openai_prompt_cache_breakpoint(wire, "input");
+    if (!kind) { return; }
     ++breakpoint_count;
-    part.cache_boundary_after = CacheBoundary{};
+    part.cache_boundary_after = CacheBoundary{.kind = *kind};
 }
 
 struct ParsedMessage {
@@ -163,7 +165,7 @@ void append_message_text(ParsedMessage& parsed, Json& content, const std::string
     part.kind     = ContentKind::Text;
     part.text     = text;
     part.type_raw = wire_type;
-    if (wire != nullptr) { apply_shared_breakpoint(part, *wire, breakpoint_count); }
+    if (wire != nullptr) { apply_breakpoint(part, *wire, breakpoint_count); }
     parsed.turn.content.push_back(std::move(part));
 
     Json canonical;
@@ -238,7 +240,7 @@ void parse_message_content_part(const Json& value, ChatRole role, ParsedMessage&
         part.kind     = ContentKind::Image;
         part.type_raw = type;
         part.source   = parse_image_source(value);
-        apply_shared_breakpoint(part, value, breakpoint_count);
+        apply_breakpoint(part, value, breakpoint_count);
         parsed.turn.content.push_back(std::move(part));
         Json canonical{
             {"type", "input_image"}, {"image_url", value.at("image_url")}, {"detail", "auto"}};
@@ -433,7 +435,7 @@ ContentPart tool_output_text(std::string text, const Json* wire, std::size_t& br
     part.kind     = ContentKind::Text;
     part.type_raw = "input_text";
     part.text     = std::move(text);
-    if (wire != nullptr) { apply_shared_breakpoint(part, *wire, breakpoint_count); }
+    if (wire != nullptr) { apply_breakpoint(part, *wire, breakpoint_count); }
     return part;
 }
 
@@ -494,7 +496,7 @@ ChatTurn parse_function_call_output_item(
                 part.kind     = ContentKind::Image;
                 part.type_raw = type;
                 part.source   = parse_image_source(value);
-                apply_shared_breakpoint(part, value, breakpoint_count);
+                apply_breakpoint(part, value, breakpoint_count);
                 turn.content.push_back(std::move(part));
             } else if (type == "input_file") {
                 bad_request("tool result input_file requires a Files API", "input",
