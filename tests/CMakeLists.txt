@@ -216,6 +216,9 @@ ninfer_add_test(ninfer_serve_metrics_test
   LIBRARIES ninfer_serve)
 ninfer_add_test(ninfer_kvmem_retrieval_test
   SOURCES test_kvmem_retrieval.cpp)
+ninfer_add_op_test(ninfer_gguf_linear_test
+  SOURCES ops/test_gguf_linear.cu
+  LIBRARIES ninfer_ops ninfer_core)
 ninfer_add_op_test(ninfer_kvmem_rerope_test
   SOURCES kvmem_rerope_test.cu
           ${PROJECT_SOURCE_DIR}/src/ops/launcher/rope.cu

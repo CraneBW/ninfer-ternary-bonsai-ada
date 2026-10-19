@@ -5,6 +5,7 @@
 
 #include "ninfer/ops/silu_mul.h"
 #include "ops/linear/fp8/fp8_format.h"
+#include "ops/linear/gguf/gguf_dispatch.h"
 #include "ops/linear/nvfp4/nvfp4_format.h"
 #include "ops/linear/ternary/ternary_dispatch.h"
 #include "ops/linear/ternary/ternary_rotation.h"
@@ -42,6 +43,12 @@ std::size_t linear_swiglu_workspace_capacity_bytes(QType qtype, std::int32_t gat
     validate_policy(policy);
     if (min_tokens <= 0 || max_tokens < min_tokens || (gate_up_rows % 2) != 0) {
         throw std::invalid_argument("linear_swiglu workspace: invalid profile or token interval");
+    }
+    if (is_gguf(qtype)) {
+        const std::size_t projected =
+            static_cast<std::size_t>(gate_up_rows) * max_tokens * sizeof(std::uint16_t);
+        return projected + detail::gguf_linear_workspace_capacity_bytes(
+            qtype, gate_up_rows, input_rows, min_tokens, max_tokens) + 256;
     }
     if (qtype == QType::W8G32_F16S) {
         if (policy != LinearPolicy::A16Only) {
@@ -92,6 +99,20 @@ void linear_swiglu(const Tensor& x, const Weight& gate_up_weight, Tensor& out, L
         throw std::invalid_argument("linear_swiglu: x/out must be BF16");
     }
     const std::int32_t t   = x.ne[1];
+    if (is_gguf(gate_up_weight.qtype)) {
+        if (gate_up_weight.n <= 0 || gate_up_weight.n % 2 != 0 ||
+            gate_up_weight.n != 2 * out.ne[0] || x.ne[0] != gate_up_weight.k ||
+            x.ne[1] <= 0 || out.ne[1] != x.ne[1] || x.dtype != DType::BF16 ||
+            out.dtype != DType::BF16 || !x.is_contiguous() || !out.is_contiguous()) {
+            throw std::invalid_argument("linear_swiglu: invalid GGUF geometry");
+        }
+        auto scope = ws.scope();
+        Tensor gate_up = ws.alloc(DType::BF16, {gate_up_weight.n, t});
+        detail::gguf_linear_dispatch(x, gate_up_weight, gate_up, ws, stream);
+        const std::int32_t rows = gate_up_weight.n / 2;
+        silu_mul(gate_up.slice(0, 0, rows), gate_up.slice(0, rows, rows), out, stream);
+        return;
+    }
     const bool large_shape = x.ne[0] == 5120 && out.ne[0] == 17408 && gate_up_weight.n == 34816 &&
                              gate_up_weight.k == 5120 && gate_up_weight.padded_shape[0] == 34816 &&
                              gate_up_weight.padded_shape[1] == 5120;

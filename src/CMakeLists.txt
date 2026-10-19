@@ -385,6 +385,7 @@ target_sources(ninfer_ops PRIVATE
 ninfer_internal_includes(ninfer_ops)
 ninfer_cuda_archive(ninfer_ops)
 target_link_libraries(ninfer_ops PUBLIC ninfer_core PRIVATE ${_ninfer_nvfp4_non_rdc})
+include(ops/linear/gguf/sources.cmake)
 
 # Product-independent text and media mechanisms.
 add_library(ninfer_text STATIC

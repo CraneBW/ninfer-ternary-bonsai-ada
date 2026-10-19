@@ -4,6 +4,7 @@
 #include "ninfer/ops/linear_add.h"
 
 #include "ninfer/ops/residual_add.h"
+#include "ops/linear/gguf/gguf_dispatch.h"
 #include "ops/linear/ternary/ternary_dispatch.h"
 #include "ops/linear/ternary/ternary_rotation.h"
 #include "ops/linear_add/bf16/bf16_linear_add_plan.h"
@@ -92,6 +93,11 @@ std::size_t linear_add_workspace_capacity_bytes(QType qtype, std::int32_t output
     if (min_tokens <= 0 || max_tokens < min_tokens) {
         throw std::invalid_argument("linear_add workspace: invalid token interval");
     }
+    if (is_gguf(qtype)) {
+        return static_cast<std::size_t>(output_rows) * max_tokens * sizeof(std::uint16_t) +
+               detail::gguf_linear_workspace_capacity_bytes(
+                   qtype, output_rows, input_rows, min_tokens, max_tokens) + 256;
+    }
     if (qtype == QType::BF16_CTRL) {
         if (policy != LinearPolicy::A16Only) {
             throw std::invalid_argument("linear_add workspace: BF16 admits only A16");
@@ -163,6 +169,13 @@ void linear_add(const Tensor& x, const Weight& w, Tensor& residual_out, LinearPo
     require_tensor(residual_out, DType::BF16, w.n, t, "residual_out");
     if (overlaps(x, residual_out)) {
         throw std::invalid_argument("linear_add: x and residual_out must not overlap");
+    }
+    if (is_gguf(w.qtype)) {
+        auto scope = ws.scope();
+        Tensor projected = ws.alloc(DType::BF16, {w.n, t});
+        detail::gguf_linear_dispatch(x, w, projected, ws, stream);
+        residual_add(projected, residual_out, stream);
+        return;
     }
 
     if (w.qtype == QType::BF16_CTRL) {

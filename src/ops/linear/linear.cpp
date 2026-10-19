@@ -6,6 +6,7 @@
 #include "ops/linear/bf16/bf16_config.h"
 #include "ops/linear/bf16/bf16_dispatch.h"
 #include "ops/linear/fp8/fp8_dispatch.h"
+#include "ops/linear/gguf/gguf_dispatch.h"
 #include "ops/linear/nvfp4/nvfp4_config.h"
 #include "ops/linear/nvfp4/nvfp4_dispatch.h"
 #include "ops/linear/q4/q4_dispatch.h"
@@ -82,6 +83,13 @@ void validate_linear_semantics(const Tensor& x, const Weight& w, const Tensor& o
 
 void dispatch_linear(const Tensor& x, const Weight& w, Tensor& out, LinearPolicy policy,
                      WorkspaceArena* workspace, cudaStream_t stream) {
+    if (is_gguf(w.qtype)) {
+        if (!workspace) {
+            throw std::invalid_argument("GGUF linear needs a workspace");
+        }
+        detail::gguf_linear_dispatch(x, w, out, *workspace, stream);
+        return;
+    }
     switch (w.qtype) {
     case QType::Q4G64_F16S:
         detail::q4_dispatch(x, w, out, policy, stream);
@@ -123,6 +131,10 @@ std::size_t linear_workspace_capacity_bytes(QType qtype, std::int32_t output_row
     validate_linear_policy(policy);
     if (min_tokens <= 0 || max_tokens < min_tokens) {
         throw std::invalid_argument("linear workspace: invalid token interval");
+    }
+    if (is_gguf(qtype)) {
+        return detail::gguf_linear_workspace_capacity_bytes(
+            qtype, output_rows, input_rows, min_tokens, max_tokens);
     }
 
     switch (qtype) {

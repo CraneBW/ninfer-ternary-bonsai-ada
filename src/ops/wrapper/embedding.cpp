@@ -6,6 +6,7 @@
 
 #include "ops/common/math.h"
 #include "ops/linear/fp8/fp8_format.h"
+#include "ops/linear/gguf/gguf_dispatch.h"
 #include "ops/linear/ternary/ternary_rotation.h"
 #include "ops/launcher/embed_gather.h" // detail::embed_gather_*_launch
 #include "core/device.h"
@@ -339,6 +340,25 @@ void embedding(const Tensor& ids, const Weight& table, Tensor& out, cudaStream_t
     (void)numel_allow_zero(out, "out");
     require_ids_shape(ids);
     require_out_shape(ids, out);
+
+    if (is_gguf(table.qtype)) {
+        require_weight_2d(table);
+        const auto block = gguf_block_shape(table.qtype);
+        if (table.layout != QuantLayout::GgufBlocks ||
+            table.shape[1] != out.ne[0] || table.qdata == nullptr ||
+            block.elements == 0 || table.shape[1] % block.elements != 0) {
+            throw std::invalid_argument("embedding: invalid GGUF table geometry");
+        }
+        if (is_empty_T(ids, out)) { return; }
+        require_non_empty_tensors(ids, out);
+        const std::int64_t row_bytes =
+            static_cast<std::int64_t>(table.shape[1] / block.elements) * block.bytes;
+        gguf::dequantize_rows(detail::gguf_type(table.qtype), table.qdata,
+                              row_bytes, table.shape[1],
+                              static_cast<const std::int32_t*>(ids.data), ids.ne[0],
+                              static_cast<__nv_bfloat16*>(out.data), out.ne[0], stream);
+        return;
+    }
 
     switch (table.qtype) {
     case QType::BF16_CTRL: {
