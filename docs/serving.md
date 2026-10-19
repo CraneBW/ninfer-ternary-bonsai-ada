@@ -34,6 +34,17 @@ example `--managed-weights --max-context 1024 --kv-capacity 1024
 --max-concurrency 1 --host-kv-mib 256 --no-cuda-graph`. Default CUDA weight
 allocations are unchanged when this flag is absent.
 
+When `--kvmem` is enabled, previously evicted KV pages are kept in a
+pinned Host arena, which preserves its original size by default.
+Set `NINFER_KVMEM_HOST_PAGES` to a positive number of full KV pages to
+bound that warm cache and enable the next, lossless Host-to-cold tier when
+it fills. `NINFER_KVMEM_COLD_DIR` selects the directory for the
+automatically cleaned backing file; point it to an NVMe filesystem if
+an NVMe tier is required. Cold pages are restored transparently when
+selected for attention, with historical closed-thinking pages preferred
+for spilling over ordinary context. System/tool prefixes and active
+agent-action pages retain their protection.
+
 With `C=2` and two extra Device checkpoint slots, the process owns two active StateImage guarantees
 plus a global pool of two Device-resident checkpoints. Eight pinned Host State slots and 8 GiB of
 pinned Host KV retain inactive continuations under Device pressure. Active request capacity is two.

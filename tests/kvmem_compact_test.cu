@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <vector>
 
 #include "core/paged_kv_cache.h"
@@ -151,9 +152,21 @@ std::int64_t in_page_elems(int leading, int head, int token, int d) {
 
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     std::srand(4242);
+    const bool exercise_cold = argc == 2 && std::strcmp(argv[1], "--cold") == 0;
+    if (exercise_cold) {
+        // One Host page forces the remaining archived pages through the disk
+        // ladder; the same CPU oracle below verifies their K/V after restore.
+#if defined(_WIN32)
+        CHECK(::_putenv_s("NINFER_KVMEM_HOST_PAGES", "1") == 0, "set Host cap");
+        CHECK(::_putenv_s("NINFER_KVMEM_COLD_DIR", ".") == 0, "set cold directory");
+#else
+        CHECK(::setenv("NINFER_KVMEM_HOST_PAGES", "1", 1) == 0, "set Host cap");
+        CHECK(::setenv("NINFER_KVMEM_COLD_DIR", ".", 1) == 0, "set cold directory");
+#endif
+    }
     try {
         KVPageGeometry geometry;
         geometry.page_tokens        = kTokens;
@@ -456,10 +469,14 @@ int main() {
         // slot 0), 3/4/5 move down, {1,2} are evicted to the host arena.
         int sel1[4] = {0, 3, 4, 5};
         verify_window(sel1, 4);
-        CHECK(store.kvmem_usage().stage_out_blocks == 2 && store.kvmem_usage().transfer_runs == 1,
-              "compact #1 stage-out did not merge consecutive pages: blocks=%llu runs=%llu",
+        CHECK(store.kvmem_usage().stage_out_blocks == 2 &&
+                  (exercise_cold ? store.kvmem_cold_bytes() >=
+                                       plan_host_kv_page_layout(geometry).page_stride
+                                 : store.kvmem_usage().transfer_runs == 1),
+              "compact #1 stage-out wrong: blocks=%llu runs=%llu cold_bytes=%zu",
               static_cast<unsigned long long>(store.kvmem_usage().stage_out_blocks),
-              static_cast<unsigned long long>(store.kvmem_usage().transfer_runs));
+              static_cast<unsigned long long>(store.kvmem_usage().transfer_runs),
+              store.kvmem_cold_bytes());
         resident[1] = 0; resident[2] = 0;  // evicted by compact #1
         for (int s = 0; s < 4; ++s) { baked_now[static_cast<std::size_t>(sel1[s])] = s * kTokens; }
 
@@ -491,11 +508,52 @@ int main() {
         verify_window(sel3, 4);
         const std::uint64_t c3_runs = store.kvmem_usage().transfer_runs - runs_before_c3;
         CHECK(store.kvmem_usage().stage_in_blocks == 3 &&
-                  store.kvmem_usage().stage_out_blocks == 5 && c3_runs == 3,
-              "compact #3 stage-in did not merge adjacent host pages: in=%llu out=%llu c3_runs=%llu",
+                  store.kvmem_usage().stage_out_blocks == 5 &&
+                  (exercise_cold ? store.kvmem_cold_bytes() > 0 : c3_runs == 3),
+              "compact #3 stage-in unexpected: in=%llu out=%llu c3_runs=%llu cold_bytes=%zu",
               static_cast<unsigned long long>(store.kvmem_usage().stage_in_blocks),
               static_cast<unsigned long long>(store.kvmem_usage().stage_out_blocks),
-              static_cast<unsigned long long>(c3_runs));
+              static_cast<unsigned long long>(c3_runs), store.kvmem_cold_bytes());
+
+        if (exercise_cold) {
+            resident[1] = 0;
+            resident[2] = 1;
+            resident[3] = 1;
+            resident[4] = 0;
+            for (int s = 0; s < 4; ++s) {
+                baked_now[static_cast<std::size_t>(sel3[s])] = s * kTokens;
+            }
+
+            // Block 1 currently owns the only Host slot. Retain blocks 2
+            // and 4 instead: the executor must move block 1 Host->NVMe
+            // before it can archive block 3, then bring block 4 back from
+            // NVMe. Keeping block 2 at slot 1 avoids a third K re-phase that
+            // would exceed this test's existing one-LSB numerical oracle.
+            const std::uint64_t spills_before = store.kvmem_host_to_cold_spills();
+            CHECK(store.kvmem_compact(*handle, 4 * kTokens, nullptr, {2, 4}) == 4 * kTokens,
+                  "compact #4 cold restore");
+            int sel4[4] = {0, 2, 4, 5};
+            std::printf("verifying cold compact #4\n");
+            verify_window(sel4, 4);
+            CHECK(store.kvmem_host_to_cold_spills() > spills_before,
+                  "Host cache pressure must spill the old page to NVMe");
+            resident[3] = 0;
+            resident[4] = 1;
+            for (int s = 0; s < 4; ++s) {
+                baked_now[static_cast<std::size_t>(sel4[s])] = s * kTokens;
+            }
+
+            // Re-select the page that was Host-backed, then spilled to disk;
+            // verify its recovered K/V with the independent CPU oracle.
+            CHECK(store.kvmem_compact(*handle, 4 * kTokens, nullptr, {1}) == 4 * kTokens,
+                  "compact #5 former-Host cold restore");
+            int sel5[4] = {0, 1, 4, 5};
+            std::printf("verifying cold compact #5\n");
+            verify_window(sel5, 4);
+        }
+
+        CHECK(store.release(*handle), "release KVMem address");
+        CHECK(store.kvmem_cold_bytes() == 0, "address release reclaims cold records");
 
         std::printf("failures=%d  VERDICT: %s\n", failures, failures == 0 ? "PASS" : "FAIL");
         cudaFree(backing);

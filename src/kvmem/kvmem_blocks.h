@@ -24,8 +24,8 @@
 namespace ninfer::kvmem {
 
 // Where a block's KV payload currently lives. Gpu means "resident in the device
-// page pool at window slot baked_pos"; Host means "archived in host memory".
-enum class KvTier : std::uint8_t { Gpu, Host };
+// page pool at window slot baked_pos"; Host and Nvme retain exact page copies.
+enum class KvTier : std::uint8_t { Gpu, Host, Nvme };
 enum class BlockStratum : std::uint8_t {
     StandardContext, PinnedSink, ActionProtected, EphemeralThinking
 };
@@ -54,6 +54,23 @@ struct KvBlockMeta {
     std::uint64_t remap_count     = 0;
     std::uint64_t remap_abs_delta = 0;
 };
+
+// Host->NVMe spill ranking. Reasoning pages are coldest, while live actions
+// and system/tool declarations stay pinned in the Host cache. Retrieval heat
+// breaks ties within each ordinary stratum; older pages spill first.
+[[nodiscard]] inline bool kvmem_cold_spillable(const KvBlockMeta& block) noexcept {
+    return block.stratum == BlockStratum::EphemeralThinking ||
+           block.stratum == BlockStratum::StandardContext;
+}
+
+[[nodiscard]] inline bool kvmem_colder_than(const KvBlockMeta& lhs,
+                                            const KvBlockMeta& rhs) noexcept {
+    if (lhs.stratum != rhs.stratum) {
+        return lhs.stratum == BlockStratum::EphemeralThinking;
+    }
+    if (lhs.lrfu_score != rhs.lrfu_score) { return lhs.lrfu_score < rhs.lrfu_score; }
+    return lhs.token_begin < rhs.token_begin;
+}
 
 struct KvSelectConfig {
     std::uint32_t block_tokens   = 64;

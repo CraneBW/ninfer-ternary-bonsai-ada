@@ -230,6 +230,8 @@ set_target_properties(ninfer_kvmem_rerope_test PROPERTIES CUDA_SEPARABLE_COMPILA
 ninfer_add_op_test(ninfer_kvmem_compact_test
   SOURCES kvmem_compact_test.cu
   LIBRARIES ninfer_ops ninfer_core)
+ninfer_add_test(ninfer_kvmem_cold_store_test
+  SOURCES kvmem_cold_store_test.cpp)
 ninfer_add_op_test(ninfer_kvmem_score_test
   SOURCES kvmem_score_test.cu
   LIBRARIES ninfer_ops ninfer_core)

@@ -5,6 +5,7 @@
 #include "core/paged_kv_cache.h"
 #include "kvmem/kvmem_blocks.h"
 #include "kvmem/kvmem_bridge.h"
+#include "kvmem/kvmem_cold_store.h"
 #include "kvmem/kvmem_retrieval.h"
 #include "ninfer/types.h"
 
@@ -12,6 +13,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <array>
+#include <cerrno>
 #include <cstddef>
 #include <chrono>
 #include <cstdint>
@@ -913,6 +915,7 @@ public:
             kvmem_repos_.resize(address_capacity);
             kvmem_block_pages_.resize(address_capacity);
             kvmem_block_hosts_.resize(address_capacity);
+            kvmem_block_cold_.resize(address_capacity);
             kvmem_reuse_floors_.resize(address_capacity);
             kvmem_mean_k_.resize(address_capacity);
             kvmem_mean_k_tokens_.resize(address_capacity);
@@ -1938,6 +1941,10 @@ public:
             kvmem_block_pages_[index].clear();
             for (HostKVAllocation& host : kvmem_block_hosts_[index]) { host.release(); }
             kvmem_block_hosts_[index].clear();
+            for (const auto cold : kvmem_block_cold_[index]) {
+                if (cold.valid()) { (void)kvmem_cold_file_->release(cold); }
+            }
+            kvmem_block_cold_[index].clear();
             kvmem_reuse_floors_[index] = 0;
             kvmem_mean_k_[index].clear();
             kvmem_mean_k_tokens_[index].clear();
@@ -2084,6 +2091,94 @@ private:
         tables_->publish(address.row->handle(), 0, publish_scratch_, stream);
     }
 
+    [[nodiscard]] ninfer::kvmem::ColdKVStore& kvmem_cold_file() {
+        if (!kvmem_cold_file_) {
+            kvmem_cold_file_ =
+                std::make_unique<ninfer::kvmem::ColdKVStore>(kvmem_host_layout_.page_stride);
+        }
+        return *kvmem_cold_file_;
+    }
+
+    // A single separately pinned page is enough for direct GPU<->NVMe transfers
+    // even when the bounded Host cache has no vacant allocation at all.
+    [[nodiscard]] HostKVAllocation kvmem_cold_buffer() {
+        if (!kvmem_cold_staging_) {
+            kvmem_cold_staging_ = std::make_unique<HostKVArena>(
+                kvmem_host_layout_.page_stride,
+                std::vector<HostKVPageLayout>{kvmem_host_layout_});
+        }
+        auto buffer = kvmem_cold_staging_->allocate(kvmem_host_layout_, 1);
+        if (!buffer) { throw std::runtime_error("KVMem cold staging page unavailable"); }
+        return std::move(*buffer);
+    }
+
+    static void kvmem_cold_sync(cudaStream_t stream) {
+        const cudaError_t error = cudaStreamSynchronize(stream);
+        if (error != cudaSuccess) {
+            throw std::runtime_error(std::string("KVMem cold transfer: ") +
+                                     cudaGetErrorString(error));
+        }
+    }
+
+    // Reclaim one Host slot before allocating an evicted page. The closed think
+    // tier is evicted first, followed by low-LRFU old context. System and live
+    // action pages are protected from this background Host->disk demotion.
+    [[nodiscard]] bool kvmem_spill_one_host(
+        std::size_t current_address, std::span<const std::uint32_t> restoring) {
+        struct Candidate {
+            std::size_t address;
+            std::uint32_t id;
+            const ninfer::kvmem::KvBlockMeta* meta;
+        };
+        std::optional<Candidate> candidate;
+        for (std::size_t address = 0; address < kvmem_repos_.size(); ++address) {
+            const auto blocks = kvmem_repos_[address].blocks();
+            const auto& hosts = kvmem_block_hosts_[address];
+            for (std::uint32_t id = 0; id < hosts.size() && id < blocks.size(); ++id) {
+                if (!hosts[id].valid() ||
+                    kvmem_repos_[address].tier_of(id) != ninfer::kvmem::KvTier::Host ||
+                    !ninfer::kvmem::kvmem_cold_spillable(blocks[id]) ||
+                    (address == current_address &&
+                     std::find(restoring.begin(), restoring.end(), id) != restoring.end())) {
+                    continue;
+                }
+                if (!candidate || ninfer::kvmem::kvmem_colder_than(blocks[id], *candidate->meta)) {
+                    candidate = Candidate{address, id, &blocks[id]};
+                }
+            }
+        }
+        if (!candidate) { return false; }
+        const std::size_t address = candidate->address;
+        const std::uint32_t id = candidate->id;
+        auto& records = kvmem_block_cold_[address];
+        if (records.size() <= id) { records.resize(id + 1); }
+        if (records[id].valid()) {
+            throw std::logic_error("KVMem Host and NVMe both own the same block");
+        }
+        HostKVAllocation& host = kvmem_block_hosts_[address][id];
+        const HostKVAllocationConstView view = kvmem_host_arena_->view(host);
+        const auto record = kvmem_cold_file().store(
+            std::span<const std::byte>(view.data(), kvmem_host_layout_.page_stride));
+        records[id] = record;
+        host.release();
+        kvmem_repos_[address].set_tier(id, ninfer::kvmem::KvTier::Nvme);
+        ++kvmem_host_to_cold_spills_;
+        return true;
+    }
+
+    [[nodiscard]] ninfer::kvmem::ColdKVStore::Handle kvmem_archive_device(
+        DeviceKVPagePool& pool, DeviceKVPageHandle page, cudaStream_t stream,
+        std::uint64_t& transfer_runs) {
+        HostKVAllocation buffer = kvmem_cold_buffer();
+        const auto view = kvmem_cold_staging_->writable_view(buffer);
+        const std::array<DeviceKVPageHandle, 1> devices{page};
+        const std::array<HostKVAllocationView, 1> hosts{view};
+        transfer_runs += pool.copy_to_host_pages(devices, hosts, stream);
+        kvmem_cold_sync(stream);
+        return kvmem_cold_file().store(
+            std::span<const std::byte>(view.data(), kvmem_host_layout_.page_stride));
+    }
+
     // ---- KVMem K1a (observational passthrough) ----
     // Mirrors the page lifecycle into K0 block repositories and re-plans the
     // window on every frontier commit. In passthrough the selection is "every
@@ -2119,9 +2214,14 @@ private:
         for (std::uint32_t id = keep; id < repo.block_count(); ++id) {
             if (block_pages.size() > id) { block_pages[id] = {}; }
             if (block_hosts.size() > id && block_hosts[id].valid()) { block_hosts[id].release(); }
+            if (kvmem_block_cold_[index].size() > id &&
+                kvmem_block_cold_[index][id].valid()) {
+                (void)kvmem_cold_file_->release(kvmem_block_cold_[index][id]);
+            }
         }
         block_pages.resize(keep);
         block_hosts.resize(keep);
+        kvmem_block_cold_[index].resize(keep);
         if (kvmem_mean_k_.size() > index) {
             kvmem_mean_k_[index].resize(static_cast<std::size_t>(keep) * kvmem_mean_k_stride_);
             kvmem_mean_k_tokens_[index].resize(keep);
@@ -2320,7 +2420,7 @@ public:
     // snapshot sharing -- re-phasing a shared page would corrupt the other
     // views). Returns the new window token count, or 0 when nothing needed
     // compacting. Evicted blocks keep their bytes in this store's KVMem host
-    // arena (K4 adds an SSD tier); a re-selected block is restored from there
+    // arena or the anonymous NVMe backing; a re-selected block is restored from there
     // and re-phased to its new window slot. NOTE: a restored block carries one
     // extra int8 quantization (the host copy holds the old-phased page, not a
     // raw-K mirror -- removing that extra step is K2-full work).
@@ -2493,12 +2593,24 @@ public:
         // ---- host arena (lazy) ----
         if (!kvmem_host_arena_) {
             kvmem_host_layout_ = plan_host_kv_page_layout(pool.geometry());
-            // Size for the WORST case -- every page of this address evicted.
-            // A budget-sized arena exhausts exactly when the ledger has grown
-            // past the budget the arena was sized for.
+            // Preserve the existing Host cache capacity by default. Operators
+            // can opt into a smaller warm tier; overflow then spills the
+            // exact KV pages to cold storage.
+            const std::size_t stride = kvmem_host_layout_.page_stride;
+            std::size_t host_pages = page_capacity_;
+            bool limited_host_tier = false;
+            if (const char* setting = std::getenv("NINFER_KVMEM_HOST_PAGES")) {
+                char* end = nullptr;
+                errno = 0;
+                const unsigned long long requested = std::strtoull(setting, &end, 10);
+                if (errno != 0 || end == setting || *end != '\0' || requested == 0) {
+                    throw std::invalid_argument("NINFER_KVMEM_HOST_PAGES must be positive");
+                }
+                host_pages = std::min<std::size_t>(page_capacity_, requested);
+                limited_host_tier = true;
+            }
             const std::size_t capacity =
-                kvmem_host_layout_.page_stride * static_cast<std::size_t>(page_capacity_) +
-                (std::size_t{1} << 20);
+                stride * host_pages + (limited_host_tier ? 0 : (std::size_t{1} << 20));
             kvmem_host_arena_ = std::make_unique<HostKVArena>(
                 capacity, std::vector<HostKVPageLayout>{kvmem_host_layout_});
         }
@@ -2534,8 +2646,15 @@ public:
                       [](const Evicted& a, const Evicted& b) { return a.physical < b.physical; });
             const auto count = static_cast<std::uint32_t>(evicted.size());
             std::vector<HostKVAllocation> slots(count);
-            if (std::optional<HostKVAllocation> extent =
-                    kvmem_host_arena_->allocate(kvmem_host_layout_, count)) {
+            std::optional<HostKVAllocation> extent;
+            if (static_cast<std::size_t>(count) <=
+                kvmem_host_arena_->capacity_bytes() / kvmem_host_layout_.page_stride) {
+                extent = kvmem_host_arena_->allocate(kvmem_host_layout_, count);
+                while (!extent && kvmem_spill_one_host(index, plan.stage_in)) {
+                    extent = kvmem_host_arena_->allocate(kvmem_host_layout_, count);
+                }
+            }
+            if (extent) {
                 HostKVAllocation rest = std::move(*extent);
                 for (std::uint32_t i = 0; i + 1 < count; ++i) {
                     auto [head, tail] = kvmem_host_arena_->split(std::move(rest), 1);
@@ -2544,13 +2663,29 @@ public:
                 }
                 slots[count - 1] = std::move(rest);
             } else {
+                // When all new pages cannot fit, keep the protected/newer
+                // context in Host first, and send the remainder directly to
+                // cold storage through the one-page staging buffer.
+                const auto host_priority = [&](std::uint32_t id) {
+                    switch (repo.blocks()[id].stratum) {
+                    case ninfer::kvmem::BlockStratum::PinnedSink: return 0;
+                    case ninfer::kvmem::BlockStratum::ActionProtected: return 1;
+                    case ninfer::kvmem::BlockStratum::StandardContext: return 2;
+                    case ninfer::kvmem::BlockStratum::EphemeralThinking: return 3;
+                    }
+                    return 3;
+                };
+                std::stable_sort(evicted.begin(), evicted.end(), [&](const Evicted& a,
+                                                                     const Evicted& b) {
+                    return host_priority(a.id) < host_priority(b.id);
+                });
                 for (std::uint32_t i = 0; i < count; ++i) {
                     std::optional<HostKVAllocation> slot =
                         kvmem_host_arena_->allocate(kvmem_host_layout_, 1);
-                    if (!slot) {
-                        throw std::runtime_error("KVMem host arena exhausted (SSD tier is K4)");
+                    while (!slot && kvmem_spill_one_host(index, plan.stage_in)) {
+                        slot = kvmem_host_arena_->allocate(kvmem_host_layout_, 1);
                     }
-                    slots[i] = std::move(*slot);
+                    if (slot) { slots[i] = std::move(*slot); }
                 }
             }
             std::vector<DeviceKVPageHandle> handles;
@@ -2558,12 +2693,26 @@ public:
             handles.reserve(count);
             views.reserve(count);
             for (std::uint32_t i = 0; i < count; ++i) {
+                if (!slots[i].valid()) { continue; }
                 handles.push_back(evicted[i].handle);
                 views.push_back(kvmem_host_arena_->writable_view(slots[i]));
             }
-            transfer_runs += pool.copy_to_host_pages(handles, views, stream);
+            if (!handles.empty()) { transfer_runs += pool.copy_to_host_pages(handles, views, stream); }
+            auto& cold_records = kvmem_block_cold_[index];
+            if (cold_records.size() < repo.block_count()) {
+                cold_records.resize(repo.block_count());
+            }
             for (std::uint32_t i = 0; i < count; ++i) {
-                block_hosts[evicted[i].id] = std::move(slots[i]);
+                const std::uint32_t id = evicted[i].id;
+                if (cold_records[id].valid()) {
+                    throw std::logic_error("KVMem evicted block already has NVMe backing");
+                }
+                if (slots[i].valid()) {
+                    block_hosts[id] = std::move(slots[i]);
+                } else {
+                    cold_records[id] =
+                        kvmem_archive_device(pool, evicted[i].handle, stream, transfer_runs);
+                }
             }
         }
 
@@ -2610,6 +2759,7 @@ public:
             std::vector<HostKVAllocationConstView> views;
             std::vector<DeviceKVPageHandle> handles;
             std::vector<std::uint32_t> restored_ids;
+            std::vector<std::pair<std::uint32_t, DeviceKVPageHandle>> cold_restores;
             views.reserve(ordered.size());
             handles.reserve(ordered.size());
             restored_ids.reserve(ordered.size());
@@ -2620,6 +2770,11 @@ public:
                     views.push_back(kvmem_host_arena_->view(block_hosts[id]));
                     handles.push_back(pages_->physical(logical));
                     restored_ids.push_back(id);
+                } else if (kvmem_block_cold_[index].size() > id &&
+                           kvmem_block_cold_[index][id].valid()) {
+                    cold_restores.emplace_back(id, pages_->physical(logical));
+                } else if (repo.tier_of(id) == ninfer::kvmem::KvTier::Nvme) {
+                    throw std::logic_error("KVMem NVMe block has no cold page record");
                 }
                 pages_->commit_coverage(logical, kPagedKVPageSize);
                 // A restored page joins the window of a LIVE address the same way a grown page
@@ -2634,6 +2789,20 @@ public:
                 KVMEM_CUDA_CHECK(cudaStreamSynchronize(stream));
             }
             for (const std::uint32_t id : restored_ids) { block_hosts[id].release(); }
+            for (const auto [id, device] : cold_restores) {
+                HostKVAllocation buffer = kvmem_cold_buffer();
+                const auto writable = kvmem_cold_staging_->writable_view(buffer);
+                const auto record = kvmem_block_cold_[index][id];
+                kvmem_cold_file_->load(
+                    record, std::span<std::byte>(writable.data(), kvmem_host_layout_.page_stride));
+                const std::array<HostKVAllocationConstView, 1> source{
+                    kvmem_cold_staging_->view(buffer)};
+                const std::array<DeviceKVPageHandle, 1> destination{device};
+                transfer_runs += pool.copy_from_host_pages(source, destination, stream);
+                kvmem_cold_sync(stream);
+                (void)kvmem_cold_file_->release(record);
+                kvmem_block_cold_[index][id] = {};
+            }
         } else if (transfer_runs != 0) {
             KVMEM_CUDA_CHECK(cudaStreamSynchronize(stream));
         }
@@ -2690,11 +2859,16 @@ public:
         if (address.active) { publish_membership(address, stream); }
 
         // ---- 5) ledger tiers ----
-        // The tracker keeps its ledger order: evicted blocks stay registered as Host with their
-        // parked bytes, so a later round can select one again and stage it back in. Only their
+        // The tracker keeps its ledger order: evicted blocks retain Host or NVMe copies,
+        // so a later round can select one again and stage it back in. Only their
         // window placement goes stale, and a destructive truncate drops the ones that leave the
         // window for good.
-        for (const std::uint32_t id : plan.stage_out) { repo.set_tier(id, ninfer::kvmem::KvTier::Host); }
+        for (const std::uint32_t id : plan.stage_out) {
+            const bool archived = kvmem_block_cold_[index].size() > id &&
+                                  kvmem_block_cold_[index][id].valid();
+            repo.set_tier(id, archived ? ninfer::kvmem::KvTier::Nvme
+                                      : ninfer::kvmem::KvTier::Host);
+        }
         for (const ninfer::kvmem::KvRemap& rm : plan.remaps) {
             repo.set_tier(rm.block_id, ninfer::kvmem::KvTier::Gpu);
         }
@@ -2737,6 +2911,18 @@ public:
     }
 
     [[nodiscard]] std::uint32_t kvmem_budget_tokens() const noexcept { return kvmem_budget_; }
+
+    [[nodiscard]] std::size_t kvmem_cold_bytes() const noexcept {
+        return kvmem_cold_file_ ? kvmem_cold_file_->occupied_bytes() : 0;
+    }
+
+    [[nodiscard]] std::size_t kvmem_host_capacity_bytes() const noexcept {
+        return kvmem_host_arena_ ? kvmem_host_arena_->capacity_bytes() : 0;
+    }
+
+    [[nodiscard]] std::uint64_t kvmem_host_to_cold_spills() const noexcept {
+        return kvmem_host_to_cold_spills_;
+    }
 
     // KVMem: the pool room generation may not consume, in tokens. Zero means a decode round has
     // no dedicated headroom, so a window that reaches the pool simply stops there.
@@ -2862,7 +3048,10 @@ private:
     // the block is evicted), and the parked host slot while evicted.
     std::vector<std::vector<LogicalKVPageHandle>> kvmem_block_pages_;
     std::vector<std::vector<HostKVAllocation>> kvmem_block_hosts_;
+    std::vector<std::vector<ninfer::kvmem::ColdKVStore::Handle>> kvmem_block_cold_;
     std::unique_ptr<HostKVArena> kvmem_host_arena_;
+    std::unique_ptr<HostKVArena> kvmem_cold_staging_;
+    std::unique_ptr<ninfer::kvmem::ColdKVStore> kvmem_cold_file_;
     HostKVPageLayout kvmem_host_layout_{};
     // KVMem K3: the request query the prefill schedule captured, and the device
     // buffer behind it.
@@ -2885,6 +3074,7 @@ private:
     std::uint64_t kvmem_compact_skips_     = 0;
     std::uint64_t kvmem_stage_in_blocks_   = 0;
     std::uint64_t kvmem_stage_out_blocks_  = 0;
+    std::uint64_t kvmem_host_to_cold_spills_ = 0;
     std::uint64_t kvmem_transfer_runs_     = 0;
     std::uint64_t kvmem_transfer_us_       = 0;
     std::uint64_t kvmem_scoreable_blocks_  = 0;
