@@ -1374,21 +1374,34 @@ std::vector<V3LogicalTensor> inspect_v3_feature_metadata(
         if (fmt != NumericFormat::GGUF_Q6_K && fmt != NumericFormat::W8G32_F16S) {
             throw artifact::ArtifactError("v3 MTP requires GGUF Q6K or row-split W8");
         }
+        const auto layout = fmt == NumericFormat::GGUF_Q6_K
+                                ? artifact::StorageLayout::GgufBlocksV1
+                                : artifact::StorageLayout::RowSplitK128V1;
+        const auto add_projection = [&](const std::string& parameter,
+                                        std::initializer_list<std::uint64_t> shape,
+                                        std::string_view input) -> const V3LogicalTensor& {
+            const auto& tensor = add(parameter, shape, input, fmt);
+            if (tensor.layout != layout) {
+                throw artifact::ArtifactError(parameter +
+                                              ": v3 MTP projection format/layout mismatch");
+            }
+            return tensor;
+        };
         const auto H = TextConfig::hidden;
         const auto Q = TextConfig::query_size;
         const auto K = TextConfig::kv_size;
         const auto I = TextConfig::intermediate;
-        add("mtp/input_projection", {H, 2 * H}, "mtp/stem_input", fmt);
+        add_projection("mtp/input_projection", {H, 2 * H}, "mtp/stem_input");
         add("mtp/embedding_norm", {H}, {}, NumericFormat::BF16);
         add("mtp/hidden_norm", {H}, {}, NumericFormat::BF16);
         add("mtp/final_norm", {H}, {}, NumericFormat::BF16);
         const std::string p = "mtp/layers/0/";
         add(p + "input_norm", {H}, {}, NumericFormat::BF16);
         const auto prefix = p + "attention/";
-        const auto q = add(prefix + "query", {Q, H}, p + "mixer_input", fmt);
-        const auto k = add(prefix + "key", {K, H}, p + "mixer_input", fmt);
-        const auto g = add(prefix + "gate", {Q, H}, p + "mixer_input", fmt);
-        const auto v = add(prefix + "value", {K, H}, p + "mixer_input", fmt);
+        const auto q = add_projection(prefix + "query", {Q, H}, p + "mixer_input");
+        const auto k = add_projection(prefix + "key", {K, H}, p + "mixer_input");
+        const auto g = add_projection(prefix + "gate", {Q, H}, p + "mixer_input");
+        const auto v = add_projection(prefix + "value", {K, H}, p + "mixer_input");
         if (q.object_id != k.object_id || q.object_id != g.object_id ||
             q.object_id != v.object_id || q.parent_rows != TextConfig::attention_input_rows ||
             q.first_row != 0 || k.first_row != Q ||
@@ -1397,15 +1410,15 @@ std::vector<V3LogicalTensor> inspect_v3_feature_metadata(
         }
         add(prefix + "query_norm", {TextConfig::head_dim}, {}, NumericFormat::BF16);
         add(prefix + "key_norm", {TextConfig::head_dim}, {}, NumericFormat::BF16);
-        add(prefix + "output", {H, Q}, p + "attention/gated_output", fmt);
+        add_projection(prefix + "output", {H, Q}, p + "attention/gated_output");
         add(p + "post_attention_norm", {H}, {}, NumericFormat::BF16);
-        const auto gate = add(p + "mlp/gate", {I, H}, p + "ffn_input", fmt);
-        const auto up = add(p + "mlp/up", {I, H}, p + "ffn_input", fmt);
+        const auto gate = add_projection(p + "mlp/gate", {I, H}, p + "ffn_input");
+        const auto up = add_projection(p + "mlp/up", {I, H}, p + "ffn_input");
         if (gate.object_id != up.object_id || gate.parent_rows != 2 * I ||
             gate.first_row != 0 || up.first_row != I) {
             throw artifact::ArtifactError("v3 MTP gate/up packing differs");
         }
-        add(p + "mlp/down", {H, I}, p + "mlp/product", fmt);
+        add_projection(p + "mlp/down", {H, I}, p + "mlp/product");
     }
     if (features.dflash2()) {
         const auto& cfg = target_component("dflash2").at("config");
@@ -1986,6 +1999,66 @@ void validate_v3_input_columns(std::span<const std::int32_t> columns,
     }
 }
 
+MtpWeights materialize_mtp_weights(const MtpPlan& plan,
+                                    const artifact::MaterializedArtifact& materialized) {
+    MtpWeights mtp{};
+    if (plan.v3) {
+        mtp.input_projection = materialized_weight(materialized, plan.v3->input_projection,
+                                                    TextConfig::hidden, TextConfig::mtp_input_rows);
+    } else {
+        mtp.input_projection = artifact::materialized_weight(
+            materialized, plan.input_projection, NumericFormat::W8G32_F16S,
+            TextConfig::hidden, TextConfig::mtp_input_rows);
+    }
+    mtp.embedding_norm = artifact::materialized_tensor(
+        materialized, plan.embedding_norm, NumericFormat::BF16, {TextConfig::hidden});
+    mtp.hidden_norm = artifact::materialized_tensor(
+        materialized, plan.hidden_norm, NumericFormat::BF16, {TextConfig::hidden});
+    mtp.input_norm = artifact::materialized_tensor(
+        materialized, plan.input_norm, NumericFormat::BF16, {TextConfig::hidden});
+    if (plan.v3) {
+        const auto& projections = *plan.v3;
+        mtp.attention.query = materialized_weight(
+            materialized, projections.query, TextConfig::query_size, TextConfig::hidden);
+        mtp.attention.key = materialized_weight(
+            materialized, projections.key, TextConfig::kv_size, TextConfig::hidden);
+        mtp.attention.output_gate = materialized_weight(
+            materialized, projections.gate, TextConfig::query_size, TextConfig::hidden);
+        mtp.attention.value = materialized_weight(
+            materialized, projections.value, TextConfig::kv_size, TextConfig::hidden);
+    } else {
+        mtp.attention.packed = artifact::materialized_weight(
+            materialized, plan.query_key_gate_value, NumericFormat::W8G32_F16S,
+            TextConfig::attention_input_rows, TextConfig::hidden);
+        mtp.attention.query = row_view(mtp.attention.packed, 0, TextConfig::query_size);
+        mtp.attention.key = row_view(mtp.attention.packed, TextConfig::query_size, TextConfig::kv_size);
+        mtp.attention.output_gate = row_view(
+            mtp.attention.packed, TextConfig::query_size + TextConfig::kv_size,
+            TextConfig::query_size);
+        mtp.attention.value = row_view(
+            mtp.attention.packed, 2 * TextConfig::query_size + TextConfig::kv_size,
+            TextConfig::kv_size);
+    }
+    mtp.query_norm = artifact::materialized_tensor(
+        materialized, plan.query_norm, NumericFormat::BF16, {TextConfig::head_dim});
+    mtp.key_norm = artifact::materialized_tensor(
+        materialized, plan.key_norm, NumericFormat::BF16, {TextConfig::head_dim});
+    if (plan.v3) {
+        mtp.output = materialized_weight(
+            materialized, plan.v3->output, TextConfig::hidden, TextConfig::query_size);
+    } else {
+        mtp.output = artifact::materialized_weight(
+            materialized, plan.output, NumericFormat::W8G32_F16S,
+            TextConfig::hidden, TextConfig::query_size);
+    }
+    mtp.post_attention_norm = artifact::materialized_tensor(
+        materialized, plan.post_attention_norm, NumericFormat::BF16, {TextConfig::hidden});
+    mtp.post_mixer = load_mlp(plan.mlp, materialized);
+    mtp.final_norm = artifact::materialized_tensor(
+        materialized, plan.final_norm, NumericFormat::BF16, {TextConfig::hidden});
+    return mtp;
+}
+
 LoadedModelData::LoadedModelData(BindingPlan plan, artifact::MaterializedArtifact materialized)
     : backing(std::move(materialized)) {
     frontend = qwen3_6::take_frontend_resources(backing, plan.frontend);
@@ -2078,64 +2151,7 @@ LoadedModelData::LoadedModelData(BindingPlan plan, artifact::MaterializedArtifac
     }
 
     if (plan.features.mtp()) {
-        auto& mtp            = runtime.mtp.emplace();
-        if (plan.mtp.v3) {
-            mtp.input_projection = materialized_weight(
-                backing, plan.mtp.v3->input_projection, TextConfig::hidden,
-                TextConfig::mtp_input_rows);
-        } else {
-            mtp.input_projection = artifact::materialized_weight(
-                backing, plan.mtp.input_projection, NumericFormat::W8G32_F16S,
-                TextConfig::hidden, TextConfig::mtp_input_rows);
-        }
-        mtp.embedding_norm   = artifact::materialized_tensor(backing, plan.mtp.embedding_norm,
-                                                             NumericFormat::BF16, {TextConfig::hidden});
-        mtp.hidden_norm      = artifact::materialized_tensor(backing, plan.mtp.hidden_norm,
-                                                             NumericFormat::BF16, {TextConfig::hidden});
-        mtp.input_norm       = artifact::materialized_tensor(backing, plan.mtp.input_norm,
-                                                             NumericFormat::BF16, {TextConfig::hidden});
-        if (plan.mtp.v3) {
-            const auto& projection = *plan.mtp.v3;
-            mtp.attention.query = materialized_weight(backing, projection.query,
-                                                       TextConfig::query_size, TextConfig::hidden);
-            mtp.attention.key = materialized_weight(backing, projection.key,
-                                                     TextConfig::kv_size, TextConfig::hidden);
-            mtp.attention.output_gate = materialized_weight(backing, projection.gate,
-                                                              TextConfig::query_size,
-                                                              TextConfig::hidden);
-            mtp.attention.value = materialized_weight(backing, projection.value,
-                                                       TextConfig::kv_size, TextConfig::hidden);
-        } else {
-            mtp.attention.packed = artifact::materialized_weight(
-                backing, plan.mtp.query_key_gate_value, NumericFormat::W8G32_F16S,
-                TextConfig::attention_input_rows, TextConfig::hidden);
-            mtp.attention.query = row_view(mtp.attention.packed, 0, TextConfig::query_size);
-            mtp.attention.key =
-                row_view(mtp.attention.packed, TextConfig::query_size, TextConfig::kv_size);
-            mtp.attention.output_gate = row_view(
-                mtp.attention.packed, TextConfig::query_size + TextConfig::kv_size,
-                TextConfig::query_size);
-            mtp.attention.value = row_view(
-                mtp.attention.packed, 2 * TextConfig::query_size + TextConfig::kv_size,
-                TextConfig::kv_size);
-        }
-        mtp.query_norm =
-            artifact::materialized_tensor(backing, plan.mtp.query_norm, NumericFormat::BF16, {TextConfig::head_dim});
-        mtp.key_norm =
-            artifact::materialized_tensor(backing, plan.mtp.key_norm, NumericFormat::BF16, {TextConfig::head_dim});
-        if (plan.mtp.v3) {
-            mtp.output = materialized_weight(backing, plan.mtp.v3->output,
-                                             TextConfig::hidden, TextConfig::query_size);
-        } else {
-            mtp.output = artifact::materialized_weight(
-                backing, plan.mtp.output, NumericFormat::W8G32_F16S,
-                TextConfig::hidden, TextConfig::query_size);
-        }
-        mtp.post_attention_norm = artifact::materialized_tensor(
-            backing, plan.mtp.post_attention_norm, NumericFormat::BF16, {TextConfig::hidden});
-        mtp.post_mixer = load_mlp(plan.mtp.mlp, backing);
-        mtp.final_norm = artifact::materialized_tensor(backing, plan.mtp.final_norm,
-                                                       NumericFormat::BF16, {TextConfig::hidden});
+        runtime.mtp.emplace(materialize_mtp_weights(plan.mtp, backing));
     }
 
     if (plan.features.dflash2()) {

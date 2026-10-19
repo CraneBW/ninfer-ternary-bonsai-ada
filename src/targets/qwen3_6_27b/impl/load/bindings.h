@@ -354,6 +354,13 @@ using FullAttentionWeights = RuntimeModelView::FullLayer;
 using GdnWeights           = RuntimeModelView::GdnLayer;
 using MtpWeights           = RuntimeModelView::MtpLayer;
 
+// Materialize one MTP layer through the same native ModelView path as the
+// loaded model. Exposing the narrow binding boundary lets the v3 target test
+// materialize just the actual MTP physical parents (without loading ~15 GiB
+// of unrelated text/vision weights) and validate every GGUF/row-split slice.
+[[nodiscard]] MtpWeights materialize_mtp_weights(
+    const MtpPlan& plan, const artifact::MaterializedArtifact& materialized);
+
 class LoadedModelData {
 public:
     LoadedModelData(BindingPlan plan, artifact::MaterializedArtifact materialized);

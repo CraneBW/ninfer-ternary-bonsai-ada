@@ -8,8 +8,10 @@
 #include <ninfer/targets/qwen3_6_27b/package.h>
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cmath>
+#include <cstring>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
@@ -21,6 +23,7 @@
 #include <string>
 #include <string_view>
 #include <variant>
+#include <unordered_set>
 
 namespace {
 
@@ -463,6 +466,45 @@ int verify_real_v3_gsq_header() {
             std::cerr << "GSQ MTP ModelView parent references incomplete\n";
             return 1;
         }
+        if (test.choice.mtp()) {
+            const auto& mtp = *selected_plan.bindings.mtp.v3;
+            const auto& gate = *selected_plan.bindings.mtp.mlp.gate;
+            const auto& up = *selected_plan.bindings.mtp.mlp.up;
+            if (mtp.query.format != NumericFormat::GGUF_Q6_K ||
+                mtp.key.format != NumericFormat::GGUF_Q6_K ||
+                mtp.query.first_row != 0 ||
+                mtp.key.first_row != TextConfig::query_size ||
+                mtp.gate.first_row != TextConfig::query_size + TextConfig::kv_size ||
+                mtp.value.first_row != 2 * TextConfig::query_size + TextConfig::kv_size ||
+                mtp.query.object.index != mtp.gate.object.index ||
+                mtp.query.object.index != mtp.value.object.index ||
+                mtp.query.parent_rows != TextConfig::attention_input_rows ||
+                gate.format != NumericFormat::GGUF_Q6_K ||
+                gate.first_row != 0 || up.first_row != TextConfig::intermediate ||
+                gate.object.index != up.object.index ||
+                gate.parent_rows != TextConfig::mtp_mlp_gate_up_rows ||
+                mtp.input_projection.parent_columns != TextConfig::mtp_input_rows ||
+                mtp.output.parent_columns != TextConfig::query_size) {
+                std::cerr << "GSQ MTP physical parents / logical-element slices do not match "
+                             "native ModelView\n";
+                return 1;
+            }
+            // Package startup uses the same MTP feature selection as the
+            // direct Binder path. In particular the shared GGUF parent is
+            // materialized once, while inactive DFlash2 is validate-only.
+            ninfer::artifact::Binder package_binder(reader);
+            ninfer::EngineOptions options;
+            options.speculative.backend = ninfer::SpeculativeBackend::Mtp;
+            options.speculative.proposal_head = test.choice.proposal_head;
+            options.enable_vision = test.choice.vision;
+            const auto packaged = Package::plan_load(
+                package_binder, options, WeightsProfile::Qwen38GroupwiseInt);
+            if (packaged.materialization().device_objects.size() !=
+                selected_plan.materialization.device_objects.size()) {
+                std::cerr << "GSQ MTP Package startup did not materialize selected MTP parents\n";
+                return 1;
+            }
+        }
         if (test.choice.vision &&
             (selected_plan.bindings.vision_backbone.layers[0].qkv.index ==
                  selected_plan.bindings.vision_backbone.layers[1].qkv.index ||
@@ -504,6 +546,26 @@ int verify_real_v3_gsq_header() {
         invalid["bindings"].erase("mtp/layers/0/attention/key");
         if (!feature_rejected(std::move(invalid), features(ninfer::SpeculativeBackend::Mtp),
                               "MTP key")) { return 1; }
+    }
+    {
+        auto invalid = root;
+        auto& mtp_gate = invalid["bindings"]["mtp/layers/0/attention/gate"]["parts"][0];
+        mtp_gate["range"][0] = mtp_gate["range"][0].get<std::uint64_t>() + TextConfig::hidden;
+        if (!feature_rejected(std::move(invalid), features(ninfer::SpeculativeBackend::Mtp),
+                              "MTP fused attention gate row range")) { return 1; }
+    }
+    {
+        auto invalid = root;
+        const auto physical_id = invalid["bindings"]["mtp/layers/0/attention/gate"]["parts"][0]
+                                         ["object"].get<std::string>();
+        for (auto& object : invalid["objects"]) {
+            if (object["id"] == physical_id) {
+                object["layout"] = "row_split_k128_v1";
+                break;
+            }
+        }
+        if (!feature_rejected(std::move(invalid), features(ninfer::SpeculativeBackend::Mtp),
+                              "MTP GGUF physical layout")) { return 1; }
     }
     {
         auto invalid = root;
@@ -611,6 +673,218 @@ int verify_real_qwen36_v3_headers() {
             }
         }
     }
+    return 0;
+}
+
+int verify_real_v3_mtp_materialization(std::string_view filename,
+                                       NumericFormat expected_format) {
+    // Materialize only MTP's *actual physical parents* into a native CUDA
+    // arena. All of Text/Vision/DFlash2 stay validate-only, so the check runs
+    // without needing another >15 GiB GPU for the unrelated weights. This is
+    // the same materialize_mtp_weights() called by LoadedModelData's ModelView.
+    const auto root_path = std::filesystem::path(NINFER_SOURCE_DIR) / ".." / ".." / "real-models";
+    const auto path = root_path / std::string(filename);
+    if (!std::filesystem::is_regular_file(path)) {
+        std::cerr << "skip: no real v3 artifact to materialize: " << path << '\n';
+        return 77;
+    }
+    std::ifstream prefix(path, std::ios::binary);
+    std::array<unsigned char, 32> header{};
+    prefix.read(reinterpret_cast<char*>(header.data()), header.size());
+    const std::array<unsigned char, 8> expected_magic{'N', 'I', 'N', 'F', 'E', 'R', 0, 3};
+    if (!prefix || !std::equal(expected_magic.begin(), expected_magic.end(), header.begin())) {
+        throw std::runtime_error("real MTP source is not v3");
+    }
+    std::uint64_t directory_bytes = 0;
+    for (unsigned i = 0; i < 8; ++i) {
+        directory_bytes |= std::uint64_t(header[8 + i]) << (i * 8);
+    }
+    if (directory_bytes == 0 || directory_bytes > 1024 * 1024) {
+        throw std::runtime_error("real MTP directory size is invalid");
+    }
+    std::string raw_directory(static_cast<std::size_t>(directory_bytes), '\0');
+    prefix.read(raw_directory.data(), static_cast<std::streamsize>(raw_directory.size()));
+    if (!prefix) { throw std::runtime_error("real MTP directory is incomplete"); }
+    const auto directory = nlohmann::json::parse(raw_directory);
+    const auto expected_size =
+        ninfer::test::artifact_fixture::align_up(32 + directory_bytes, 4096) +
+        directory.at("files").at(0).at("payload_bytes").get<std::uint64_t>();
+    if (std::filesystem::file_size(path) != expected_size) {
+        std::cerr << "skip: real v3 weights are incomplete; MTP physical parents not yet "
+                     "available for materialization\n";
+        return 77;
+    }
+
+    ninfer::artifact::Reader reader(path);
+    ninfer::artifact::Binder complete_binder(reader);
+    const ArtifactLoadPlan complete = bind_v3_text_artifact(
+        complete_binder, directory, features(ninfer::SpeculativeBackend::Mtp));
+    const MtpPlan& plan = complete.bindings.mtp;
+    if (!plan.v3 || !plan.mlp.gate || !plan.mlp.up) {
+        throw std::runtime_error("real MTP is missing independent semantic projections");
+    }
+
+    std::unordered_set<std::size_t> selected;
+    const auto add = [&](ninfer::artifact::ObjectHandle handle) {
+        selected.insert(handle.index);
+    };
+    const auto add_weight = [&](const WeightPlan& weight) { add(weight.object); };
+    const auto& projection = *plan.v3;
+    for (const auto* weight : {&projection.input_projection, &projection.query,
+                               &projection.key, &projection.gate, &projection.value,
+                               &projection.output, &*plan.mlp.gate, &*plan.mlp.up,
+                               &plan.mlp.down}) {
+        add_weight(*weight);
+    }
+    for (const auto handle : {plan.embedding_norm, plan.hidden_norm, plan.input_norm,
+                              plan.query_norm, plan.key_norm, plan.post_attention_norm,
+                              plan.final_norm}) {
+        add(handle);
+    }
+    if (selected.size() != 12) {
+        throw std::runtime_error("real MTP selected physical parent count changed");
+    }
+
+    ninfer::artifact::Binder only_mtp(reader);
+    for (std::size_t index = 0; index < reader.objects().size(); ++index) {
+        const auto& descriptor = reader.objects()[index];
+        if (const auto* tensor = std::get_if<ninfer::artifact::TensorDescriptor>(&descriptor)) {
+            const auto handle = only_mtp.require_tensor(
+                tensor->name, tensor->format, tensor->layout, tensor->shape);
+            if (selected.contains(index)) {
+                only_mtp.materialize_on_device(handle);
+            } else {
+                only_mtp.validate_only(handle);
+            }
+        } else {
+            const auto& resource = std::get<ninfer::artifact::ResourceDescriptor>(descriptor);
+            const auto handle = only_mtp.require_resource(resource.name, resource.encoding);
+            only_mtp.validate_only(handle);
+        }
+    }
+    const auto materialization = only_mtp.finish();
+    if (materialization.device_objects.size() != selected.size() ||
+        materialization.host_objects.size() != 0 ||
+        materialization.device_capacity_bytes > (std::uint64_t{512} << 20)) {
+        throw std::runtime_error("real MTP physical-only materialization plan changed");
+    }
+    ninfer::DeviceContext device(0);
+    const auto backing = ninfer::artifact::materialize(reader, materialization, device);
+    const MtpWeights native = materialize_mtp_weights(plan, backing);
+    if (native.attention.packed.qdata != nullptr || !native.post_mixer.gate ||
+        !native.post_mixer.up || native.post_mixer.gate_up.qdata != nullptr) {
+        throw std::runtime_error("v3 MTP ModelView routed fused or shared projections incorrectly");
+    }
+
+    // Independent oracle: convert each logical-element range to an encoded
+    // GGUF Q6_K or row-split W8 byte offset and verify FIRST and LAST blocks of the
+    // CUDA view against the source file itself. This catches a mistaken
+    // range-in-bytes interpretation, row ordering and an incorrect parent
+    // materialization even though no model inference is run.
+    constexpr std::uint64_t kGgufElements = 256;
+    constexpr std::size_t kQ6BlockBytes = 210;
+    const bool gguf = expected_format == NumericFormat::GGUF_Q6_K;
+    const auto verify = [&](const char* name, const WeightPlan& source, const ninfer::Weight& actual,
+                            int rows, int columns) {
+        const auto& physical =
+            std::get<ninfer::artifact::TensorDescriptor>(reader.objects().at(source.object.index));
+        if (source.format != expected_format ||
+            physical.format != expected_format ||
+            physical.layout != (gguf ? ninfer::artifact::StorageLayout::GgufBlocksV1
+                                    : ninfer::artifact::StorageLayout::RowSplitK128V1) ||
+            actual.qtype != (gguf ? ninfer::QType::GGUF_Q6_K
+                                  : ninfer::QType::W8G32_F16S) ||
+            actual.layout != (gguf ? ninfer::QuantLayout::GgufBlocks
+                                   : ninfer::QuantLayout::RowSplit) ||
+            actual.n != rows || actual.k != columns ||
+            source.selected_rows != rows || source.parent_columns != columns ||
+            physical.shape[0] != static_cast<std::uint64_t>(source.parent_rows) ||
+            physical.shape[1] != static_cast<std::uint64_t>(columns)) {
+            throw std::runtime_error(std::string("MTP materialized format/shape differs: ") + name);
+        }
+        const std::uint64_t row_bytes = gguf
+            ? static_cast<std::uint64_t>(columns) / kGgufElements * kQ6BlockBytes
+            : static_cast<std::uint64_t>(columns);
+        const auto* base = static_cast<const std::byte*>(backing.device_data(source.object));
+        if (actual.qdata != base + static_cast<std::uint64_t>(source.first_row) * row_bytes) {
+            throw std::runtime_error(std::string("MTP parent row offset differs: ") + name);
+        }
+        const auto check_block = [&](std::uint64_t row, std::uint64_t block) {
+            const std::size_t bytes = gguf ? kQ6BlockBytes : 32;
+            const std::uint64_t byte_offset = row * row_bytes + block * bytes;
+            std::array<std::byte, kQ6BlockBytes> device_block{};
+            std::array<std::byte, kQ6BlockBytes> source_block{};
+            CUDA_CHECK(cudaMemcpy(device_block.data(),
+                                  static_cast<const std::byte*>(actual.qdata) + byte_offset,
+                                  bytes, cudaMemcpyDeviceToHost));
+            std::ifstream input(path, std::ios::binary);
+            input.seekg(static_cast<std::streamoff>(
+                reader.payload_offset() + physical.offset +
+                static_cast<std::uint64_t>(source.first_row) * row_bytes + byte_offset));
+            input.read(reinterpret_cast<char*>(source_block.data()),
+                       static_cast<std::streamsize>(bytes));
+            if (!input || device_block != source_block) {
+                throw std::runtime_error(std::string("MTP physical block differs: ") + name);
+            }
+            if (!gguf) {
+                const auto geometry = ninfer::artifact::row_split_geometry(
+                    expected_format, physical.shape);
+                if (geometry.padded_columns != static_cast<std::uint64_t>(columns)) {
+                    throw std::runtime_error("MTP W8 physical row padding changed");
+                }
+                const std::uint64_t scale_stride =
+                    (static_cast<std::uint64_t>(columns) / 32) * 2;
+                const auto scale_offset = row * scale_stride + block * 2;
+                if (actual.scales != static_cast<const std::byte*>(backing.device_data(source.object)) +
+                                        geometry.scale_plane_offset +
+                                        static_cast<std::uint64_t>(source.first_row) * scale_stride) {
+                    throw std::runtime_error(std::string("MTP W8 scale row offset differs: ") + name);
+                }
+                std::array<std::byte, 2> device_scale{};
+                std::array<std::byte, 2> source_scale{};
+                CUDA_CHECK(cudaMemcpy(device_scale.data(),
+                                      static_cast<const std::byte*>(actual.scales) + scale_offset,
+                                      2, cudaMemcpyDeviceToHost));
+                input.seekg(static_cast<std::streamoff>(
+                    reader.payload_offset() + physical.offset +
+                    geometry.scale_plane_offset +
+                    static_cast<std::uint64_t>(source.first_row) * scale_stride + scale_offset));
+                input.read(reinterpret_cast<char*>(source_scale.data()), 2);
+                if (!input || device_scale != source_scale) {
+                    throw std::runtime_error(std::string("MTP W8 scale block differs: ") + name);
+                }
+            }
+        };
+        check_block(0, 0);
+        check_block(rows - 1, columns / (gguf ? kGgufElements : 32) - 1);
+    };
+
+    verify("stem", projection.input_projection, native.input_projection,
+           TextConfig::hidden, TextConfig::mtp_input_rows);
+    verify("query", projection.query, native.attention.query,
+           TextConfig::query_size, TextConfig::hidden);
+    verify("key", projection.key, native.attention.key, TextConfig::kv_size, TextConfig::hidden);
+    verify("gate", projection.gate, native.attention.output_gate,
+           TextConfig::query_size, TextConfig::hidden);
+    verify("value", projection.value, native.attention.value,
+           TextConfig::kv_size, TextConfig::hidden);
+    verify("attention output", projection.output, native.output,
+           TextConfig::hidden, TextConfig::query_size);
+    verify("MLP gate", *plan.mlp.gate, *native.post_mixer.gate,
+           TextConfig::intermediate, TextConfig::hidden);
+    verify("MLP up", *plan.mlp.up, *native.post_mixer.up,
+           TextConfig::intermediate, TextConfig::hidden);
+    verify("MLP down", plan.mlp.down, native.post_mixer.down,
+           TextConfig::hidden, TextConfig::intermediate);
+    if (native.embedding_norm.ne[0] != TextConfig::hidden ||
+        native.hidden_norm.ne[0] != TextConfig::hidden ||
+        native.final_norm.ne[0] != TextConfig::hidden ||
+        native.query_norm.ne[0] != TextConfig::head_dim ||
+        native.key_norm.ne[0] != TextConfig::head_dim) {
+        throw std::runtime_error("real v3 MTP BF16 norms were not materialized to ModelView");
+    }
+    std::cout << "real v3 " << filename << " MTP physical parent blocks and native ModelView "
+                 "verified\n";
     return 0;
 }
 
@@ -874,6 +1148,18 @@ int verify_vision_workspace_planning() {
 } // namespace
 
 int main(int argc, char** argv) {
+    if (argc == 2 && std::string_view(argv[1]) == "--v3-mtp-materialize") {
+        for (const auto& [filename, format] : {
+                 std::pair{"qwen3_8_gsq_rco_iq3_s_v3.ninfer", NumericFormat::GGUF_Q6_K},
+                 std::pair{"qwen3_6_27b.ninfer", NumericFormat::W8G32_F16S},
+             }) {
+            if (const int result = verify_real_v3_mtp_materialization(filename, format);
+                result != 0) {
+                return result;
+            }
+        }
+        return 0;
+    }
     // Validate real v3 input_columns payload semantics independently of
     // weight availability. Shape-only metadata validation cannot detect a
     // duplicate or out-of-range activation gather index.
