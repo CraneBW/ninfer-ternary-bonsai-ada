@@ -652,6 +652,80 @@ int verify_real_v3_gsq_header() {
                               features(ninfer::SpeculativeBackend::DFlash2),
                               "DFlash2 selector config")) { return 1; }
     }
+    const auto dflash_only = features(ninfer::SpeculativeBackend::DFlash2);
+    {
+        auto invalid = root;
+        auto& end = invalid["bindings"]["dflash2/layers/0/mlp/up"]["parts"][0]["range"][1];
+        end = end.get<std::uint64_t>() - DFlashConfig::hidden;
+        if (!feature_rejected(std::move(invalid), dflash_only,
+                              "DFlash2 fused gate/up row range")) { return 1; }
+    }
+    {
+        auto invalid = root;
+        const auto id = invalid["bindings"]["dflash2/layers/0/attention/query"]
+                              ["parts"][0]["object"].get<std::string>();
+        for (auto& object : invalid["objects"]) {
+            if (object["id"] == id) {
+                object["format"] = "q5_g64_fp16";
+                break;
+            }
+        }
+        if (!feature_rejected(std::move(invalid), dflash_only, "DFlash2 W8 codec")) {
+            return 1;
+        }
+    }
+    {
+        auto invalid = root;
+        const auto id = invalid["bindings"]["dflash2/layers/0/attention/output"]
+                              ["object"].get<std::string>();
+        for (auto& object : invalid["objects"]) {
+            if (object["id"] == id) {
+                object["layout"] = "gguf_blocks_v1";
+                break;
+            }
+        }
+        if (!feature_rejected(std::move(invalid), dflash_only, "DFlash2 W8 physical layout")) {
+            return 1;
+        }
+    }
+    {
+        auto invalid = root;
+        const auto id = invalid["bindings"]["dflash2/candidate_selector/hidden_projection"]
+                              ["object"].get<std::string>();
+        for (auto& object : invalid["objects"]) {
+            if (object["id"] == id) {
+                object["layout"] = "row_split_k128_v1";
+                break;
+            }
+        }
+        if (!feature_rejected(std::move(invalid), dflash_only,
+                              "DFlash2 BF16 physical layout")) { return 1; }
+    }
+    {
+        auto invalid = root;
+        for (auto& use : invalid["uses"]) {
+            if (use["parameter"] == "dflash2/feature_projection" &&
+                use["input"] == "dflash2/target_features") {
+                use["activation_policy"] = "AllowA8";
+                break;
+            }
+        }
+        if (!feature_rejected(std::move(invalid), dflash_only,
+                              "DFlash2 activation policy")) { return 1; }
+    }
+    {
+        auto invalid = root;
+        const auto id = invalid["bindings"]["dflash2/candidate_selector/predecessor_codebook"]
+                              ["object"].get<std::string>();
+        for (auto& object : invalid["objects"]) {
+            if (object["id"] == id) {
+                object["shape"][1] = 128;
+                break;
+            }
+        }
+        if (!feature_rejected(std::move(invalid), dflash_only,
+                              "DFlash2 selector codebook width")) { return 1; }
+    }
     return 0;
 }
 
@@ -956,6 +1030,282 @@ int verify_real_v3_mtp_materialization(std::string_view filename,
     }
     std::cout << "real v3 " << filename << " MTP physical parent blocks and native ModelView "
                  "verified\n";
+    return 0;
+}
+
+int verify_real_v3_dflash2_materialization() {
+    // Upload the real GSQ v3 DFlash2 bundle alone. The native ModelView must
+    // interpret 91 semantic uses through 66 physical parents without loading
+    // text, Vision or MTP weights (the entire model is >14 GiB).
+    const auto path = std::filesystem::path(NINFER_SOURCE_DIR) / ".." / ".." /
+                      "real-models" / "qwen3_8_gsq_rco_iq3_s_v3.ninfer";
+    if (!std::filesystem::is_regular_file(path)) {
+        std::cerr << "skip: real GSQ v3 DFlash2 weights are unavailable\n";
+        return 77;
+    }
+    ninfer::artifact::Reader reader(path);
+    const auto* directory = reader.v3_directory();
+    if (!directory) { throw std::runtime_error("DFlash2 source is not v3"); }
+    const auto expected_size = reader.payload_offset() +
+        directory->at("files").at(0).at("payload_bytes").get<std::uint64_t>();
+    if (std::filesystem::file_size(path) != expected_size) {
+        std::cerr << "skip: real GSQ v3 DFlash2 source payload is incomplete\n";
+        return 77;
+    }
+    int device_count = 0;
+    if (cudaGetDeviceCount(&device_count) != cudaSuccess || device_count == 0) {
+        std::cerr << "skip: no CUDA GPU for real DFlash2 materialization\n";
+        return 77;
+    }
+    const auto choice = features(ninfer::SpeculativeBackend::DFlash2);
+    ninfer::artifact::Binder complete_binder(reader);
+    const auto complete = bind_v3_text_artifact(complete_binder, *directory, choice);
+    if (!complete.bindings.dflash2) {
+        throw std::runtime_error("real DFlash2 semantic binding was not selected");
+    }
+    const auto& plan = *complete.bindings.dflash2;
+    {
+        ninfer::artifact::Binder package_binder(reader);
+        ninfer::EngineOptions options;
+        options.speculative.backend = ninfer::SpeculativeBackend::DFlash2;
+        const auto package = Package::plan_load(
+            package_binder, options, WeightsProfile::Qwen38GroupwiseInt);
+        if (package.materialization().device_objects.size() !=
+            complete.materialization.device_objects.size()) {
+            throw std::runtime_error("Package DFlash2 v3 device selection differs");
+        }
+    }
+
+    std::unordered_set<std::size_t> selected;
+    const auto add = [&](ninfer::artifact::ObjectHandle object) {
+        selected.insert(object.index);
+    };
+    const auto add_weight = [&](const WeightPlan& weight) { add(weight.object); };
+    add_weight(plan.feature_projection);
+    add(plan.context_norm);
+    add(plan.final_norm);
+    for (const auto& layer : plan.layers) {
+        for (const auto* weight : {&layer.query_key_value, &layer.attention_output,
+                                   &layer.gate_up, &layer.down,
+                                   &layer.attention_conv.kernel_projection,
+                                   &layer.mlp_conv.kernel_projection}) {
+            add_weight(*weight);
+        }
+        for (const auto object : {layer.input_norm, layer.post_attention_norm,
+                                  layer.query_norm, layer.key_norm,
+                                  layer.attention_conv.base_kernel, layer.mlp_conv.base_kernel}) {
+            add(object);
+        }
+    }
+    add_weight(plan.candidate_selector.hidden_projection);
+    add(plan.candidate_selector.predecessor_codebook);
+    add(plan.candidate_selector.successor_codebook);
+    if (selected.size() != 66) {
+        throw std::runtime_error("real GSQ DFlash2 physical parent inventory differs");
+    }
+    for (const auto index : selected) {
+        if (!is_device_object(complete.materialization,
+                              ninfer::artifact::ObjectHandle{index})) {
+            throw std::runtime_error("real DFlash2 Package binding missed a GPU parent");
+        }
+    }
+
+    ninfer::artifact::Binder only_dflash(reader);
+    for (std::size_t index = 0; index < reader.objects().size(); ++index) {
+        const auto& descriptor = reader.objects()[index];
+        if (const auto* tensor = std::get_if<ninfer::artifact::TensorDescriptor>(&descriptor)) {
+            const auto handle = only_dflash.require_tensor(
+                tensor->name, tensor->format, tensor->layout, tensor->shape);
+            if (selected.contains(index)) {
+                only_dflash.materialize_on_device(handle);
+            } else {
+                only_dflash.validate_only(handle);
+            }
+        } else {
+            const auto& resource = std::get<ninfer::artifact::ResourceDescriptor>(descriptor);
+            const auto handle = only_dflash.require_resource(resource.name, resource.encoding);
+            only_dflash.validate_only(handle);
+        }
+    }
+    const auto materialization = only_dflash.finish();
+    if (materialization.device_objects.size() != selected.size() ||
+        !materialization.host_objects.empty() ||
+        materialization.device_capacity_bytes > (std::uint64_t{2304} << 20)) {
+        throw std::runtime_error("DFlash2-only materialization exceeds physical bundle size");
+    }
+
+    ninfer::DeviceContext device(0);
+    const auto backing = ninfer::artifact::materialize(reader, materialization, device);
+    const auto native = materialize_dflash2_weights(plan, backing);
+    std::unordered_set<std::size_t> viewed;
+    std::ifstream source(path, std::ios::binary);
+    // Exact oracle compares actual CUDA views to source-file bytes. For W8
+    // split planes sample the first and last encoded values and FP16 scales
+    // independently so wrong row offsets or plane offsets are observable.
+    const auto verify_bytes = [&](ninfer::artifact::ObjectHandle object,
+                                  std::uint64_t offset, const std::byte* gpu,
+                                  std::uint64_t count, std::string_view name) {
+        if (gpu == nullptr || count == 0) {
+            throw std::runtime_error(std::string(name) + ": no DFlash2 device data");
+        }
+        const auto& physical = std::get<ninfer::artifact::TensorDescriptor>(
+            reader.objects().at(object.index));
+        if (offset > physical.bytes || count > physical.bytes - offset) {
+            throw std::runtime_error(std::string(name) + ": data exceeds physical object");
+        }
+        const auto compare = [&](std::uint64_t at, std::size_t bytes) {
+            std::array<std::byte, 32> actual{}, expected{};
+            CUDA_CHECK(cudaMemcpy(actual.data(), gpu + at, bytes, cudaMemcpyDeviceToHost));
+            source.clear();
+            source.seekg(static_cast<std::streamoff>(
+                reader.payload_offset() + physical.offset + offset + at));
+            source.read(reinterpret_cast<char*>(expected.data()),
+                        static_cast<std::streamsize>(bytes));
+            if (!source || !std::equal(actual.begin(), actual.begin() + bytes,
+                                       expected.begin())) {
+                throw std::runtime_error(std::string(name) + ": GPU bytes differ from GSQ v3");
+            }
+        };
+        const auto sample = static_cast<std::size_t>(std::min<std::uint64_t>(count, 32));
+        compare(0, sample);
+        if (count > sample) { compare(count - sample, sample); }
+        viewed.insert(object.index);
+    };
+    const auto verify_weight = [&](std::string_view name, const WeightPlan& weight,
+                                   const ninfer::Weight& actual, int rows, int columns) {
+        const auto& physical = std::get<ninfer::artifact::TensorDescriptor>(
+            reader.objects().at(weight.object.index));
+        const auto* base = static_cast<const std::byte*>(backing.device_data(weight.object));
+        if (weight.parent_rows <= 0 || weight.parent_columns != columns ||
+            weight.selected_rows != rows || weight.first_row < 0 ||
+            weight.first_row + rows > weight.parent_rows ||
+            physical.shape != std::vector<std::uint64_t>{
+                static_cast<std::uint64_t>(weight.parent_rows),
+                static_cast<std::uint64_t>(columns)} ||
+            physical.format != weight.format ||
+            actual.qtype != ninfer::artifact::qtype_for(weight.format) ||
+            actual.n != rows || actual.k != columns) {
+            throw std::runtime_error(std::string(name) + ": DFlash2 native shape/codec differs");
+        }
+        const auto first = static_cast<std::uint64_t>(weight.first_row);
+        if (weight.format == NumericFormat::BF16) {
+            const auto stride = static_cast<std::uint64_t>(columns) * sizeof(std::uint16_t);
+            const auto offset = first * stride;
+            if (physical.layout != ninfer::artifact::StorageLayout::ContiguousLeV1 ||
+                actual.layout != ninfer::QuantLayout::Contiguous ||
+                actual.qdata != base + offset || actual.scales != nullptr) {
+                throw std::runtime_error(std::string(name) + ": BF16 ModelView offset differs");
+            }
+            verify_bytes(weight.object, offset,
+                         static_cast<const std::byte*>(actual.qdata),
+                         static_cast<std::uint64_t>(rows) * stride, name);
+        } else if (weight.format == NumericFormat::W8G32_F16S) {
+            const std::array<std::uint64_t, 2> shape{
+                static_cast<std::uint64_t>(weight.parent_rows),
+                static_cast<std::uint64_t>(columns)};
+            const auto geometry = ninfer::artifact::row_split_geometry(weight.format, shape);
+            const auto low_stride = geometry.groups_per_row * geometry.low_bytes_per_group;
+            const auto scale_stride = geometry.groups_per_row * sizeof(std::uint16_t);
+            const auto low_offset = first * low_stride;
+            const auto scale_offset = geometry.scale_plane_offset + first * scale_stride;
+            if (physical.layout != ninfer::artifact::StorageLayout::RowSplitK128V1 ||
+                actual.layout != ninfer::QuantLayout::RowSplit ||
+                actual.qdata != base + low_offset || actual.qhigh != nullptr ||
+                actual.scales != base + scale_offset ||
+                actual.group != 32) {
+                throw std::runtime_error(std::string(name) + ": W8 ModelView planes differ");
+            }
+            verify_bytes(weight.object, low_offset,
+                         static_cast<const std::byte*>(actual.qdata),
+                         static_cast<std::uint64_t>(rows) * low_stride, name);
+            verify_bytes(weight.object, scale_offset,
+                         static_cast<const std::byte*>(actual.scales),
+                         static_cast<std::uint64_t>(rows) * scale_stride, name);
+        } else {
+            throw std::runtime_error(std::string(name) + ": unexpected DFlash2 codec");
+        }
+    };
+    const auto verify_tensor = [&](std::string_view name,
+                                   ninfer::artifact::ObjectHandle object,
+                                   const ninfer::Tensor& actual, std::uint64_t elements) {
+        const auto& physical = std::get<ninfer::artifact::TensorDescriptor>(
+            reader.objects().at(object.index));
+        if (physical.layout != ninfer::artifact::StorageLayout::ContiguousLeV1 ||
+            physical.format != NumericFormat::BF16 ||
+            actual.dtype != ninfer::DType::BF16 ||
+            actual.data != backing.device_data(object) ||
+            static_cast<std::uint64_t>(actual.numel()) != elements) {
+            throw std::runtime_error(std::string(name) + ": BF16 tensor ModelView differs");
+        }
+        verify_bytes(object, 0, static_cast<const std::byte*>(actual.data),
+                     elements * sizeof(std::uint16_t), name);
+    };
+    constexpr int H = DFlashConfig::hidden;
+    constexpr int K = DFlashConfig::kv_size;
+    constexpr int Q = DFlashConfig::query_size;
+    constexpr int I = DFlashConfig::intermediate;
+    constexpr int C = DFlashConfig::dynamic_conv_rows;
+    verify_weight("DFlash2 feature projection", plan.feature_projection,
+                  native.feature_projection, H, DFlashConfig::feature_rows);
+    verify_tensor("DFlash2 context norm", plan.context_norm, native.context_norm, H);
+    verify_tensor("DFlash2 final norm", plan.final_norm, native.final_norm, H);
+    for (std::size_t index = 0; index < plan.layers.size(); ++index) {
+        const auto& l = plan.layers[index];
+        const auto& w = native.layers[index];
+        verify_tensor("DFlash2 input norm", l.input_norm, w.input_norm, H);
+        verify_tensor("DFlash2 post norm", l.post_attention_norm, w.post_attention_norm, H);
+        verify_weight("DFlash2 fused QKV", l.query_key_value, w.query_key_value,
+                      Q + 2 * K, H);
+        auto context = l.query_key_value;
+        context.first_row = Q;
+        context.selected_rows = K;
+        verify_weight("DFlash2 context K", context, w.context_key, K, H);
+        context.first_row = Q + K;
+        verify_weight("DFlash2 context V", context, w.context_value, K, H);
+        verify_tensor("DFlash2 Q norm", l.query_norm, w.query_norm, DFlashConfig::head_dim);
+        verify_tensor("DFlash2 K norm", l.key_norm, w.key_norm, DFlashConfig::head_dim);
+        verify_weight("DFlash2 attention output", l.attention_output,
+                      w.attention_output, H, Q);
+        verify_weight("DFlash2 gate/up", l.gate_up, w.gate_up, 2 * I, H);
+        verify_weight("DFlash2 down", l.down, w.down, H, I);
+        verify_tensor("DFlash2 attention conv", l.attention_conv.base_kernel,
+                      w.attention_conv.base_kernel, 4 * H);
+        verify_weight("DFlash2 attention conv projection",
+                      l.attention_conv.kernel_projection,
+                      w.attention_conv.kernel_projection, C, H);
+        verify_tensor("DFlash2 MLP conv", l.mlp_conv.base_kernel,
+                      w.mlp_conv.base_kernel, 4 * H);
+        verify_weight("DFlash2 MLP conv projection", l.mlp_conv.kernel_projection,
+                      w.mlp_conv.kernel_projection, C, H);
+        if (w.attention_conv.base_kernel.ne[0] != H ||
+            w.attention_conv.base_kernel.ne[1] != 2 ||
+            w.attention_conv.base_kernel.ne[2] != 2 ||
+            w.mlp_conv.base_kernel.ne[0] != H ||
+            w.mlp_conv.base_kernel.ne[1] != 2 ||
+            w.mlp_conv.base_kernel.ne[2] != 2) {
+            throw std::runtime_error("DFlash2 dynamic convolution tensor geometry differs");
+        }
+    }
+    const auto& selector = plan.candidate_selector;
+    const auto& selector_view = native.candidate_selector;
+    verify_weight("DFlash2 selector hidden projection", selector.hidden_projection,
+                  selector_view.hidden_projection, DFlashConfig::selector_dim, H);
+    verify_tensor("DFlash2 predecessor codebook", selector.predecessor_codebook,
+                  selector_view.predecessor_codebook,
+                  static_cast<std::uint64_t>(DFlashConfig::selector_dim) * TextConfig::output_rows);
+    verify_tensor("DFlash2 successor codebook", selector.successor_codebook,
+                  selector_view.successor_codebook,
+                  static_cast<std::uint64_t>(DFlashConfig::selector_dim) * TextConfig::output_rows);
+    if (selector_view.predecessor_codebook.ne[0] != DFlashConfig::selector_dim ||
+        selector_view.predecessor_codebook.ne[1] != TextConfig::output_rows ||
+        selector_view.successor_codebook.ne[0] != DFlashConfig::selector_dim ||
+        selector_view.successor_codebook.ne[1] != TextConfig::output_rows ||
+        viewed != selected) {
+        throw std::runtime_error("DFlash2 native ModelView did not consume all 66 parents");
+    }
+    std::cout << "real GSQ v3 DFlash2: " << selected.size()
+              << " physical parents, " << materialization.device_capacity_bytes
+              << " device bytes; native ModelView and exact source-file plane oracle passed\n";
     return 0;
 }
 
@@ -1436,6 +1786,9 @@ int verify_vision_workspace_planning() {
 } // namespace
 
 int main(int argc, char** argv) {
+    if (argc == 2 && std::string_view(argv[1]) == "--v3-dflash2-device") {
+        return verify_real_v3_dflash2_materialization();
+    }
     if (argc == 2 && std::string_view(argv[1]) == "--v3-vision-device") {
         return verify_real_v3_vision_materialization();
     }

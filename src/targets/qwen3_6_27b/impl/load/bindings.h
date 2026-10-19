@@ -361,6 +361,11 @@ using MtpWeights           = RuntimeModelView::MtpLayer;
 [[nodiscard]] MtpWeights materialize_mtp_weights(
     const MtpPlan& plan, const artifact::MaterializedArtifact& materialized);
 
+// The same native DFlash2 ModelView materialization is used by loaded models
+// and targeted real-v3 physical-parent tests.
+[[nodiscard]] qwen3_6::DFlash2Weights materialize_dflash2_weights(
+    const DFlash2Plan& plan, const artifact::MaterializedArtifact& materialized);
+
 class LoadedModelData {
 public:
     LoadedModelData(BindingPlan plan, artifact::MaterializedArtifact materialized);
