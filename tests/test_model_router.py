@@ -46,6 +46,9 @@ class ModelRouterTest(unittest.TestCase):
                     self.assertEqual(
                         choose_backend(found, ["--spec", "dflash"]), "companion"
                     )
+            for rank in (0, 1):
+                with self.assertRaisesRegex(ValueError, "two-rank runtime"):
+                    choose_backend((3, f"qwen3.8-27b-tp2-rank{rank}", "qwen3_5_text"), [])
 
 
 if __name__ == "__main__":

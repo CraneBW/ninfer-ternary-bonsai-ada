@@ -53,6 +53,11 @@ def choose_backend(info: tuple[int, str, str], arguments: list[str]) -> str:
     version, model, model_type = info
     if version == 2:
         return "native"
+    if model in {"qwen3.8-27b-tp2-rank0", "qwen3.8-27b-tp2-rank1"}:
+        raise ValueError(
+            "TP2 rank artifact requires a native two-rank runtime with collectives; "
+            "the current single-GPU and companion backends cannot serve it"
+        )
     # DFlash (v1) is provided only by the companion; native Qwen 27B
     # implements MTP and DFlash2, including their optimized proposal head.
     speculative = [arguments[i + 1] for i, value in enumerate(arguments[:-1])
