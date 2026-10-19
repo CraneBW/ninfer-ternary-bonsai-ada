@@ -12,6 +12,7 @@
 #include "artifact/binder.h"
 #include "artifact/materializer.h"
 #include "core/tensor.h"
+#include "targets/qwen3_6_27b/impl/config.h"
 
 #include <array>
 #include <cstddef>
@@ -23,9 +24,9 @@
 
 namespace ninfer::targets::qwen3_6_27b::detail {
 
-inline constexpr std::size_t kTextLayers          = 64;
-inline constexpr std::size_t kFullAttentionLayers = 16;
-inline constexpr std::size_t kGdnLayers           = 48;
+inline constexpr std::size_t kTextLayers          = TextConfig::layers;
+inline constexpr std::size_t kFullAttentionLayers = TextConfig::full_attention_layers();
+inline constexpr std::size_t kGdnLayers           = TextConfig::gdn_layers();
 
 struct WeightPlan {
     artifact::ObjectHandle object;
@@ -189,6 +190,11 @@ struct ArtifactLoadPlan {
     BindingPlan bindings;
     artifact::MaterializationPlan materialization;
 };
+
+// Validate the declared tensor geometry without consuming objects or materializing weights.
+// The overload permits a small synthetic shape to be exercised without a multi-GB fixture.
+void validate_artifact_model_shape(const artifact::Binder& binder, const ModelShape& expected);
+void validate_artifact_model_shape(const artifact::Binder& binder);
 
 ArtifactLoadPlan bind_artifact(artifact::Binder& binder, WeightsProfile weights_profile,
                                qwen3_6::StartupFeatures features);

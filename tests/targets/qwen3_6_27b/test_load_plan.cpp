@@ -1,5 +1,6 @@
 #include "artifact/binder.h"
 #include "artifact/reader.h"
+#include "artifact_fixture.h"
 #include "targets/qwen3_6_27b/impl/load/bindings.h"
 #include "targets/qwen3_6_27b/impl/variant.h"
 
@@ -9,11 +10,13 @@
 #include <algorithm>
 #include <bit>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <variant>
 
 namespace {
@@ -69,6 +72,199 @@ bool valid_divisors(const WeightPlan& weight) {
     const float input_divisor  = std::bit_cast<float>(weight.input_scale_divisor_bits);
     return std::isfinite(weight_divisor) && weight_divisor > 0.0F && std::isfinite(input_divisor) &&
            input_divisor > 0.0F;
+}
+
+using Json = ninfer::test::artifact_fixture::Json;
+
+Json small_shape_directory(const ModelShape& shape, bool fused) {
+    Json directory = {
+        {"identity", {{"model_id", "shape-fixture"}, {"weights_id", "fixture"}}},
+        {"objects", Json::array()},
+    };
+    std::uint64_t offset = 0;
+    const auto tensor = [&](std::string name, std::initializer_list<std::uint64_t> dims) {
+        std::uint64_t elements = 1;
+        for (const std::uint64_t dim : dims) { elements *= dim; }
+        offset                    = ninfer::test::artifact_fixture::align_up(offset, 256);
+        const std::uint64_t bytes = elements * sizeof(std::uint16_t);
+        directory["objects"].push_back({{"name", std::move(name)},
+                                        {"kind", "tensor"},
+                                        {"shape", dims},
+                                        {"format", "BF16"},
+                                        {"layout", "contiguous-le-v1"},
+                                        {"offset", offset},
+                                        {"bytes", bytes}});
+        offset += bytes;
+    };
+
+    tensor("text/token_embedding", {static_cast<std::uint64_t>(shape.output_rows),
+                                     static_cast<std::uint64_t>(shape.hidden)});
+    tensor("text/final_norm", {static_cast<std::uint64_t>(shape.hidden)});
+    tensor("text/output_head", {static_cast<std::uint64_t>(shape.output_rows),
+                                 static_cast<std::uint64_t>(shape.hidden)});
+    for (int layer = 0; layer < shape.layers; ++layer) {
+        const std::string prefix = "text/layers/" + std::to_string(layer) + "/";
+        tensor(prefix + "input_norm", {static_cast<std::uint64_t>(shape.hidden)});
+        tensor(prefix + "post_attention_norm", {static_cast<std::uint64_t>(shape.hidden)});
+        tensor(prefix + "mlp/gate_up", {static_cast<std::uint64_t>(2 * shape.intermediate),
+                                        static_cast<std::uint64_t>(shape.hidden)});
+        tensor(prefix + "mlp/down", {static_cast<std::uint64_t>(shape.hidden),
+                                     static_cast<std::uint64_t>(shape.intermediate)});
+        if (shape.is_full_attention(layer)) {
+            if (fused) {
+                tensor(prefix + "attention/query_key_gate_value",
+                       {static_cast<std::uint64_t>(shape.attention_input_rows()),
+                        static_cast<std::uint64_t>(shape.hidden)});
+            } else {
+                tensor(prefix + "attention/query_key",
+                       {static_cast<std::uint64_t>(shape.query_size() + shape.kv_size()),
+                        static_cast<std::uint64_t>(shape.hidden)});
+                tensor(prefix + "attention/gate_value",
+                       {static_cast<std::uint64_t>(shape.query_size() + shape.kv_size()),
+                        static_cast<std::uint64_t>(shape.hidden)});
+            }
+            tensor(prefix + "attention/query_norm", {static_cast<std::uint64_t>(shape.head_dim)});
+            tensor(prefix + "attention/key_norm", {static_cast<std::uint64_t>(shape.head_dim)});
+            tensor(prefix + "attention/output", {static_cast<std::uint64_t>(shape.hidden),
+                                                  static_cast<std::uint64_t>(shape.query_size())});
+        } else {
+            tensor(prefix + "gdn/a_log", {static_cast<std::uint64_t>(shape.gdn_value_heads)});
+            tensor(prefix + "gdn/dt_bias", {static_cast<std::uint64_t>(shape.gdn_value_heads)});
+            tensor(prefix + "gdn/convolution",
+                   {static_cast<std::uint64_t>(shape.gdn_conv_kernel),
+                    static_cast<std::uint64_t>(shape.convolution_dim())});
+            if (fused) {
+                tensor(prefix + "gdn/a_b_projection",
+                       {static_cast<std::uint64_t>(2 * shape.gdn_value_heads),
+                        static_cast<std::uint64_t>(shape.hidden)});
+                tensor(prefix + "gdn/query_key_value_z",
+                       {static_cast<std::uint64_t>(shape.gdn_input_rows()),
+                        static_cast<std::uint64_t>(shape.hidden)});
+            } else {
+                tensor(prefix + "gdn/a_projection",
+                       {static_cast<std::uint64_t>(shape.gdn_value_heads),
+                        static_cast<std::uint64_t>(shape.hidden)});
+                tensor(prefix + "gdn/b_projection",
+                       {static_cast<std::uint64_t>(shape.gdn_value_heads),
+                        static_cast<std::uint64_t>(shape.hidden)});
+                tensor(prefix + "gdn/query_key",
+                       {static_cast<std::uint64_t>(2 * shape.key_dim()),
+                        static_cast<std::uint64_t>(shape.hidden)});
+                tensor(prefix + "gdn/value_z",
+                       {static_cast<std::uint64_t>(2 * shape.value_dim()),
+                        static_cast<std::uint64_t>(shape.hidden)});
+            }
+            tensor(prefix + "gdn/norm", {static_cast<std::uint64_t>(shape.gdn_value_head_dim)});
+            tensor(prefix + "gdn/output", {static_cast<std::uint64_t>(shape.hidden),
+                                            static_cast<std::uint64_t>(shape.value_dim())});
+        }
+    }
+    return directory;
+}
+
+int verify_self_describing_shape() {
+    ModelShape small           = kModelShape;
+    small.hidden               = 4;
+    small.layers               = 4;
+    small.intermediate         = 8;
+    small.output_rows          = 16;
+    small.gdn_conv_kernel      = 2;
+    small.gdn_key_heads        = 1;
+    small.gdn_key_head_dim     = 2;
+    small.gdn_value_heads      = 2;
+    small.gdn_value_head_dim   = 2;
+    small.query_heads          = 2;
+    small.kv_heads             = 1;
+    small.head_dim             = 2;
+
+    const auto check_fixture = [&](const Json& directory, std::string_view suffix,
+                                   std::string_view expected_error) {
+        auto file = ninfer::test::artifact_fixture::write_fixture(directory, suffix);
+        ninfer::artifact::Reader reader(file.path);
+        ninfer::artifact::Binder binder(reader);
+        try {
+            validate_artifact_model_shape(binder, small);
+            if (!expected_error.empty()) {
+                std::cerr << "shape fixture accepted " << suffix << '\n';
+                return false;
+            }
+            // Validation is read-only: the second invocation must remain valid.
+            validate_artifact_model_shape(binder, small);
+            return true;
+        } catch (const ninfer::artifact::ArtifactError& error) {
+            if (!expected_error.empty() &&
+                std::string_view(error.what()).find(expected_error) != std::string_view::npos) {
+                return true;
+            }
+            std::cerr << "unexpected shape error on " << suffix << ": " << error.what() << '\n';
+            return false;
+        }
+    };
+
+    const Json split = small_shape_directory(small, false);
+    const Json fused = small_shape_directory(small, true);
+    if (!check_fixture(split, "model_shape_split", "") ||
+        !check_fixture(fused, "model_shape_fused", "")) {
+        return 1;
+    }
+
+    // The production load route must reject a smaller model before requesting even its
+    // frontend resources, and the diagnostic must identify the incompatible tensor.
+    {
+        auto file = ninfer::test::artifact_fixture::write_fixture(split, "model_shape_load_reject");
+        ninfer::artifact::Reader reader(file.path);
+        ninfer::artifact::Binder binder(reader);
+        bool rejected = false;
+        try {
+            (void)bind_artifact(binder, WeightsProfile::Qwen36GroupwiseInt, all_features());
+        } catch (const ninfer::artifact::ArtifactError& error) {
+            rejected = std::string_view(error.what()).find("text/token_embedding") !=
+                       std::string_view::npos;
+        }
+        if (!rejected) {
+            std::cerr << "27B load did not reject the smaller model shape early\n";
+            return 1;
+        }
+    }
+
+    auto wrong_width = split;
+    for (auto& object : wrong_width["objects"]) {
+        if (object.at("name") == "text/layers/2/mlp/down") {
+            object["shape"] = {2, 16}; // Same encoded byte count, different geometry.
+        }
+    }
+    if (!check_fixture(wrong_width, "model_shape_wrong_width", "text/layers/2/mlp/down")) {
+        return 1;
+    }
+
+    auto extra_layer = split;
+    const auto& last = extra_layer["objects"].back();
+    const std::uint64_t next_offset = ninfer::test::artifact_fixture::align_up(
+        last.at("offset").get<std::uint64_t>() + last.at("bytes").get<std::uint64_t>(), 256);
+    extra_layer["objects"].push_back({{"name", "text/layers/4/input_norm"},
+                                      {"kind", "tensor"},
+                                      {"shape", {4}},
+                                      {"format", "BF16"},
+                                      {"layout", "contiguous-le-v1"},
+                                      {"offset", next_offset},
+                                      {"bytes", 8}});
+    if (!check_fixture(extra_layer, "model_shape_extra_layer", "more than 4 text layers")) {
+        return 1;
+    }
+
+    auto wrong_topology = fused;
+    for (auto it = wrong_topology["objects"].begin(); it != wrong_topology["objects"].end();
+         ++it) {
+        if (it->at("name") == "text/layers/3/attention/query_norm") {
+            wrong_topology["objects"].erase(it);
+            break;
+        }
+    }
+    if (!check_fixture(wrong_topology, "model_shape_wrong_topology",
+                       "text/layers/3/attention/query_norm")) {
+        return 1;
+    }
+    return 0;
 }
 
 int verify_groupwise(const std::filesystem::path& path) {
@@ -330,7 +526,12 @@ int verify_vision_workspace_planning() {
 
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    if (const int result = verify_self_describing_shape(); result != 0) { return result; }
+    if (argc == 2 && std::string_view(argv[1]) == "--shape-only") {
+        std::cout << "self-describing model shape fixtures passed\n";
+        return 0;
+    }
     const std::filesystem::path groupwise =
         artifact_path("NINFER_QWEN3_6_27B_WEIGHTS", "qwen3_6_27b.ninfer");
     const std::filesystem::path nvfp4 =
