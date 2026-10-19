@@ -1196,7 +1196,8 @@ struct CaptureSkipStats {
 
 // KVMem residency and retrieval evidence. The block counters are lifetime totals; window_tokens
 // is the most recent successful compaction's traffic (the newest window across the two KV address
-// spaces), and host_bytes is the arena those evicted blocks occupy.
+// spaces), host_bytes is active warm KV occupancy, cold_bytes is active disk occupancy,
+// and host_capacity_bytes is the pinned Host tier reservation for KVMem pages.
 // transfer_runs counts the merged copy runs the staged blocks travelled as (one run moves every
 // plane of a stretch of device-consecutive, host-adjacent pages); stage blocks / transfer_runs is
 // the mean run length, and a value near 1 means the stage traffic degraded to one copy per page.
@@ -1213,6 +1214,9 @@ struct KvMemUsage {
     std::uint64_t zero_score_blocks = 0;
     std::uint32_t window_tokens     = 0;
     std::size_t host_bytes          = 0;
+    std::size_t host_capacity_bytes = 0;
+    std::size_t cold_bytes          = 0;
+    std::uint64_t host_to_cold_spills = 0;
 
     void merge(const KvMemUsage& other) noexcept {
         plans += other.plans;
@@ -1226,6 +1230,9 @@ struct KvMemUsage {
         zero_score_blocks += other.zero_score_blocks;
         if (other.window_tokens > window_tokens) { window_tokens = other.window_tokens; }
         host_bytes += other.host_bytes;
+        host_capacity_bytes += other.host_capacity_bytes;
+        cold_bytes += other.cold_bytes;
+        host_to_cold_spills += other.host_to_cold_spills;
     }
 };
 

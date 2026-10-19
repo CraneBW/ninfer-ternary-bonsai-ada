@@ -1825,6 +1825,24 @@ public:
         return std::max(entitlement(address), address.logical_entitlement);
     }
 
+    // The physical pool may be larger than the KVMem window granted to this
+    // address. Generation may materialize only up to its device claim; pages
+    // beyond that bound must first be recovered through window compaction.
+    // Use the same device_claim_pages() policy as activation and resize_entitlement
+    // so decode reclaim cannot accidentally use spare pages claimed by other lanes.
+    [[nodiscard]] std::uint32_t kvmem_device_claim_pages(KVAddressSpaceHandle handle) const {
+        return device_claim_pages(mapping_limit(handle));
+    }
+
+    // A generation append must reclaim before it crosses the *reserved* claim,
+    // not when it crosses the physical pool's capacity. The latter can exceed
+    // the claim by several pages when KVMem shares one pool among requests.
+    [[nodiscard]] bool kvmem_generation_reclaim_due(KVAddressSpaceHandle handle,
+                                                     std::uint32_t next_frontier_tokens) const {
+        return kvmem_enabled_ && kvmem_gen_reserve_ != 0 &&
+               pages_for_tokens(next_frontier_tokens) > kvmem_device_claim_pages(handle);
+    }
+
     // Leading pages this address shares with another view (a retained shared prefix or a
     // snapshot continuation). KVMem has to pin them: re-phasing a page moves it for every view.
     // The run starts at page zero because prefix forks publish the shared prefix first.
@@ -2737,10 +2755,26 @@ public:
         // blocks evicted together in an earlier compaction) with consecutive physical device pages
         // from free_page_runs_, so plan_kv_transfer_runs merges them into single H2D runs.
         if (!plan.stage_in.empty()) {
-            std::optional<DeviceKVPageReservation> reservation =
-                pool.reserve(static_cast<std::uint32_t>(plan.stage_in.size()));
-            if (!reservation) {
-                throw std::runtime_error("KVMem stage-in found no free device page");
+            const std::uint32_t required = static_cast<std::uint32_t>(plan.stage_in.size());
+            std::optional<DeviceKVPageReservation> temporary_reservation;
+            DeviceKVPageReservation* stage_in_reservation = nullptr;
+            if (address.active) {
+                // The active writer has already claimed its growth headroom in
+                // address.reservation. Physical-pool available_pages() excludes
+                // those pages, so taking an independent stage-in reservation can
+                // fail even when the required capacity belongs to this address.
+                // Consume its own entitlement; any future growth re-establishes
+                // the remaining budget through resize_entitlement().
+                if (address.reservation.pages() < required) {
+                    pool.resize_reservation(address.reservation, required);
+                }
+                stage_in_reservation = &address.reservation;
+            } else {
+                temporary_reservation = pool.reserve(required);
+                if (!temporary_reservation) {
+                    throw std::runtime_error("KVMem stage-in found no free device page");
+                }
+                stage_in_reservation = &*temporary_reservation;
             }
             std::vector<std::uint32_t> ordered = plan.stage_in;
             for (const std::uint32_t id : ordered) {
@@ -2764,7 +2798,7 @@ public:
             handles.reserve(ordered.size());
             restored_ids.reserve(ordered.size());
             for (const std::uint32_t id : ordered) {
-                LogicalKVPageHandle logical = pages_->materialize(*reservation);
+                LogicalKVPageHandle logical = pages_->materialize(*stage_in_reservation);
                 block_pages[id]             = logical;
                 if (block_hosts[id].valid()) {
                     views.push_back(kvmem_host_arena_->view(block_hosts[id]));
@@ -2879,6 +2913,23 @@ public:
         kvmem_transfer_us_ += transfer_us;
         kvmem_window_tokens_ = kv_window;
         ++kvmem_compactions_;
+        if (std::getenv("NINFER_KVMEM_TRACE") != nullptr) {
+            std::size_t cold_blocks = 0;
+            std::size_t cold_thinking = 0;
+            for (const auto& block : repo.blocks()) {
+                if (block.tier != ninfer::kvmem::KvTier::Nvme) { continue; }
+                ++cold_blocks;
+                if (block.stratum == ninfer::kvmem::BlockStratum::EphemeralThinking) {
+                    ++cold_thinking;
+                }
+            }
+            std::fprintf(stderr,
+                         "KVMEM_TRACE cold bytes=%zu blocks=%zu closed_thinking=%zu "
+                         "host_capacity=%zu spills=%llu\n",
+                         kvmem_cold_bytes(), cold_blocks, cold_thinking,
+                         kvmem_host_capacity_bytes(),
+                         static_cast<unsigned long long>(kvmem_host_to_cold_spills_));
+        }
         if (const char* env = std::getenv("KVMEM_RESELECT"); env != nullptr && env[0] != '\0' &&
             env[0] != '0') {
             std::fprintf(stderr,
@@ -3031,6 +3082,9 @@ public:
         usage.zero_score_blocks = kvmem_zero_score_blocks_;
         usage.window_tokens     = kvmem_window_tokens_;
         usage.host_bytes        = kvmem_host_arena_ ? kvmem_host_arena_->occupied_bytes() : 0;
+        usage.host_capacity_bytes = kvmem_host_capacity_bytes();
+        usage.cold_bytes          = kvmem_cold_bytes();
+        usage.host_to_cold_spills = kvmem_host_to_cold_spills();
         return usage;
     }
 

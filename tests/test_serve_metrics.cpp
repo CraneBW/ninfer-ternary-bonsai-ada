@@ -76,6 +76,21 @@ int main() {
     stats.kvmem.zero_score_blocks        = 14;
     stats.kvmem.window_tokens            = 98304;
     stats.kvmem.host_bytes               = 4096;
+    stats.kvmem.host_capacity_bytes      = 8192;
+    stats.kvmem.cold_bytes               = 16384;
+    stats.kvmem.host_to_cold_spills      = 7;
+    {
+        ninfer::KvMemUsage second{};
+        second.host_capacity_bytes = 1024;
+        second.cold_bytes = 512;
+        second.host_to_cold_spills = 2;
+        auto aggregate = stats.kvmem;
+        aggregate.merge(second);
+        failures += check(aggregate.host_capacity_bytes == 9216 &&
+                              aggregate.cold_bytes == 16896 &&
+                              aggregate.host_to_cold_spills == 9,
+                          "merged KVMem cold gauges/counters are incomplete");
+    }
     stats.capture_skips.note(ninfer::CaptureSkipReason::Terminal);
     stats.capture_skips.note(ninfer::CaptureSkipReason::PhysicalPeak);
 
@@ -108,6 +123,12 @@ int main() {
                       "kvmem transfer us are missing");
     failures += check(contains(text, "ninfer:kvmem_window_tokens 98304"),
                       "kvmem window is missing");
+    failures += check(contains(text, "ninfer:kvmem_host_capacity_bytes 8192"),
+                      "warm Host KV capacity is missing");
+    failures += check(contains(text, "ninfer:kvmem_cold_bytes 16384"),
+                      "active disk cold KV is missing");
+    failures += check(contains(text, "ninfer:kvmem_host_to_cold_spills_total 7"),
+                      "Host-to-cold spill count is missing");
     failures += check(contains(text, "ninfer:capture_skips_total 2"),
                       "capture skip total is wrong");
     failures += check(contains(text, "ninfer:capture_skips{reason=\"terminal\"} 1"),

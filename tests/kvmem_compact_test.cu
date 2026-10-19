@@ -150,11 +150,159 @@ std::int64_t in_page_elems(int leading, int head, int token, int d) {
            d;
 }
 
+// A live KVMem address may own a 32-page device claim inside a 36-page
+// physical pool. A prefill can exhaust the 32 reserved pages while leaving
+// four physically free; the next decode page must trigger reclaim at 32,
+// never at physical page 36. Recreate the same lifecycle as a chunked prefill:
+// compact, restore the logical growth entitlement, regrow to the claim, then
+// compact for generation again. Repeat to exercise Host/NVMe spill as well.
+void test_generation_device_claim() {
+    constexpr std::uint32_t physical_pages = 36;  // --kv-device-tokens 2304
+    constexpr std::uint32_t budget_pages   = 32;  // --kvmem-budget 2048
+    constexpr std::uint32_t reserve_pages  = 2;   // --kvmem-gen-reserve 128
+    constexpr std::uint32_t logical_pages  = 64;  // --max-context 4096
+#if defined(_WIN32)
+    CHECK(::_putenv_s("NINFER_KVMEM_HOST_PAGES", "2") == 0, "set Host cap");
+    CHECK(::_putenv_s("NINFER_KVMEM_COLD_DIR", ".") == 0, "set cold directory");
+#else
+    CHECK(::setenv("NINFER_KVMEM_HOST_PAGES", "2", 1) == 0, "set Host cap");
+    CHECK(::setenv("NINFER_KVMEM_COLD_DIR", ".", 1) == 0, "set cold directory");
+#endif
+
+    KVPageGeometry geometry;
+    geometry.page_tokens        = kTokens;
+    geometry.device_plane_order = PagedKVPlaneOrder::PageMajor;
+    geometry.planes.push_back({DType::I8, 256, kHeads, 256});
+    geometry.planes.push_back({DType::I8, 256, kHeads, 256});
+    geometry.planes.push_back({DType::FP16, 4, kHeads, 256});
+    geometry.planes.push_back({DType::FP16, 4, kHeads, 256});
+
+    LayoutBuilder builder;
+    const auto pool_layout = plan_device_kv_page_pool(
+        builder, DeviceKVPagePoolSpec{.page_group_count = physical_pages, .geometry = geometry});
+    const auto table_layout = plan_kv_execution_tables(
+        builder, KVExecutionTableSpec{.logical_page_capacity = logical_pages, .table_rows = 1});
+    const std::size_t allocation_bytes =
+        pool_layout.payload_bytes() + table_layout.metadata_bytes() + (1U << 20);
+    void* backing = nullptr;
+    CHECK(cudaMalloc(&backing, allocation_bytes) == cudaSuccess, "claim: cudaMalloc");
+    if (!backing) { throw std::runtime_error("claim: no device backing"); }
+    CHECK(cudaMemset(backing, 0, allocation_bytes) == cudaSuccess, "claim: zero KV pages");
+    {
+        DeviceKVPagePool pool(DeviceSpan{backing, allocation_bytes}, pool_layout);
+        KVExecutionTablePool tables(DeviceSpan{backing, allocation_bytes}, table_layout, pool);
+        LogicalKVPageStore pages(pool, logical_pages);
+        KVAddressSpaceStore store(
+            pages, tables, 1, logical_pages,
+            KvMemOptions{.enabled = true,
+                         .budget_tokens = budget_pages * kTokens,
+                         .gen_reserve_tokens = reserve_pages * kTokens,
+                         .action_lrfu = true});
+        const auto handle = store.create_inactive();
+        CHECK(handle.has_value(), "claim: allocate address");
+        if (!handle) { throw std::logic_error("claim: address allocation failed"); }
+
+        store.activate(*handle, logical_pages, 0);
+        CHECK(store.mapping_limit(*handle) == logical_pages,
+              "claim: logical entitlement must cover full context");
+        CHECK(store.kvmem_device_claim_pages(*handle) == budget_pages,
+              "claim: device entitlement must be budget pages (not physical pool)");
+        CHECK(pool.capacity_pages() == physical_pages,
+              "claim: test requires four unclaimed physical pages");
+        CHECK(store.kvmem_gen_reserve_tokens() == reserve_pages * kTokens,
+              "claim: generation reserve is missing");
+
+        // A prefix filled right to the KVMem budget consumes every reserved
+        // page while the GPU still has physical capacity. The next token must
+        // reclaim before ensure_mapped_to_tokens can attempt page 33.
+        store.ensure_mapped_to_tokens(*handle, budget_pages * kTokens);
+        store.commit_frontier(*handle, budget_pages * kTokens);
+        CHECK(pool.reserved_pages() == 0 && pool.allocated_pages() == budget_pages,
+              "claim: active budget should consume its exact reservation");
+        CHECK(!store.kvmem_generation_reclaim_due(*handle, budget_pages * kTokens),
+              "claim: reclaim must not run before crossing budget page 32");
+        CHECK(store.kvmem_generation_reclaim_due(*handle, budget_pages * kTokens + 1),
+              "claim: page 33 must reclaim even with physical pool room left");
+
+        for (int round = 0; round < 3; ++round) {
+            const std::uint32_t logical_bound = store.mapping_limit(*handle);
+            CHECK(logical_bound == logical_pages,
+                  "claim round %d: lost logical growth entitlement (%u)", round, logical_bound);
+            const std::uint32_t window = store.kvmem_compact_generation(*handle);
+            CHECK(window == (budget_pages - reserve_pages) * kTokens,
+                  "claim round %d: reclaim window is %u", round, window);
+            CHECK(pool.allocated_pages() == budget_pages - reserve_pages,
+                  "claim round %d: active window occupies %u pages", round,
+                  pool.allocated_pages());
+            store.resize_entitlement(*handle, logical_bound);
+            CHECK(pool.reserved_pages() == reserve_pages,
+                  "claim round %d: missing %u pages of reservation after reclaim", round,
+                  pool.reserved_pages());
+            store.ensure_mapped_to_tokens(*handle, budget_pages * kTokens);
+            store.commit_frontier(*handle, budget_pages * kTokens);
+            CHECK(pool.allocated_pages() == budget_pages && pool.reserved_pages() == 0,
+                  "claim round %d: reserved room failed to materialize", round);
+            CHECK(store.kvmem_generation_reclaim_due(*handle, budget_pages * kTokens + 1),
+                  "claim round %d: next decode boundary must reclaim again", round);
+        }
+        CHECK(store.kvmem_cold_bytes() > 0,
+              "claim: repeated compactions must exercise low-capacity cold storage");
+
+        // Completion-time compaction may restore cold blocks into an *active*
+        // address that still owns its two reserved growth pages. Reserve every
+        // other free physical page as if it belonged to another lane, so no
+        // spare unclaimed capacity exists. The next window grows 30 -> 32 and
+        // must borrow this address's entitlement for its stage-in pages. The
+        // previous independent pool.reserve() failed here after the K0 ledger
+        // had already been committed, corrupting a later prefix continuation.
+        const std::uint32_t logical_before = store.mapping_limit(*handle);
+        CHECK(store.kvmem_compact_generation(*handle) ==
+                  (budget_pages - reserve_pages) * kTokens,
+              "claim: final generation reclaim to 30 pages");
+        store.resize_entitlement(*handle, logical_before);
+        const std::uint32_t spare = pool.available_pages();
+        CHECK(spare == physical_pages - budget_pages,
+              "claim: expected four spare pages before competing reservation");
+        auto competing = pool.reserve(spare);
+        CHECK(competing.has_value(), "claim: competing lane reservation failed");
+        CHECK(pool.available_pages() == 0 && pool.reserved_pages() == spare + reserve_pages,
+              "claim: competing lane must leave zero unclaimed capacity");
+        const std::uint64_t stages_before = store.kvmem_usage().stage_in_blocks;
+        CHECK(store.kvmem_compact(*handle, budget_pages * kTokens, nullptr, {7, 8}) ==
+                  budget_pages * kTokens,
+              "claim: completion window must grow using its own active reservation");
+        CHECK(store.kvmem_usage().stage_in_blocks >= stages_before + reserve_pages,
+              "claim: selected Host/NVMe blocks did not stage back in");
+        CHECK(store.window_page_handles(*handle).size() == budget_pages &&
+                  pool.allocated_pages() == budget_pages &&
+                  pool.reserved_pages() == spare,
+              "claim: stage-in must consume two own pages and preserve competing claim");
+        if (competing) { competing->release(); }
+        store.deactivate(*handle);
+        CHECK(store.release(*handle), "claim: address release");
+        CHECK(store.kvmem_cold_bytes() == 0 && pool.allocated_pages() == 0 &&
+                  pool.reserved_pages() == 0,
+              "claim: cold and physical pages must all be released");
+    }
+    CHECK(cudaFree(backing) == cudaSuccess, "claim: release GPU backing");
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     std::srand(4242);
+    if (argc == 2 && std::strcmp(argv[1], "--claim") == 0) {
+        try {
+            test_generation_device_claim();
+        } catch (const std::exception& error) {
+            std::printf("claim exception: %s\n", error.what());
+            return 2;
+        }
+        std::printf("claim failures=%d  VERDICT: %s\n", failures,
+                    failures == 0 ? "PASS" : "FAIL");
+        return failures == 0 ? 0 : 1;
+    }
     const bool exercise_cold = argc == 2 && std::strcmp(argv[1], "--cold") == 0;
     if (exercise_cold) {
         // One Host page forces the remaining archived pages through the disk

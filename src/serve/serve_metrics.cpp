@@ -148,6 +148,10 @@ std::string ServeMetrics::render(const ninfer::RuntimeStats& stats,
     metric(out, "ninfer:kvmem_zero_score_blocks_total", stats.kvmem.zero_score_blocks);
     metric(out, "ninfer:kvmem_window_tokens", static_cast<std::uint64_t>(stats.kvmem.window_tokens));
     metric(out, "ninfer:kvmem_host_bytes", static_cast<std::uint64_t>(stats.kvmem.host_bytes));
+    metric(out, "ninfer:kvmem_host_capacity_bytes",
+           static_cast<std::uint64_t>(stats.kvmem.host_capacity_bytes));
+    metric(out, "ninfer:kvmem_cold_bytes", static_cast<std::uint64_t>(stats.kvmem.cold_bytes));
+    metric(out, "ninfer:kvmem_host_to_cold_spills_total", stats.kvmem.host_to_cold_spills);
 
     metric(out, "ninfer:capture_skips_total", stats.capture_skips.total);
     for (std::size_t index = 0; index < stats.capture_skips.by_reason.size(); ++index) {

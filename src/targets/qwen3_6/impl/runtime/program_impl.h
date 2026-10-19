@@ -7456,14 +7456,20 @@ void ProgramImplCore::kvmem_apply_window(SequenceState& sequence, std::uint32_t 
 std::uint32_t ProgramImplCore::kvmem_reclaim_generation(SequenceState& sequence) {
     if (!sequence.kv || !text_kv_addresses->kvmem_enabled()) { return 0; }
     const std::uint32_t reserve_tokens = text_kv_addresses->kvmem_gen_reserve_tokens();
-    // Only when the append itself would run past the pool: the compaction below keeps
-    // `pool - generation headroom` resident, so it hands back the whole headroom at once and the
-    // window then grows for that many tokens before the next reclaim. Reclaiming earlier would
-    // move the window for no room the append actually needed.
+    // Reclaim before append exceeds this address's reserved device claim, which can be
+    // smaller than the physical pool. Activation and resize_entitlement reserve only the
+    // KVMem budget; using physical pool capacity as the threshold lets an append past
+    // that claim reach materialize() with zero reserved pages even while the pool has
+    // unclaimed spare room. Reclaim returns generation headroom to this address first.
     const std::uint32_t pool_pages = text_kv_pages->physical_pool().capacity_pages();
+    const std::uint32_t claim_pages =
+        text_kv_addresses->kvmem_device_claim_pages(sequence.kv->text);
     const std::uint32_t next_pages =
         kv_pages_for_frontier(sequence.execution_frontier + 1U);
-    if (reserve_tokens == 0 || next_pages <= pool_pages) { return 0; }
+    if (!text_kv_addresses->kvmem_generation_reclaim_due(
+            sequence.kv->text, sequence.execution_frontier + 1U)) {
+        return 0;
+    }
     // A speculative batch and a published endpoint pin this lineage's KV geometry: their views
     // name the pages by slot, so a reclaim would move KV those views already read. A retained
     // shared prefix is pinned page by page instead, so a reclaim may repack the private suffix
@@ -7480,9 +7486,9 @@ std::uint32_t ProgramImplCore::kvmem_reclaim_generation(SequenceState& sequence)
     if (pinned) {
         if (std::getenv("NINFER_KVMEM_TRACE") != nullptr) {
             std::fprintf(stderr,
-                         "KVMEM_TRACE gen_reclaim pinned frontier=%u next=%u pool=%u spec=%d "
+                         "KVMEM_TRACE gen_reclaim pinned frontier=%u next=%u claim=%u pool=%u spec=%d "
                          "endpoint=%d shared=%zu\n",
-                         sequence.execution_frontier, next_pages, pool_pages,
+                         sequence.execution_frontier, next_pages, claim_pages, pool_pages,
                          speculative_backend != SpeculativeBackend::None ? 1 : 0,
                          sequence.endpoint_valid ? 1 : 0, sequence.shared_prefix_references.size());
         }
@@ -7496,18 +7502,18 @@ std::uint32_t ProgramImplCore::kvmem_reclaim_generation(SequenceState& sequence)
         text_kv_addresses->kvmem_compact_generation(sequence.kv->text, device.stream);
     if (std::getenv("NINFER_KVMEM_TRACE") != nullptr) {
         std::fprintf(stderr,
-                     "KVMEM_TRACE gen_reclaim frontier=%u next=%u pool=%u reserve=%u logical=%u "
+                     "KVMEM_TRACE gen_reclaim frontier=%u next=%u claim=%u pool=%u reserve=%u logical=%u "
                      "window=%u\n",
-                     sequence.execution_frontier, next_pages, pool_pages, reserve_tokens, logical,
-                     window);
+                     sequence.execution_frontier, next_pages, claim_pages, pool_pages,
+                     reserve_tokens, logical, window);
     }
     if (window == 0) {
         if (std::getenv("NINFER_KVMEM_TRACE") != nullptr) {
             std::fprintf(stderr,
-                         "KVMEM_TRACE gen_reclaim blocked frontier=%u next=%u pool=%u reserve=%u "
+                         "KVMEM_TRACE gen_reclaim blocked frontier=%u next=%u claim=%u pool=%u reserve=%u "
                          "logical=%u\n",
-                         sequence.execution_frontier, next_pages, pool_pages, reserve_tokens,
-                         logical);
+                         sequence.execution_frontier, next_pages, claim_pages, pool_pages,
+                         reserve_tokens, logical);
         }
         // The window is at the pool and nothing could be reclaimed: the append is about to fail
         // deep inside the page pool. Name the pool and the knob that fixes it instead.
@@ -7525,7 +7531,8 @@ std::uint32_t ProgramImplCore::kvmem_reclaim_generation(SequenceState& sequence)
 void ProgramImplCore::require_kvmem_generation_fit(const SequenceState& sequence,
                                                    std::uint32_t main_tokens) const {
     if (!sequence.kv || !text_kv_addresses->kvmem_enabled()) { return; }
-    if (kv_pages_for_frontier(main_tokens) <= text_kv_pages->physical_pool().capacity_pages()) {
+    if (kv_pages_for_frontier(main_tokens) <=
+        text_kv_addresses->kvmem_device_claim_pages(sequence.kv->text)) {
         return;
     }
     throw std::runtime_error(
@@ -9498,6 +9505,10 @@ FinishResult ProgramImplCore::finish(SequenceHandle sequence) noexcept {
                     const std::uint32_t window = text_kv_addresses->kvmem_compact_round_boundary(
                         state.kv->text, device.stream);
                     if (window != 0) { kvmem_apply_window(state, window); }
+                } catch (const std::exception& error) {
+                    if (std::getenv("NINFER_KVMEM_TRACE") != nullptr) {
+                        std::fprintf(stderr, "KVMEM_TRACE finish_compact_failed %s\n", error.what());
+                    }
                 } catch (...) {}
             }
         }
