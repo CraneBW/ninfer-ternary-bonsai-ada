@@ -964,14 +964,19 @@ int test_rewrite_checkpoint_trace() {
         chat_message(ninfer::ChatRole::User, "question"), first,
         chat_message(ninfer::ChatRole::Tool, "result one"), second,
         chat_message(ninfer::ChatRole::Tool, "result two")};
-    const fi::RenderedChat open    = render_chat(tool_loop);
-    const std::size_t first_header = open.text.find(assistant_header);
+    const fi::RenderedChat open = render_chat(tool_loop);
+    // The rolling closure anchors past the last appending input. In an agent loop that input is
+    // the trailing tool result, so no assistant segment in the history qualifies and the
+    // generation prologue publishes the closure instead. Anchoring at the first assistant turn
+    // would freeze the checkpoint for the rest of the session: a checkpoint is republished only
+    // when it moves strictly forward.
+    const std::size_t open_header = open.text.rfind(assistant_header);
     int failures =
-        check(first_header != std::string::npos && open.rewrite_checkpoint &&
+        check(open_header != std::string::npos && open.rewrite_checkpoint &&
                   open.rewrite_checkpoint->kind ==
                       ninfer::targets::qwen3_6::RewriteCheckpointKind::TurnClosure &&
-                  open.rewrite_checkpoint->offset == first_header,
-              "tool loop did not retain the stable prefix before its first assistant turn");
+                  open.rewrite_checkpoint->offset == open_header,
+              "tool loop did not anchor its closure past the trailing tool result");
 
     fi::ChatRenderOptions preserve;
     preserve.preserve_thinking         = true;
@@ -1039,12 +1044,15 @@ int test_rewrite_checkpoint_trace() {
          chat_message(ninfer::ChatRole::User, "<tool_response>compat result</tool_response>"),
          second},
         no_generation);
-    const std::size_t wrapped_first = wrapped.text.find(assistant_header);
+    // A tool response spelled as a user message is executed history too: the caller can only
+    // append past it, never rewrite it, so it bounds the stable prefix exactly like a tool turn.
+    const std::size_t wrapped_header = wrapped.text.rfind(assistant_header);
     failures += check(wrapped.rewrite_checkpoint &&
                           wrapped.rewrite_checkpoint->kind ==
                               ninfer::targets::qwen3_6::RewriteCheckpointKind::TurnClosure &&
-                          wrapped.rewrite_checkpoint->offset == wrapped_first,
-                      "bare tool-response wrapper incorrectly advanced the real user turn");
+                          wrapped.rewrite_checkpoint->offset == wrapped_header &&
+                          wrapped.rewrite_checkpoint->offset > wrapped.text.find("<tool_response>"),
+                      "bare tool-response wrapper did not bound the stable prefix");
     return failures;
 }
 
@@ -1819,17 +1827,30 @@ int test_thinking_budget_control(const Frontend& frontend) {
                           !natural_session.thinking_stats().applied,
                       "natural thinking close left control armed");
 
+    // A model stop that arrives while the turn is still inside the thinking region is rolled back
+    // and handed to the target-control path: terminating there would publish an empty answer,
+    // because terminalize routes every buffered delta to the reasoning channel. The injected
+    // close is what ends the thinking region; the stop token never wins at this boundary.
     auto terminal_prompt  = thinking_prompt(frontend);
     auto terminal_session = frontend.make_output_session(
         terminal_prompt, {}, {}, ninfer::ThinkingControlOptions{.budget = 1});
     const auto terminal = terminal_session.preview_model(std::array<ninfer::TokenId, 1>{6}, 10,
                                                          ninfer::FinishReason::OutputLimit);
-    failures += check(terminal.finish_reason == ninfer::FinishReason::StopToken &&
-                          terminal.continuation == ninfer::runtime::ContinuationAction::Decode,
-                      "terminal token at the thinking boundary did not take priority");
+    failures += check(!terminal.finished() && terminal.accepted_tokens == 1 &&
+                          terminal.continuation ==
+                              ninfer::runtime::ContinuationAction::ApplyTargetControl,
+                      "a stop inside the thinking region ended the turn or skipped control");
     (void)terminal_session.commit_preview();
-    failures += check(terminal_session.pending_control_tokens().empty(),
-                      "terminal thinking boundary left control pending");
+    const std::vector<ninfer::TokenId> terminal_control(
+        terminal_session.pending_control_tokens().begin(),
+        terminal_session.pending_control_tokens().end());
+    failures += check(!terminal_control.empty(),
+                      "a stop inside the thinking region left no control to inject");
+    (void)terminal_session.preview_control(terminal_control, 9);
+    (void)terminal_session.commit_preview();
+    failures += check(terminal_session.pending_control_tokens().empty() &&
+                          terminal_session.thinking_stats().applied,
+                      "terminal thinking boundary did not close the thinking region");
 
     auto limit_prompt  = thinking_prompt(frontend);
     auto limit_session = frontend.make_output_session(limit_prompt, {}, {},
