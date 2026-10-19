@@ -3,6 +3,7 @@
 #include <array>
 #include <exception>
 #include <iostream>
+#include <string_view>
 
 namespace {
 
@@ -81,16 +82,32 @@ int q4_a16_conformance() {
     return failures;
 }
 
+int q4_v3_individual_conformance() {
+    // Real Qwen3.6 groupwise v3 source binds Q4 logical slices [2048,5120]
+    // and [17408,5120] from physical 4096/34816-row parents. The row-split
+    // kernels use runtime row bounds and should match CPU quantized math.
+    constexpr std::array samples{a16(1), a16(3), a16(9), a16(17)};
+    int failures = run_shape("Q4_V3", ActivationCompute::A16, make_q4g64_f16s_weight,
+                             {2048, 5120, 2169U, Comparison::Sampled, true, samples});
+    failures += run_shape("Q4_V3", ActivationCompute::A16, make_q4g64_f16s_weight,
+                          {17408, 5120, 2170U, Comparison::Sampled, true, samples});
+    return failures;
+}
+
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
     if (!ninfer::test::linear::cuda_available()) {
         std::cout << "SKIP: no usable CUDA device\n";
         return 77;
     }
 
     try {
-        const int failures = q4_a16_conformance();
+        if (argc > 2 || (argc == 2 && std::string_view(argv[1]) != "--v3-individual")) {
+            std::cerr << "usage: test_q4_a16 [--v3-individual]\n";
+            return 2;
+        }
+        const int failures = argc == 2 ? q4_v3_individual_conformance() : q4_a16_conformance();
         std::cout << (failures == 0 ? "OK" : "FAIL") << " Q4_A16 Linear\n";
         return failures == 0 ? 0 : 1;
     } catch (const std::exception& error) {

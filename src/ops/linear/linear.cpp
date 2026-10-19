@@ -10,6 +10,7 @@
 #include "ops/linear/nvfp4/nvfp4_config.h"
 #include "ops/linear/nvfp4/nvfp4_dispatch.h"
 #include "ops/linear/q4/q4_dispatch.h"
+#include "ops/linear/q4/q4_launch.h"
 #include "ops/linear/q5/q5_dispatch.h"
 #include "ops/linear/q6/q6_dispatch.h"
 #include "ops/linear/ternary/ternary_dispatch.h"
@@ -53,6 +54,32 @@ void validate_linear_policy(LinearPolicy policy) {
     throw std::invalid_argument("linear: invalid compute policy");
 }
 
+// The Qwen3.6 v3 container binds independent semantic M128 rows of two
+// grouped Q4 parents. These are not standalone upstream fused tensor shapes,
+// but the existing row-split Q4 SIMT/MMA kernels operate on arbitrary N and
+// can consume the exact row views without re-encoding. Keep this route local:
+// q4_dispatch.cpp is owned by another work session.
+bool is_q4_v3_text_slice(std::int32_t n, std::int32_t k) {
+    return k == 5120 && (n == 2048 || n == 17408);
+}
+
+void q4_v3_slice_dispatch(const Tensor& x, const Weight& w, Tensor& out,
+                          LinearPolicy policy, cudaStream_t stream) {
+    if (!is_q4_v3_text_slice(w.n, w.k) || x.ne[1] <= 0 ||
+        (policy != LinearPolicy::A16Only && policy != LinearPolicy::AllowA8)) {
+        throw std::invalid_argument("Qwen3.6 v3 Q4 slice: unsupported geometry/policy");
+    }
+    if (x.ne[1] == 1) {
+        detail::launch_q4_gemv_r1_w8_direct(x, w, out, stream);
+    } else if (x.ne[1] <= 7) {
+        detail::launch_q4_simt_r8_c4(x, w, out, stream);
+    } else if (x.ne[1] <= 16) {
+        detail::launch_q4_simt_r8_c8(x, w, out, stream);
+    } else {
+        detail::launch_q4_mma_r64_c128(x, w, out, stream);
+    }
+}
+
 void validate_linear_semantics(const Tensor& x, const Weight& w, const Tensor& out,
                                LinearPolicy policy) {
     if (x.dtype != DType::BF16 || out.dtype != DType::BF16) {
@@ -92,6 +119,10 @@ void dispatch_linear(const Tensor& x, const Weight& w, Tensor& out, LinearPolicy
     }
     switch (w.qtype) {
     case QType::Q4G64_F16S:
+        if (is_q4_v3_text_slice(w.n, w.k)) {
+            q4_v3_slice_dispatch(x, w, out, policy, stream);
+            return;
+        }
         detail::q4_dispatch(x, w, out, policy, stream);
         return;
     case QType::Q5G64_F16S:
@@ -139,6 +170,12 @@ std::size_t linear_workspace_capacity_bytes(QType qtype, std::int32_t output_row
 
     switch (qtype) {
     case QType::Q4G64_F16S:
+        if (is_q4_v3_text_slice(output_rows, input_rows)) {
+            if (policy != LinearPolicy::A16Only && policy != LinearPolicy::AllowA8) {
+                throw std::invalid_argument("Qwen3.6 v3 Q4 slice: unsupported policy");
+            }
+            return 0;
+        }
         (void)detail::select_q4_launch(output_rows, input_rows, min_tokens, policy);
         (void)detail::select_q4_launch(output_rows, input_rows, max_tokens, policy);
         return 0;
