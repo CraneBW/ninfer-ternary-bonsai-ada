@@ -3,6 +3,7 @@
 #include "kvmem/kvmem_blocks.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <vector>
 
@@ -191,6 +192,38 @@ static void test_retrieval_quota() {
           "retrieval: selection not ascending");
 }
 
+static void test_action_lrfu() {
+    KvBlockRepository repo = make_chain(32);
+    std::vector<float> evidence(32, 0.0f);
+    evidence[6] = 0.8f;
+    repo.record_lrfu_scores(evidence, 0.5, 1.0);
+    evidence[6] = 0.0f;
+    evidence[7] = 0.2f;
+    repo.record_lrfu_scores(evidence, 0.5, 1.0);
+    CHECK(std::fabs(repo.blocks()[6].retrieval_score -
+                    0.8 * std::exp2(-0.5)) < 1e-5,
+          "LRFU did not decay the previous retrieval hit");
+    CHECK(std::fabs(repo.blocks()[7].retrieval_score - 0.2) < 1e-5,
+          "LRFU did not accumulate new retrieval evidence");
+
+    repo.protect_action_span(10 * 64, 12 * 64);
+    KvSelectConfig cfg;
+    cfg.budget_tokens = 8 * 64;
+    cfg.sink_tokens = 64;
+    cfg.recent_tokens = 64;
+    cfg.action_lrfu = true;
+    const KvSelection first = repo.preview_select(cfg, {});
+    CHECK(std::find(first.block_ids.begin(), first.block_ids.end(), 10U) != first.block_ids.end(),
+          "current action block 10 was evicted");
+    CHECK(std::find(first.block_ids.begin(), first.block_ids.end(), 11U) != first.block_ids.end(),
+          "current action block 11 was evicted");
+    repo.protect_action_span(20 * 64, 21 * 64);
+    CHECK(repo.blocks()[10].stratum == BlockStratum::StandardContext,
+          "old action range was not demoted");
+    CHECK(repo.blocks()[20].stratum == BlockStratum::ActionProtected,
+          "new action range was not protected");
+}
+
 int main() {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     test_passthrough();
@@ -203,6 +236,8 @@ int main() {
     std::printf("mandatory ok\n");
     test_retrieval_quota();
     std::printf("retrieval ok\n");
+    test_action_lrfu();
+    std::printf("action_lrfu ok\n");
     std::printf("failures=%d  VERDICT: %s\n", failures, failures == 0 ? "PASS" : "FAIL");
     return failures == 0 ? 0 : 1;
 }

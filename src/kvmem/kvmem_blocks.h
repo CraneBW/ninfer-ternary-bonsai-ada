@@ -14,6 +14,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <span>
 #include <stdexcept>
@@ -25,6 +26,9 @@ namespace ninfer::kvmem {
 // Where a block's KV payload currently lives. Gpu means "resident in the device
 // page pool at window slot baked_pos"; Host means "archived in host memory".
 enum class KvTier : std::uint8_t { Gpu, Host };
+enum class BlockStratum : std::uint8_t {
+    StandardContext, PinnedSink, ActionProtected, EphemeralThinking
+};
 
 struct KvBlockMeta {
     std::uint32_t id            = 0;
@@ -40,6 +44,9 @@ struct KvBlockMeta {
     double attn_score           = 0.0;
     double retrieval_score      = 0.0;
     double profile_score        = 0.0;
+    double lrfu_score           = 0.0;
+    std::uint32_t last_scored_step = 0;
+    BlockStratum stratum        = BlockStratum::StandardContext;
     // fp16-drift ledger: how many in-place re-rotations this block survived and
     // the accumulated |position delta| they moved it by. Crossing either
     // threshold forces a rebuild from the raw-K mirror instead of another
@@ -50,6 +57,7 @@ struct KvBlockMeta {
 
 struct KvSelectConfig {
     std::uint32_t block_tokens   = 64;
+    bool action_lrfu             = false;
     std::uint32_t budget_tokens  = 0;  // required; multiple of block_tokens
     std::uint32_t sink_tokens    = 0;  // 0 -> auto (1% of budget, clamped 1024..2048)
     std::uint32_t recent_tokens  = 0;  // 0 -> auto (8% of budget, clamped 4096..16384)
@@ -173,6 +181,13 @@ struct KvWindowPlan {
         if (mandatory[i - 1] < n) { keep(mandatory[i - 1]); }
         if (kept_count > before) { ++mand_kept; }
     }
+    if (cfg.action_lrfu) {
+        // Protect the latest action region, prioritizing its newest blocks
+        // when it alone exceeds the finite device budget.
+        for (std::uint32_t i = n; i > 0 && kept_count < budget; --i) {
+            if (blocks[i - 1].stratum == BlockStratum::ActionProtected) { keep(i - 1); }
+        }
+    }
     if (mand_kept < mand_unique) {
         std::fprintf(stderr, "KVMEM_TRACE mandatory_trim kept=%u dropped=%u budget=%u\n",
                      mand_kept, mand_unique - mand_kept, budget);
@@ -191,8 +206,15 @@ struct KvWindowPlan {
         const std::uint32_t need =
             std::min({quota, budget - kept_count, static_cast<std::uint32_t>(candidates.size())});
         const auto better = [&](std::uint32_t a, std::uint32_t b) {
-            const double sa = score_fn(blocks[a]);
-            const double sb = score_fn(blocks[b]);
+            const auto priority = [&](std::uint32_t i) {
+                const double score = score_fn(blocks[i]);
+                return cfg.action_lrfu &&
+                               blocks[i].stratum == BlockStratum::EphemeralThinking
+                           ? score * 0.25
+                           : score;
+            };
+            const double sa = priority(a);
+            const double sb = priority(b);
             if (sa != sb) { return sa > sb; }
             return a > b;  // stable: newer block wins ties
         };
@@ -305,6 +327,63 @@ public:
         b.attn_score      = retrieval + profile;
     }
 
+    // Only the current action span remains strongly protected across turns.
+    void protect_action_span(std::uint64_t begin, std::uint64_t end) {
+        for (KvBlockMeta& block : blocks_) {
+            if (block.stratum == BlockStratum::ActionProtected) {
+                block.stratum = BlockStratum::StandardContext;
+            }
+            if (begin < end && block.token_begin < end &&
+                block.token_begin + block.n_tokens > begin &&
+                block.stratum == BlockStratum::StandardContext) {
+                block.stratum = BlockStratum::ActionProtected;
+            }
+        }
+    }
+
+    void set_stratum(std::uint32_t id, BlockStratum stratum) {
+        if (id >= blocks_.size()) { throw std::invalid_argument("kvmem: bad block id"); }
+        blocks_[id].stratum = stratum;
+    }
+
+    // Retain retrieval evidence across scoring passes with time-decayed LRFU.
+    // Suppress the weakest (1 - top_fraction) positive hits before accumulation.
+    void record_lrfu_scores(std::span<const float> current, double lambda,
+                            double top_fraction) {
+        if (current.size() != blocks_.size() ||
+            !(lambda >= 0.0 && lambda <= 1.0) ||
+            !(top_fraction > 0.0 && top_fraction <= 1.0)) {
+            throw std::invalid_argument("kvmem: invalid LRFU scores or parameters");
+        }
+        ++scoring_step_;
+        std::vector<float> positive;
+        positive.reserve(current.size());
+        for (const float value : current) {
+            if (std::isfinite(value) && value > 0.0f) { positive.push_back(value); }
+        }
+        float threshold = 0.0f;
+        if (!positive.empty()) {
+            const std::size_t retained = std::max<std::size_t>(
+                1, static_cast<std::size_t>(std::ceil(top_fraction * positive.size())));
+            const std::size_t cutoff = positive.size() - retained;
+            std::nth_element(positive.begin(), positive.begin() + cutoff, positive.end());
+            threshold = positive[cutoff];
+        }
+        for (std::size_t i = 0; i < blocks_.size(); ++i) {
+            KvBlockMeta& block = blocks_[i];
+            const double decay =
+                std::exp2(-lambda * static_cast<double>(scoring_step_ - block.last_scored_step));
+            const float value = current[i];
+            const double evidence = std::isfinite(value) && value > 0.0f &&
+                                            value >= threshold
+                                        ? value : 0.0;
+            block.lrfu_score = decay * block.lrfu_score + evidence;
+            block.last_scored_step = scoring_step_;
+            block.retrieval_score = block.lrfu_score;
+            block.attn_score = block.retrieval_score + block.profile_score;
+        }
+    }
+
     // Preview-only selection (no state change).
     [[nodiscard]] KvSelection preview_select(const KvSelectConfig& cfg,
                                              std::span<const std::uint32_t> mandatory) const {
@@ -395,6 +474,7 @@ public:
 
 private:
     std::vector<KvBlockMeta> blocks_;
+    std::uint32_t scoring_step_ = 0;
 };
 
 } // namespace ninfer::kvmem

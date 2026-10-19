@@ -86,7 +86,8 @@ std::string serve_usage_text(const char* argv0) {
            "[--kv-dtype bf16|int8|fp8|nvfp4|k8v4|rk4v4|rk4v4-e8 | "
            "--cache-type-k <bf16|int8|fp8|nvfp4|int4|int4-e8> "
            "--cache-type-v <bf16|int8|fp8|nvfp4|int4>] "
-           "[--kvmem [--kvmem-budget N] [--kvmem-gen-reserve N]] "
+           "[--kvmem [--kvmem-budget N] [--kvmem-gen-reserve N] "
+           "[--kvmem-action-lrfu] [--kvmem-lrfu-lambda F] [--kvmem-lrfu-top-frac F]] "
            "[--spec mtp|dflash|dflash2 --draft-tokens N] "
            "[--adaptive-mtp] [--lookup-ngram] [--default-max-tokens N] [--default-thinking-budget N] "
            "[--vision] [--vision-max-tokens N] [--no-cuda-graph] [--no-prefix-reuse] "
@@ -129,6 +130,8 @@ std::string serve_usage_text(const char* argv0) {
            std::to_string(kDefaultKvMemGenReserveTokens) +
            "; 0 disables generation-time reclaim). Too small a reserve evicts freshly retrieved "
            "content mid-generation; a pool that cannot afford it clamps it down\n"
+           "       --kvmem-action-lrfu protects latest action tokens and accumulates decayed "
+           "retrieval scores (lambda 0.5, top-frac 0.9 by default)\n"
            "       --no-prefix-reuse disables compatible-prefix caching (enabled by default)\n"
            "       --adaptive-mtp verifies 3..--draft-tokens drafts per MTP round, the width the "
            "drafts' measured survival and round cost favor; greedy output is unchanged\n"
@@ -175,6 +178,9 @@ ServeOptions parse_serve_options(int argc, char** argv) {
     std::uint32_t kvmem_budget       = 0;
     bool kvmem_gen_reserve_given     = false;
     std::uint32_t kvmem_gen_reserve  = 0;
+    bool kvmem_action_lrfu           = false;
+    std::optional<double> kvmem_lrfu_lambda;
+    std::optional<double> kvmem_lrfu_top_fraction;
     std::optional<KvKeyStorage> kv_key_storage;
     std::optional<KvValueStorage> kv_value_storage;
     if (argc >= 2 && (std::string(argv[1]) == "--help" || std::string(argv[1]) == "-h")) {
@@ -347,6 +353,18 @@ ServeOptions parse_serve_options(int argc, char** argv) {
                                                     "kvmem-gen-reserve");
             kvmem_gen_reserve       = static_cast<std::uint32_t>(value);
             kvmem_gen_reserve_given = true;
+        } else if (arg == "--kvmem-action-lrfu") {
+            kvmem_action_lrfu = true;
+        } else if (arg == "--kvmem-lrfu-lambda") {
+            kvmem_lrfu_lambda =
+                parse_float_in(require_value("--kvmem-lrfu-lambda"), "kvmem-lrfu-lambda", 0.0F, 1.0F);
+        } else if (arg == "--kvmem-lrfu-top-frac") {
+            const float fraction =
+                parse_float_in(require_value("--kvmem-lrfu-top-frac"), "kvmem-lrfu-top-frac", 0.0F, 1.0F);
+            if (fraction == 0.0F) {
+                throw std::invalid_argument("--kvmem-lrfu-top-frac must be positive");
+            }
+            kvmem_lrfu_top_fraction = fraction;
         } else if (arg == "--spec") {
             options.speculative.backend =
                 product::parse_speculative_backend(require_value("--spec"));
@@ -428,6 +446,15 @@ ServeOptions parse_serve_options(int argc, char** argv) {
     }
     options.kvmem = resolve_kvmem_options(kvmem_switch, kvmem_budget_given, kvmem_budget,
                                           kvmem_gen_reserve_given, kvmem_gen_reserve);
+    options.kvmem.action_lrfu |= kvmem_action_lrfu;
+    if (kvmem_lrfu_lambda) { options.kvmem.lrfu_lambda = *kvmem_lrfu_lambda; }
+    if (kvmem_lrfu_top_fraction) {
+        options.kvmem.lrfu_top_fraction = *kvmem_lrfu_top_fraction;
+    }
+    if ((kvmem_action_lrfu || kvmem_lrfu_lambda || kvmem_lrfu_top_fraction) &&
+        !options.kvmem.enabled) {
+        throw std::invalid_argument("KVMem LRFU flags need --kvmem (or NINFER_KVMEM=1)");
+    }
     if ((kvmem_budget_given || kvmem_gen_reserve_given) && !options.kvmem.enabled) {
         throw std::invalid_argument(
             "--kvmem-budget and --kvmem-gen-reserve size the KVMem window, so they need --kvmem "

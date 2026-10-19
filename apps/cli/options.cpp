@@ -89,7 +89,8 @@ std::string usage_text(const char* argv0) {
            "       [--max-context N] [--kv-capacity N|auto] [--kv-device-tokens N] "
            "[--prefill-chunk N] [--max-new N]\n"
            "       [--device N] [--kvmem [--kvmem-budget N] [--kvmem-gen-reserve N] "
-           "[--host-kv-mib N]]\n"
+           "[--host-kv-mib N] [--kvmem-action-lrfu [--kvmem-lrfu-lambda F] "
+           "[--kvmem-lrfu-top-frac F]]]\n"
            "       [--kv-dtype bf16|int8|fp8|nvfp4|k8v4|rk4v4|rk4v4-e8] "
            "[--cache-type-k bf16|int8|fp8|nvfp4|int4|int4-e8 "
            "--cache-type-v bf16|int8|fp8|nvfp4|int4]\n"
@@ -127,6 +128,8 @@ std::string usage_text(const char* argv0) {
            "). --host-kv-mib sizes the host tier those evicted pages land in (default " +
            std::to_string(kDefaultHostKvCapacityBytes >> 20) +
            " MiB). Without --kvmem every KV page stays resident on the device.\n"
+           "--kvmem-action-lrfu protects the latest action span and accumulates time-decayed "
+           "retrieval evidence; lambda defaults to 0.5 and top-frac to 0.9.\n"
            "Sampling defaults come from the loaded model and thinking mode; flags override "
            "individual fields.\n";
 }
@@ -147,6 +150,9 @@ Options parse_options(int argc, char** argv) {
     std::uint32_t kvmem_budget     = 0;
     bool kvmem_gen_reserve_given    = false;
     std::uint32_t kvmem_gen_reserve = 0;
+    bool kvmem_action_lrfu = false;
+    std::optional<double> kvmem_lrfu_lambda;
+    std::optional<double> kvmem_lrfu_top_fraction;
     std::optional<KvKeyStorage> kv_key_storage;
     std::optional<KvValueStorage> kv_value_storage;
 
@@ -186,6 +192,16 @@ Options parse_options(int argc, char** argv) {
         } else if (arg == "--kvmem-gen-reserve") {
             kvmem_gen_reserve       = parse_u32(value(arg), "kvmem-gen-reserve", true);
             kvmem_gen_reserve_given = true;
+        } else if (arg == "--kvmem-action-lrfu") {
+            kvmem_action_lrfu = true;
+        } else if (arg == "--kvmem-lrfu-lambda") {
+            kvmem_lrfu_lambda = parse_float(value(arg), "kvmem-lrfu-lambda", 0.0F, 1.0F);
+        } else if (arg == "--kvmem-lrfu-top-frac") {
+            const float fraction = parse_float(value(arg), "kvmem-lrfu-top-frac", 0.0F, 1.0F);
+            if (fraction == 0.0F) {
+                throw std::invalid_argument("kvmem-lrfu-top-frac must be positive");
+            }
+            kvmem_lrfu_top_fraction = fraction;
         } else if (arg == "--prefill-chunk") {
             options.prefill_chunk = parse_u32(value(arg), "prefill-chunk");
         } else if (arg == "--device") {
@@ -278,6 +294,15 @@ Options parse_options(int argc, char** argv) {
     }
     options.kvmem = resolve_kvmem_options(kvmem_switch, kvmem_budget_given, kvmem_budget,
                                           kvmem_gen_reserve_given, kvmem_gen_reserve);
+    options.kvmem.action_lrfu |= kvmem_action_lrfu;
+    if (kvmem_lrfu_lambda) { options.kvmem.lrfu_lambda = *kvmem_lrfu_lambda; }
+    if (kvmem_lrfu_top_fraction) {
+        options.kvmem.lrfu_top_fraction = *kvmem_lrfu_top_fraction;
+    }
+    if ((kvmem_action_lrfu || kvmem_lrfu_lambda || kvmem_lrfu_top_fraction) &&
+        !options.kvmem.enabled) {
+        throw std::invalid_argument("KVMem LRFU flags need --kvmem (or NINFER_KVMEM=1)");
+    }
     if ((kvmem_budget_given || kvmem_gen_reserve_given) && !options.kvmem.enabled) {
         throw std::invalid_argument(
             "--kvmem-budget and --kvmem-gen-reserve size the KVMem window, so they need --kvmem "

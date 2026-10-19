@@ -1,6 +1,7 @@
 #include "serve/serve_options.h"
 #include "serve/translate.h"
 
+#include <cmath>
 #include <iostream>
 #include <string>
 #include <utility>
@@ -129,6 +130,12 @@ int main() {
         parse({"ninfer-serve", "model.ninfer", "--kvmem", "--kvmem-gen-reserve", "0"});
     failures += check(kvmem_no_reserve.kvmem.gen_reserve_tokens == 0,
                       "zero --kvmem-gen-reserve was not honored");
+    const ServeOptions lrfu = parse({"ninfer-serve", "model.ninfer", "--kvmem",
+                                     "--kvmem-action-lrfu", "--kvmem-lrfu-lambda", "0.25",
+                                     "--kvmem-lrfu-top-frac", "0.8"});
+    failures += check(lrfu.kvmem.action_lrfu && lrfu.kvmem.lrfu_lambda == 0.25 &&
+                          std::fabs(lrfu.kvmem.lrfu_top_fraction - 0.8) < 1e-5,
+                      "KVMem LRFU flags were not retained");
     const ServeOptions kvmem_pool =
         parse({"ninfer-serve", "model.ninfer", "--kvmem", "--kv-device-tokens", "512"});
     failures += check(kvmem_pool.kv_capacity.mode == ninfer::KvCapacityMode::DeviceBudget &&

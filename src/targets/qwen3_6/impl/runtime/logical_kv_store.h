@@ -875,6 +875,14 @@ public:
         // frontier commit. Purely observational -- no engine state is redirected.
         if (kvmem.enabled) {
             kvmem_enabled_ = true;
+            kvmem_action_lrfu_ = kvmem.action_lrfu;
+            kvmem_lrfu_lambda_ = kvmem.lrfu_lambda;
+            kvmem_lrfu_top_fraction_ = kvmem.lrfu_top_fraction;
+            if (kvmem_action_lrfu_ &&
+                (!(kvmem_lrfu_lambda_ >= 0.0 && kvmem_lrfu_lambda_ <= 1.0) ||
+                 !(kvmem_lrfu_top_fraction_ > 0.0 && kvmem_lrfu_top_fraction_ <= 1.0))) {
+                throw std::invalid_argument("KVMem LRFU settings are out of range");
+            }
             if (kvmem.budget_tokens != 0) {
                 kvmem_budget_ = std::min<std::uint32_t>(
                     kvmem.budget_tokens,
@@ -2270,8 +2278,12 @@ private:
             std::fprintf(stderr, "KVMEM_TRACE score_failed %s\n", error.what());
             return;
         }
+        if (kvmem_action_lrfu_) {
+            repo.protect_action_span(query->query_begin, query->query_end);
+            repo.record_lrfu_scores(scores, kvmem_lrfu_lambda_, kvmem_lrfu_top_fraction_);
+        }
         for (std::uint32_t id = 0; id < n; ++id) {
-            repo.add_scores(id, scores[id], 0.0);
+            if (!kvmem_action_lrfu_) { repo.add_scores(id, scores[id], 0.0); }
             if (kvmem_mean_k_tokens_[index][id] == 0) { continue; }
             ++kvmem_scoreable_blocks_;
             if (scores[id] == 0.0F) { ++kvmem_zero_score_blocks_; }
@@ -2373,6 +2385,7 @@ public:
         ninfer::kvmem::KvSelectConfig cfg;
         cfg.block_tokens  = kPagedKVPageSize;
         cfg.budget_tokens = budget_tokens;
+        cfg.action_lrfu   = kvmem_action_lrfu_;
         ninfer::kvmem::KvSelection sel;
         if (sink_only) {
             // Round-boundary mode: keep the oldest head, evict the tail. The
@@ -2826,6 +2839,9 @@ public:
 
 private:
     bool kvmem_enabled_ = false;
+    bool kvmem_action_lrfu_ = false;
+    double kvmem_lrfu_lambda_ = 0.5;
+    double kvmem_lrfu_top_fraction_ = 0.9;
     std::uint32_t kvmem_budget_ = 0;  // NINFER_KVMEM_BUDGET tokens; 0 = unbounded
     // Generation headroom in tokens (page-aligned, already clamped to the pool's spare room).
     // Zero disables generation-time reclaim, which is the identity configuration.

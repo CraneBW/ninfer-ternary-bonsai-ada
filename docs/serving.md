@@ -888,6 +888,9 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--kvmem` | keep the device KV pool a resident working set and back the rest of the context with host memory | off |
 | `--kvmem-budget N` | positive KVMem window in tokens; omitted keeps the whole context | whole context |
 | `--kvmem-gen-reserve N` | pool room kept free for decoding, in tokens; `0` disables generation-time reclaim | `8192` |
+| `--kvmem-action-lrfu` | protect latest query/action span and rank history by decayed retrieval evidence | off |
+| `--kvmem-lrfu-lambda F` | LRFU exponential decay in range 0..1 | `0.5` |
+| `--kvmem-lrfu-top-frac F` | retain strongest positive score fraction in range (0,1] | `0.9` |
 | `--spec mtp\|dflash\|dflash2` | speculative backend | off |
 | `--draft-tokens N` | MTP `1..7`; DFlash/DFlash2 `1..15` | unset |
 | `--adaptive-mtp` | MTP verifies `3..--draft-tokens` drafts per round, chosen per request from measured draft survival and round cost | off |
@@ -930,6 +933,14 @@ and the two sizing flags require the mechanism to be enabled. When both KVMem an
 `--kv-device-tokens` are given, the window must not exceed the device pool: keep `--kvmem-budget`
 at or below `--kv-device-tokens`, leaving room for one prefill. A window of zero means the whole
 context, which a device pool below the context always exceeds, so pass `--kvmem-budget` explicitly.
+
+KVMem scores four independent 16-token mean-key centroids per 64-token KV page.
+With `--kvmem-action-lrfu`, the latest captured query span has priority over the retrieval quota,
+and positive retrieval hits accumulate with exponential decay across compactions.
+These options can also be set with `NINFER_KVMEM_ACTION_LRFU=1`,
+`NINFER_KVMEM_LRFU_LAMBDA`, and `NINFER_KVMEM_LRFU_TOP_FRAC`. The retrieval index
+remains host-resident for evicted pages. Closed historical thinking blocks are not
+currently identified by the runtime, so thinking-tier demotion is not automatic.
 
 `--kvmem` sizes its own pool when neither `--kv-capacity` nor `--kv-device-tokens` is given: the
 automatic resolution is pinned to the working set the runtime asks for -- one window per lane,

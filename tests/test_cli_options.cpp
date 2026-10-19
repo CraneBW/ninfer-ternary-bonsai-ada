@@ -32,6 +32,12 @@ int check(bool condition, const char* message) {
 
 int main() {
     int failures = 0;
+    const auto lrfu = parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--kvmem",
+                             "--kvmem-action-lrfu", "--kvmem-lrfu-lambda", "0.5",
+                             "--kvmem-lrfu-top-frac", "0.9"});
+    failures += check(lrfu.kvmem.action_lrfu && lrfu.kvmem.lrfu_lambda == 0.5 &&
+                          lrfu.kvmem.lrfu_top_fraction > 0.89,
+                      "CLI did not retain KVMem LRFU settings");
     const ninfer::cli::Options configured =
         parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--thinking-budget", "37"});
     failures += check(configured.thinking_budget == 37,

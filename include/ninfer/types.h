@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <cmath>
 #include <filesystem>
 #include <functional>
 #include <limits>
@@ -344,6 +345,9 @@ struct KvMemOptions {
     bool enabled           = false;
     std::uint32_t budget_tokens = 0;
     std::uint32_t gen_reserve_tokens = 0;
+    bool action_lrfu = false;
+    double lrfu_lambda = 0.5;
+    double lrfu_top_fraction = 0.9;
 };
 
 // KVMem's production default for the generation headroom, the same number the upstream KVMem
@@ -385,6 +389,26 @@ inline constexpr std::uint32_t kDefaultKvMemGenReserveTokens = 8192;
     } else {
         out.gen_reserve_tokens = from_env("NINFER_KVMEM_GEN_RESERVE");
         if (out.gen_reserve_tokens == 0) { out.gen_reserve_tokens = kDefaultKvMemGenReserveTokens; }
+    }
+    if (out.enabled) {
+        const char* flag = std::getenv("NINFER_KVMEM_ACTION_LRFU");
+        out.action_lrfu = flag != nullptr && flag[0] == '1';
+        const auto env_fraction = [](const char* name, double fallback,
+                                     double low, bool low_inclusive) {
+            const char* value = std::getenv(name);
+            if (value == nullptr || *value == '\0') { return fallback; }
+            char* end = nullptr;
+            const double parsed = std::strtod(value, &end);
+            if (end == value || *end != '\0' || !std::isfinite(parsed) ||
+                (low_inclusive ? parsed < low : parsed <= low) || parsed > 1.0) {
+                return fallback;
+            }
+            return parsed;
+        };
+        out.lrfu_lambda =
+            env_fraction("NINFER_KVMEM_LRFU_LAMBDA", out.lrfu_lambda, 0.0, true);
+        out.lrfu_top_fraction =
+            env_fraction("NINFER_KVMEM_LRFU_TOP_FRAC", out.lrfu_top_fraction, 0.0, false);
     }
     return out;
 }
