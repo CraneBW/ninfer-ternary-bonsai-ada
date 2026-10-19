@@ -231,6 +231,29 @@ struct PrefillWork {
     [[nodiscard]] friend constexpr bool operator==(PrefillWork, PrefillWork) noexcept = default;
 };
 
+namespace detail {
+
+constexpr std::uint64_t kSaturatedQuantum = ~(std::uint64_t)0;
+
+[[nodiscard]] constexpr std::uint64_t saturating_multiply(std::uint64_t lhs,
+                                                          std::uint64_t rhs) noexcept {
+    return lhs != 0 && rhs > kSaturatedQuantum / lhs ? kSaturatedQuantum : lhs * rhs;
+}
+
+[[nodiscard]] constexpr std::uint64_t saturating_add(std::uint64_t lhs,
+                                                     std::uint64_t rhs) noexcept {
+    return rhs > kSaturatedQuantum - lhs ? kSaturatedQuantum : lhs + rhs;
+}
+
+// suffix*(suffix+1)/2 without an intermediate product: the half factor is exact because the
+// product is always even, and neither half factor can overflow.
+[[nodiscard]] constexpr std::uint64_t triangular_pairs(std::uint64_t suffix) noexcept {
+    return suffix % 2U == 0 ? saturating_multiply(suffix / 2U, suffix + 1U)
+                            : saturating_multiply(suffix, suffix / 2U + 1U);
+}
+
+} // namespace detail
+
 // Exact prefill feature definition for a suffix beginning after prefix_tokens. Attention work is
 // prefix*suffix + suffix*(suffix+1)/2 and all arithmetic saturates.
 [[nodiscard]] inline PrefillWork make_prefill_work(std::uint64_t prefix_tokens,
@@ -244,13 +267,9 @@ struct PrefillWork {
     result.tokens                       = suffix_tokens;
     result.vision_items                 = vision_items;
     result.vision_patches               = vision_patches;
-        const std::uint64_t suffix      = suffix_tokens;
-    const std::uint64_t linear      = static_cast<std::uint64_t>(prefix_tokens) * suffix;
-    const std::uint64_t triangular  = suffix * (suffix + 1U) / 2U;
-    constexpr std::uint64_t maximum = ~(std::uint64_t)0;
-    const std::uint64_t attention =
-        triangular > maximum - linear ? maximum : linear + triangular;
-    result.attention_pairs = attention;
+    result.attention_pairs              = detail::saturating_add(
+        detail::saturating_multiply(prefix_tokens, suffix_tokens),
+        detail::triangular_pairs(suffix_tokens));
     return result;
 }
 
