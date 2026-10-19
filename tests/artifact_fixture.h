@@ -9,6 +9,8 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <random>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -79,6 +81,77 @@ inline TemporaryArtifact write_fixture(const Json& directory, std::string_view s
                  static_cast<std::streamsize>(file.size()));
     if (!output) { throw std::runtime_error("failed to write artifact fixture"); }
     return {std::move(path)};
+}
+
+struct TemporaryV3Artifact {
+    std::filesystem::path folder;
+    std::filesystem::path path;
+    TemporaryV3Artifact(std::filesystem::path directory, std::filesystem::path entry)
+        : folder(std::move(directory)), path(std::move(entry)) {}
+    ~TemporaryV3Artifact() {
+        std::error_code ignored;
+        std::filesystem::remove_all(folder, ignored);
+    }
+    TemporaryV3Artifact(const TemporaryV3Artifact&)            = delete;
+    TemporaryV3Artifact& operator=(const TemporaryV3Artifact&) = delete;
+    TemporaryV3Artifact(TemporaryV3Artifact&&)                 = default;
+};
+
+// The v3 header is 32 bytes and the payload of every continuation starts at byte 4096.
+// The supplied payload is one logical stream; continuation boundaries deliberately may split
+// tensor blocks or rows.
+inline TemporaryV3Artifact write_v3_fixture(
+    const Json& directory, std::string_view suffix,
+    std::span<const std::byte> logical_payload, std::string_view raw_json = {}) {
+    std::random_device random;
+    std::filesystem::path folder;
+    for (int attempt = 0; attempt < 16; ++attempt) {
+        folder = std::filesystem::temp_directory_path() /
+                 ("ninfer_v3_" + std::string(suffix) + "_" + std::to_string(random()));
+        if (std::filesystem::create_directory(folder)) { break; }
+        if (attempt == 15) { throw std::runtime_error("could not create v3 fixture directory"); }
+    }
+    auto entry = folder / "entry.ninfer";
+    const std::string json = raw_json.empty() ? directory.dump() : std::string(raw_json);
+    std::uint64_t copied = 0;
+    for (std::size_t i = 0; i < directory.at("files").size(); ++i) {
+        const auto& record  = directory.at("files").at(i);
+        const auto file_size = record.at("payload_bytes").get<std::uint64_t>();
+        if (file_size > logical_payload.size() - copied) {
+            throw std::runtime_error("v3 fixture payload shorter than file records");
+        }
+        const auto named_path = i == 0 ? std::filesystem::path("entry.ninfer")
+                                     : std::filesystem::path(record.at("path").get<std::string>());
+        // Malformed path fixtures must never escape their private temp directory.
+        const auto safe_name = named_path == named_path.filename() &&
+                                       named_path != "." && named_path != ".." &&
+                                       (i == 0 || named_path != entry.filename())
+                                   ? named_path
+                                   : std::filesystem::path("invalid_part.bin");
+        const auto file_path = folder / safe_name;
+        std::ofstream output(file_path, std::ios::binary | std::ios::trunc);
+        std::array<std::byte, 32> header{};
+        const auto magic = i == 0
+            ? std::array<std::uint8_t, 8>{'N', 'I', 'N', 'F', 'E', 'R', 0, 3}
+            : std::array<std::uint8_t, 8>{'N', 'I', 'N', 'P', 'R', 'T', 0, 3};
+        for (std::size_t j = 0; j < magic.size(); ++j) { header[j] = std::byte{magic[j]}; }
+        write_u64_le(header.data() + 8, i == 0 ? json.size() : i);
+        header[16] = std::byte{0x71}; // same artifact UUID for entry and every part
+        output.write(reinterpret_cast<const char*>(header.data()), header.size());
+        if (i == 0) { output.write(json.data(), static_cast<std::streamsize>(json.size())); }
+        const auto metadata_end = 32 + (i == 0 ? json.size() : 0);
+        const auto payload_start = align_up(metadata_end, 4096);
+        const std::vector<char> padding(payload_start - metadata_end, '\0');
+        output.write(padding.data(), static_cast<std::streamsize>(padding.size()));
+        output.write(reinterpret_cast<const char*>(logical_payload.data() + copied),
+                     static_cast<std::streamsize>(file_size));
+        if (!output) { throw std::runtime_error("could not write v3 fixture"); }
+        copied += file_size;
+    }
+    if (copied != logical_payload.size()) {
+        throw std::runtime_error("v3 fixture has unassigned payload bytes");
+    }
+    return {std::move(folder), std::move(entry)};
 }
 
 } // namespace ninfer::test::artifact_fixture

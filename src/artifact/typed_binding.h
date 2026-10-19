@@ -18,6 +18,11 @@ class MaterializedArtifact;
 [[nodiscard]] ObjectHandle bind_tensor(Binder& binder, std::string_view name, NumericFormat format,
                                        std::initializer_list<std::uint64_t> shape,
                                        TensorPlacement placement);
+// Bind a weight using the format/layout declared by the artifact, while still enforcing
+// the target-supplied logical shape. Useful for v3 mixed GGUF and integer bundles.
+[[nodiscard]] ObjectHandle bind_declared_tensor(
+    Binder& binder, std::string_view name, std::initializer_list<std::uint64_t> shape,
+    TensorPlacement placement);
 
 [[nodiscard]] ObjectHandle bind_device_tensor(Binder& binder, std::string_view name,
                                               NumericFormat format,

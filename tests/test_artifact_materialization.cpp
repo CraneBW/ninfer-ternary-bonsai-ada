@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <iostream>
 #include <stdexcept>
+#include <vector>
 
 namespace {
 
@@ -77,6 +78,71 @@ bool cuda_unavailable(cudaError_t error) {
 
 void require(bool condition, const char* message) {
     if (!condition) { throw std::runtime_error(message); }
+}
+
+void verify_v3_multi_file_materialization(ninfer::DeviceContext& device) {
+    using Json = ninfer::test::artifact_fixture::Json;
+    const Json root = {
+        {"components", {{"text", {{"config", Json::object()}}}}},
+        {"objects", Json::array({
+            {{"id", "resource"}, {"kind", "resource"}, {"encoding", "raw_bytes_v1"},
+             {"offset", 0}, {"bytes", 5}},
+            {{"id", "tensor"}, {"kind", "tensor"}, {"format", "bf16"},
+             {"layout", "contiguous_le_v1"}, {"shape", {256}},
+             {"offset", 256}, {"bytes", 512}},
+            {{"id", "quantized"}, {"kind", "tensor"}, {"format", "gguf_iq3_s"},
+             {"layout", "gguf_blocks_v1"}, {"shape", {1, 256}},
+             {"offset", 768}, {"bytes", 110}},
+        })},
+        {"bindings", {{"weight", {{"object", "tensor"}}},
+                      {"quant", {{"object", "quantized"}}}}},
+        {"uses", Json::array()},
+        {"files", Json::array({
+            {{"path", nullptr}, {"payload_bytes", 500}},
+            {{"path", "part.bin"}, {"payload_bytes", 524}},
+        })},
+    };
+    std::vector<std::byte> logical(1024);
+    for (std::size_t i = 0; i < logical.size(); ++i) { logical[i] = std::byte(i % 251); }
+    auto fixture = ninfer::test::artifact_fixture::write_v3_fixture(
+        root, "materialization_cross_file", logical);
+    ninfer::artifact::Reader reader(fixture.path);
+    ninfer::artifact::Binder binder(reader);
+    const auto resource =
+        binder.require_resource("resource", ninfer::artifact::ResourceEncoding::RawBytesV1);
+    binder.retain_on_host(resource);
+    constexpr std::array<std::uint64_t, 1> shape{256};
+    const auto tensor = binder.require_tensor("tensor", ninfer::artifact::NumericFormat::BF16,
+                                              ninfer::artifact::StorageLayout::ContiguousLeV1,
+                                              shape);
+    binder.materialize_on_device(tensor);
+    const auto quant = ninfer::artifact::bind_declared_tensor(
+        binder, "quantized", {1, 256}, ninfer::artifact::TensorPlacement::Device);
+    auto plan = binder.finish();
+    auto materialized = ninfer::artifact::materialize(reader, plan, device);
+    std::array<std::byte, 512> downloaded{};
+    CUDA_CHECK(cudaMemcpy(downloaded.data(), materialized.device_data(tensor), downloaded.size(),
+                          cudaMemcpyDeviceToHost));
+    require(std::equal(downloaded.begin(), downloaded.end(), logical.begin() + 256),
+            "v3 continuation boundary broke tensor materialization");
+    const auto gguf = ninfer::artifact::materialized_weight(
+        materialized, quant, ninfer::artifact::NumericFormat::GGUF_IQ3_S, 1, 256);
+    require(gguf.qtype == ninfer::QType::GGUF_IQ3_S &&
+                gguf.layout == ninfer::QuantLayout::GgufBlocks &&
+                gguf.payload_bytes == 110 && gguf.group_size == 256 &&
+                gguf.qdata == gguf.payload && gguf.scales == nullptr &&
+                gguf.n == 1 && gguf.k == 256,
+            "v3 IQ3_S parent did not bind as raw GGUF blocks");
+    std::array<std::byte, 110> gguf_copy{};
+    CUDA_CHECK(cudaMemcpy(gguf_copy.data(), gguf.payload, gguf_copy.size(),
+                          cudaMemcpyDeviceToHost));
+    require(std::equal(gguf_copy.begin(), gguf_copy.end(), logical.begin() + 768),
+            "GGUF block bytes changed during materialization");
+    require(std::equal(materialized.resource_bytes(resource).begin(),
+                       materialized.resource_bytes(resource).end(), logical.begin()),
+            "v3 resource bytes changed in materialization");
+    require(materialized.stats().h2d_bytes == downloaded.size() + gguf_copy.size(),
+            "v3 multi-file materialization accounted wrong bytes");
 }
 
 } // namespace
@@ -196,6 +262,7 @@ int main() {
         require(materialized.device_arena().capacity() == plan.device_capacity_bytes &&
                     materialized.device_arena().used() == plan.device_capacity_bytes,
                 "materialized tensor does not own the planned device backing");
+        verify_v3_multi_file_materialization(device);
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

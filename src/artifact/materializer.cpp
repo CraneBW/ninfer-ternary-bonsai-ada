@@ -121,8 +121,8 @@ MaterializedArtifact materialize(const Reader& reader, const MaterializationPlan
 
     for (const HostMaterialization& placement : plan.host_objects) {
         auto& resource            = out.objects_.at(placement.object.index).resource;
-        const PayloadSpan payload = reader.payload(reader.objects().at(placement.object.index));
-        resource.assign(payload.data.begin(), payload.data.end());
+        // A v3 resource may cross a continuation-file boundary.
+        resource = reader.read_object(reader.objects().at(placement.object.index));
         out.stats_.retained_resource_bytes += resource.size();
         out.stats_.file_bytes =
             checked_add(out.stats_.file_bytes, resource.size(), "artifact read bytes overflow u64");
@@ -133,20 +133,24 @@ MaterializedArtifact materialize(const Reader& reader, const MaterializationPlan
     std::uint64_t copied         = 0;
     std::uint64_t last_published = 0;
     for (const DeviceMaterialization& placement : plan.device_objects) {
-        const PayloadSpan payload = reader.payload(reader.objects().at(placement.object.index));
+        const ObjectDescriptor& object = reader.objects().at(placement.object.index);
         DeviceSpan storage =
             out.device_arena_->alloc_bytes(static_cast<std::size_t>(placement.bytes),
                                            static_cast<std::size_t>(placement.alignment));
         const auto actual_offset =
             static_cast<std::uint64_t>(static_cast<std::byte*>(storage.data) -
                                        static_cast<std::byte*>(out.device_arena_->base()));
-        if (actual_offset != placement.offset || payload.data.size() != placement.bytes) {
+        if (actual_offset != placement.offset || object_bytes(object) != placement.bytes) {
             throw ArtifactError("materialization plan does not match artifact payload");
         }
         out.objects_.at(placement.object.index).device = storage.data;
+        // Reader::read_direct maps these virtual offsets through the v3 file table, so the
+        // existing staged transfer batching also handles parents spanning several files.
+        const std::uint64_t source_begin = checked_add(
+            reader.payload_offset(), object_offset(object), "artifact source offset overflows u64");
         ranges.push_back(CopyRange{
-            .source_begin = payload.absolute_offset,
-            .source_end   = checked_add(payload.absolute_offset, placement.bytes,
+            .source_begin = source_begin,
+            .source_end   = checked_add(source_begin, placement.bytes,
                                         "artifact tensor source range overflows u64"),
             .destination  = static_cast<std::byte*>(storage.data),
         });

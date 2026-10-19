@@ -43,6 +43,8 @@ struct MaterializationPlan {
 class Binder {
 public:
     explicit Binder(const Reader& reader);
+    // Semantic v3 parameter mappings reside in the reader's validated directory.
+    [[nodiscard]] const Reader& reader() const noexcept { return reader_; }
 
     ObjectHandle require_tensor(std::string_view name, NumericFormat format, StorageLayout layout,
                                 std::span<const std::uint64_t> shape);

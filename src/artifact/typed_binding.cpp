@@ -23,6 +23,8 @@ StorageLayout storage_layout_for(NumericFormat format) {
     case NumericFormat::Q5G64_F16S:
     case NumericFormat::Q6G64_F16S:
     case NumericFormat::W8G32_F16S:
+    case NumericFormat::Q2G64_F16S:
+    case NumericFormat::T2G128_F16S:
     case NumericFormat::PTQ1_0_G128:
     case NumericFormat::PQ2_0_G128:
         return StorageLayout::RowSplitK128V1;
@@ -30,6 +32,27 @@ StorageLayout storage_layout_for(NumericFormat format) {
         return StorageLayout::BlockScaleK16M128x4V1;
     case NumericFormat::FP8_E4M3FN_ROW_BF16S:
         return StorageLayout::RowScaleV1;
+    case NumericFormat::FP8_E4M3FN_ROW_FP16S:
+        return StorageLayout::RowInterleavedV1;
+    case NumericFormat::GGUF_Q8_0:
+    case NumericFormat::GGUF_Q2_K:
+    case NumericFormat::GGUF_Q3_K:
+    case NumericFormat::GGUF_Q4_K:
+    case NumericFormat::GGUF_Q5_K:
+    case NumericFormat::GGUF_Q6_K:
+    case NumericFormat::GGUF_IQ2_XXS:
+    case NumericFormat::GGUF_IQ2_XS:
+    case NumericFormat::GGUF_IQ2_S:
+    case NumericFormat::GGUF_IQ3_XXS:
+    case NumericFormat::GGUF_IQ3_S:
+    case NumericFormat::GGUF_IQ1_S:
+    case NumericFormat::GGUF_IQ1_M:
+    case NumericFormat::GGUF_IQ4_NL:
+    case NumericFormat::GGUF_IQ4_XS:
+    case NumericFormat::GGUF_Q4_0:
+    case NumericFormat::GGUF_Q5_0:
+    case NumericFormat::GGUF_Q2_0:
+        return StorageLayout::GgufBlocksV1;
     }
     throw std::logic_error("unhandled numeric format");
 }
@@ -126,6 +149,72 @@ Weight row_scale_weight(const MaterializedArtifact& materialized, ObjectHandle h
     return out;
 }
 
+Weight gguf_weight(const MaterializedArtifact& materialized, ObjectHandle handle,
+                   NumericFormat format, std::int32_t rows, std::int32_t columns) {
+    const QType qtype = qtype_for(format);
+    if (!is_gguf(qtype)) {
+        throw std::invalid_argument("GGUF materialization requires ggml block format");
+    }
+    const auto block = gguf_block_shape(qtype);
+    if (rows <= 0 || columns <= 0 || columns % block.elements != 0) {
+        throw std::invalid_argument("GGUF materialization requires whole blocks per row");
+    }
+    const std::array<std::uint64_t, 2> shape = {
+        static_cast<std::uint64_t>(rows), static_cast<std::uint64_t>(columns)};
+    const auto bytes = tensor_encoded_size(StorageLayout::GgufBlocksV1, format, shape);
+    Weight out{};
+    out.payload        = materialized.device_data(handle);
+    out.payload_bytes  = bytes;
+    out.qdata          = out.payload;
+    out.qtype          = qtype;
+    out.layout         = QuantLayout::GgufBlocks;
+    out.group          = block.elements;
+    out.group_size     = static_cast<std::uint32_t>(block.elements);
+    out.n              = rows;
+    out.k              = columns;
+    out.ndim           = 2;
+    out.shape[0]       = rows;
+    out.shape[1]       = columns;
+    out.padded_shape[0] = rows;
+    out.padded_shape[1] = columns;
+    // ggml scales are part of each block; there is no separate scale plane.
+    return out;
+}
+
+Weight row_interleaved_weight(const MaterializedArtifact& materialized, ObjectHandle handle,
+                              std::int32_t rows, std::int32_t columns) {
+    if (rows <= 0 || columns <= 0) {
+        throw std::invalid_argument("invalid FP8 row-interleaved dimensions");
+    }
+    const auto* data = static_cast<const std::byte*>(materialized.device_data(handle));
+    const std::array<std::uint64_t, 2> shape = {
+        static_cast<std::uint64_t>(rows), static_cast<std::uint64_t>(columns)};
+    Weight out{};
+    out.payload         = data;
+    out.payload_bytes   = tensor_encoded_size(StorageLayout::RowInterleavedV1,
+                                              NumericFormat::FP8_E4M3FN_ROW_FP16S, shape);
+    out.qdata           = data;
+    out.scales          = data + columns;
+    out.qtype           = QType::FP8_E4M3FN_ROW_FP16;
+    out.layout          = QuantLayout::RowInterleaved;
+    out.scale_dtype     = DType::FP16;
+    out.group           = columns;
+    out.group_size      = static_cast<std::uint32_t>(columns);
+    out.n               = rows;
+    out.k               = columns;
+    out.ndim            = 2;
+    out.shape[0]        = rows;
+    out.shape[1]        = columns;
+    out.padded_shape[0] = rows;
+    out.padded_shape[1] = columns;
+    out.scale_ne[0]     = rows;
+    out.scale_nb[0]     = static_cast<std::int64_t>(columns) + 2;
+    out.scale_nb[1]     = out.scale_nb[0] * rows;
+    out.scale_nb[2]     = out.scale_nb[1];
+    out.scale_nb[3]     = out.scale_nb[1];
+    return out;
+}
+
 } // namespace
 
 // Public because the correspondence is not the binder's private business: a caller that has to
@@ -156,6 +245,27 @@ QType qtype_for(NumericFormat format) {
         return QType::PTQ1_0_G128;
     case NumericFormat::PQ2_0_G128:
         return QType::PQ2_0_G128;
+    case NumericFormat::Q2G64_F16S: return QType::Q2_G64_FP16;
+    case NumericFormat::T2G128_F16S: return QType::T2_G128_FP16;
+    case NumericFormat::FP8_E4M3FN_ROW_FP16S: return QType::FP8_E4M3FN_ROW_FP16;
+    case NumericFormat::GGUF_Q8_0: return QType::GGUF_Q8_0;
+    case NumericFormat::GGUF_Q2_K: return QType::GGUF_Q2_K;
+    case NumericFormat::GGUF_Q3_K: return QType::GGUF_Q3_K;
+    case NumericFormat::GGUF_Q4_K: return QType::GGUF_Q4_K;
+    case NumericFormat::GGUF_Q5_K: return QType::GGUF_Q5_K;
+    case NumericFormat::GGUF_Q6_K: return QType::GGUF_Q6_K;
+    case NumericFormat::GGUF_IQ2_XXS: return QType::GGUF_IQ2_XXS;
+    case NumericFormat::GGUF_IQ2_XS: return QType::GGUF_IQ2_XS;
+    case NumericFormat::GGUF_IQ2_S: return QType::GGUF_IQ2_S;
+    case NumericFormat::GGUF_IQ3_XXS: return QType::GGUF_IQ3_XXS;
+    case NumericFormat::GGUF_IQ3_S: return QType::GGUF_IQ3_S;
+    case NumericFormat::GGUF_IQ1_S: return QType::GGUF_IQ1_S;
+    case NumericFormat::GGUF_IQ1_M: return QType::GGUF_IQ1_M;
+    case NumericFormat::GGUF_IQ4_NL: return QType::GGUF_IQ4_NL;
+    case NumericFormat::GGUF_IQ4_XS: return QType::GGUF_IQ4_XS;
+    case NumericFormat::GGUF_Q4_0: return QType::GGUF_Q4_0;
+    case NumericFormat::GGUF_Q5_0: return QType::GGUF_Q5_0;
+    case NumericFormat::GGUF_Q2_0: return QType::GGUF_Q2_0;
     }
     throw std::logic_error("unhandled numeric format");
 }
@@ -165,6 +275,27 @@ ObjectHandle bind_tensor(Binder& binder, std::string_view name, NumericFormat fo
     const ObjectHandle handle =
         binder.require_tensor(name, format, storage_layout_for(format),
                               std::span<const std::uint64_t>(shape.begin(), shape.size()));
+    if (placement == TensorPlacement::Device) {
+        binder.materialize_on_device(handle);
+    } else {
+        binder.validate_only(handle);
+    }
+    return handle;
+}
+
+ObjectHandle bind_declared_tensor(Binder& binder, std::string_view name,
+                                  std::initializer_list<std::uint64_t> shape,
+                                  TensorPlacement placement) {
+    const auto* descriptor = binder.find(name);
+    const auto* tensor = descriptor == nullptr ? nullptr :
+                         std::get_if<TensorDescriptor>(descriptor);
+    if (!tensor) {
+        throw ArtifactError("required declared tensor is missing: " + std::string(name));
+    }
+    // require_tensor() performs the actual format, layout, and shape validation.
+    const auto handle = binder.require_tensor(
+        name, tensor->format, tensor->layout,
+        std::span<const std::uint64_t>(shape.begin(), shape.size()));
     if (placement == TensorPlacement::Device) {
         binder.materialize_on_device(handle);
     } else {
@@ -201,6 +332,12 @@ Weight materialized_weight(const MaterializedArtifact& materialized, ObjectHandl
     }
     if (storage_layout_for(format) == StorageLayout::RowScaleV1) {
         return row_scale_weight(materialized, handle, format, rows, columns);
+    }
+    if (storage_layout_for(format) == StorageLayout::GgufBlocksV1) {
+        return gguf_weight(materialized, handle, format, rows, columns);
+    }
+    if (storage_layout_for(format) == StorageLayout::RowInterleavedV1) {
+        return row_interleaved_weight(materialized, handle, rows, columns);
     }
     return row_split_weight(materialized, handle, format, rows, columns);
 }

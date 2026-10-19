@@ -11,11 +11,15 @@
 #include <cstring>
 #include <functional>
 #include <limits>
+#include <map>
+#include <optional>
+#include <set>
 #include <span>
 #include <string_view>
 #include <system_error>
 #include <type_traits>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 #ifdef _WIN32
@@ -39,7 +43,16 @@ constexpr std::array<std::byte, 8> kMagic = {
     std::byte{'N'}, std::byte{'I'}, std::byte{'N'}, std::byte{'F'},
     std::byte{'E'}, std::byte{'R'}, std::byte{0},   std::byte{2},
 };
+constexpr std::array<std::byte, 8> kV3Magic = {
+    std::byte{'N'}, std::byte{'I'}, std::byte{'N'}, std::byte{'F'},
+    std::byte{'E'}, std::byte{'R'}, std::byte{0},   std::byte{3},
+};
+constexpr std::array<std::byte, 8> kV3PartMagic = {
+    std::byte{'N'}, std::byte{'I'}, std::byte{'N'}, std::byte{'P'},
+    std::byte{'R'}, std::byte{'T'}, std::byte{0},   std::byte{3},
+};
 constexpr std::uint64_t kPrefixBytes      = 16;
+constexpr std::uint64_t kV3HeaderBytes    = 32;
 constexpr std::uint64_t kPayloadAlignment = 4096;
 
 std::uint64_t checked_add(std::uint64_t a, std::uint64_t b, std::string_view label) {
@@ -47,6 +60,13 @@ std::uint64_t checked_add(std::uint64_t a, std::uint64_t b, std::string_view lab
         throw ArtifactError(std::string(label) + " overflows u64");
     }
     return a + b;
+}
+
+std::uint64_t checked_mul(std::uint64_t a, std::uint64_t b, std::string_view label) {
+    if (a && b > std::numeric_limits<std::uint64_t>::max() / a) {
+        throw ArtifactError(std::string(label) + " overflows u64");
+    }
+    return a * b;
 }
 
 std::uint64_t align_up(std::uint64_t value, std::uint64_t alignment, std::string_view label) {
@@ -80,17 +100,57 @@ const std::string& require_string(const Json& value, std::string_view label) {
         throw ArtifactError(std::string(label) + " must be a nonempty string");
     }
     const auto& result = value.get_ref<const std::string&>();
-    if (result.empty()) { throw ArtifactError(std::string(label) + " must be a nonempty string"); }
+    if (result.empty() || result.find('\0') != std::string::npos) {
+        throw ArtifactError(std::string(label) + " must be a nonempty string without NUL");
+    }
     return result;
 }
 
 std::uint64_t require_unsigned(const Json& value, std::string_view label, bool positive) {
-    if (!value.is_number_unsigned()) {
+    if (!value.is_number_integer() ||
+        (!value.is_number_unsigned() && value.get<std::int64_t>() < 0)) {
         throw ArtifactError(std::string(label) + " must be an integer");
     }
     const auto result = value.get<std::uint64_t>();
     if (positive && result == 0) { throw ArtifactError(std::string(label) + " must be positive"); }
     return result;
+}
+
+Json parse_v3_json(const char* first, const char* last) {
+    // SAX validation catches duplicate keys (including escaped spellings) without the
+    // quadratic cost of nlohmann's DOM callback on large binding dictionaries.
+    struct UniqueKeys final : nlohmann::json_sax<Json> {
+        std::vector<std::unordered_set<std::string>> members;
+        bool null() override { return true; }
+        bool boolean(bool) override { return true; }
+        bool number_integer(number_integer_t) override { return true; }
+        bool number_unsigned(number_unsigned_t) override { return true; }
+        bool number_float(number_float_t, const string_t&) override { return true; }
+        bool string(string_t&) override { return true; }
+        bool binary(binary_t&) override { return true; }
+        bool start_object(std::size_t) override {
+            members.emplace_back();
+            return true;
+        }
+        bool key(string_t& value) override {
+            if (!members.back().insert(value).second) {
+                throw ArtifactError("v3 directory has duplicate JSON key: " + value);
+            }
+            return true;
+        }
+        bool end_object() override {
+            members.pop_back();
+            return true;
+        }
+        bool start_array(std::size_t) override { return true; }
+        bool end_array() override { return true; }
+        bool parse_error(std::size_t, const std::string&, const Json::exception& error) override {
+            throw ArtifactError(std::string("invalid v3 JSON directory: ") + error.what());
+        }
+    };
+    UniqueKeys validator;
+    (void)Json::sax_parse(first, last, &validator);
+    return Json::parse(first, last);
 }
 
 NumericFormat parse_format(std::string_view name) {
@@ -105,6 +165,41 @@ NumericFormat parse_format(std::string_view name) {
     if (name == "FP8_E4M3FN_ROW_BF16S") { return NumericFormat::FP8_E4M3FN_ROW_BF16S; }
     if (name == "PTQ1_0_G128") { return NumericFormat::PTQ1_0_G128; }
     if (name == "PQ2_0_G128") { return NumericFormat::PQ2_0_G128; }
+    if (name == "bf16") { return NumericFormat::BF16; }
+    if (name == "fp32") { return NumericFormat::FP32; }
+    if (name == "int32") { return NumericFormat::I32; }
+    if (name == "q2_g64_fp16") { return NumericFormat::Q2G64_F16S; }
+    if (name == "q4_g64_fp16") { return NumericFormat::Q4G64_F16S; }
+    if (name == "q5_g64_fp16") { return NumericFormat::Q5G64_F16S; }
+    if (name == "q6_g64_fp16") { return NumericFormat::Q6G64_F16S; }
+    if (name == "q8_g32_fp16") { return NumericFormat::W8G32_F16S; }
+    if (name == "t2_g128_fp16") { return NumericFormat::T2G128_F16S; }
+    if (name == "nvfp4") { return NumericFormat::NVFP4; }
+    if (name == "fp8_e4m3fn_row_bf16") { return NumericFormat::FP8_E4M3FN_ROW_BF16S; }
+    if (name == "fp8_e4m3fn_row_fp16") { return NumericFormat::FP8_E4M3FN_ROW_FP16S; }
+    static constexpr std::array formats = {
+        std::pair{"gguf_q8_0", NumericFormat::GGUF_Q8_0},
+        std::pair{"gguf_q2_k", NumericFormat::GGUF_Q2_K},
+        std::pair{"gguf_q3_k", NumericFormat::GGUF_Q3_K},
+        std::pair{"gguf_q4_k", NumericFormat::GGUF_Q4_K},
+        std::pair{"gguf_q5_k", NumericFormat::GGUF_Q5_K},
+        std::pair{"gguf_q6_k", NumericFormat::GGUF_Q6_K},
+        std::pair{"gguf_iq2_xxs", NumericFormat::GGUF_IQ2_XXS},
+        std::pair{"gguf_iq2_xs", NumericFormat::GGUF_IQ2_XS},
+        std::pair{"gguf_iq2_s", NumericFormat::GGUF_IQ2_S},
+        std::pair{"gguf_iq3_xxs", NumericFormat::GGUF_IQ3_XXS},
+        std::pair{"gguf_iq3_s", NumericFormat::GGUF_IQ3_S},
+        std::pair{"gguf_iq1_s", NumericFormat::GGUF_IQ1_S},
+        std::pair{"gguf_iq1_m", NumericFormat::GGUF_IQ1_M},
+        std::pair{"gguf_iq4_nl", NumericFormat::GGUF_IQ4_NL},
+        std::pair{"gguf_iq4_xs", NumericFormat::GGUF_IQ4_XS},
+        std::pair{"gguf_q4_0", NumericFormat::GGUF_Q4_0},
+        std::pair{"gguf_q5_0", NumericFormat::GGUF_Q5_0},
+        std::pair{"gguf_q2_0", NumericFormat::GGUF_Q2_0},
+    };
+    for (const auto& [spelling, format] : formats) {
+        if (name == spelling) { return format; }
+    }
     throw ArtifactError("unknown tensor format: " + std::string(name));
 }
 
@@ -113,11 +208,21 @@ StorageLayout parse_layout(std::string_view name) {
     if (name == "row-split-k128-v1") { return StorageLayout::RowSplitK128V1; }
     if (name == "blockscale-k16-m128x4-v1") { return StorageLayout::BlockScaleK16M128x4V1; }
     if (name == "row-scale-v1") { return StorageLayout::RowScaleV1; }
+    if (name == "contiguous_le_v1") { return StorageLayout::ContiguousLeV1; }
+    if (name == "row_split_k128_v1") { return StorageLayout::RowSplitK128V1; }
+    if (name == "block_scale_k16_m128x4_v1") {
+        return StorageLayout::BlockScaleK16M128x4V1;
+    }
+    if (name == "row_scale_v1") { return StorageLayout::RowScaleV1; }
+    if (name == "row_interleaved_v1") { return StorageLayout::RowInterleavedV1; }
+    if (name == "gguf_blocks_v1") { return StorageLayout::GgufBlocksV1; }
     throw ArtifactError("unknown tensor layout: " + std::string(name));
 }
 
 ResourceEncoding parse_encoding(std::string_view name) {
-    if (name == "raw-bytes-v1") { return ResourceEncoding::RawBytesV1; }
+    if (name == "raw-bytes-v1" || name == "raw_bytes_v1") {
+        return ResourceEncoding::RawBytesV1;
+    }
     throw ArtifactError("unknown resource encoding: " + std::string(name));
 }
 
@@ -172,6 +277,194 @@ ObjectDescriptor parse_object(const Json& value) {
     if (kind == "tensor") { return parse_tensor(value); }
     if (kind == "resource") { return parse_resource(value); }
     throw ArtifactError("object kind must be 'tensor' or 'resource'");
+}
+
+void require_v3_members(const Json& object, std::initializer_list<std::string_view> required,
+                        std::initializer_list<std::string_view> optional, std::string_view label) {
+    if (!object.is_object()) { throw ArtifactError(std::string(label) + " must be an object"); }
+    for (const auto key : required) {
+        if (!object.contains(key)) {
+            throw ArtifactError(std::string(label) + ": missing " + std::string(key));
+        }
+    }
+    for (const auto& [key, ignored] : object.items()) {
+        if (std::find(required.begin(), required.end(), key) == required.end() &&
+            std::find(optional.begin(), optional.end(), key) == optional.end()) {
+            throw ArtifactError(std::string(label) + ": unknown member " + key);
+        }
+    }
+}
+
+ObjectDescriptor parse_v3_object(const Json& value) {
+    if (!value.is_object() || !value.contains("id") || !value.contains("kind")) {
+        throw ArtifactError("invalid v3 object descriptor");
+    }
+    const std::string name = require_string(value.at("id"), "v3 object id");
+    const std::string kind = require_string(value.at("kind"), "v3 object kind");
+    if (kind == "resource") {
+        require_v3_members(value, {"id", "kind", "encoding", "offset", "bytes"}, {}, name);
+        return ResourceDescriptor{
+            name, parse_encoding(require_string(value.at("encoding"), name)),
+            require_unsigned(value.at("offset"), name, false),
+            require_unsigned(value.at("bytes"), name, true),
+        };
+    }
+    if (kind != "tensor") { throw ArtifactError(name + ": invalid v3 object kind"); }
+    require_v3_members(value, {"id", "kind", "shape", "format", "layout", "offset", "bytes"},
+                       {"divisors"}, name);
+    const auto& dims = value.at("shape");
+    if (!dims.is_array() || dims.size() > 16) {
+        throw ArtifactError(name + ": tensor shape must have rank 0 through 16");
+    }
+    std::vector<std::uint64_t> shape;
+    shape.reserve(dims.size());
+    for (const auto& dim : dims) { shape.push_back(require_unsigned(dim, name, true)); }
+    const NumericFormat format = parse_format(require_string(value.at("format"), name));
+    const StorageLayout layout = parse_layout(require_string(value.at("layout"), name));
+    const std::uint64_t divisors =
+        value.contains("divisors") ? require_unsigned(value.at("divisors"), name, true) : 1;
+    const std::uint64_t bytes = require_unsigned(value.at("bytes"), name, true);
+    if (bytes != tensor_encoded_size(layout, format, shape, divisors)) {
+        throw ArtifactError(name + ": v3 tensor encoded size differs from layout");
+    }
+    return TensorDescriptor{name, std::move(shape), format, layout,
+                            require_unsigned(value.at("offset"), name, false), bytes, divisors};
+}
+
+using V3ObjectIndex = std::unordered_map<std::string, std::size_t>;
+
+std::size_t v3_reference(const Json& value, const V3ObjectIndex& index,
+                         const std::vector<ObjectDescriptor>& objects, bool tensor,
+                         std::string_view label) {
+    const std::string& id = require_string(value, label);
+    const auto found      = index.find(id);
+    if (found == index.end() ||
+        std::holds_alternative<TensorDescriptor>(objects.at(found->second)) != tensor) {
+        throw ArtifactError(std::string(label) + ": missing or wrong-kind object " + id);
+    }
+    return found->second;
+}
+
+std::uint64_t v3_binding_elements(const Json& value, const V3ObjectIndex& index,
+                                  const std::vector<ObjectDescriptor>& objects,
+                                  std::string_view label) {
+    const auto elements = [&](std::size_t object) {
+        std::uint64_t product = 1;
+        for (auto dim : std::get<TensorDescriptor>(objects.at(object)).shape) {
+            product = checked_mul(product, dim, label);
+        }
+        return product;
+    };
+    if (!value.is_object()) { throw ArtifactError(std::string(label) + " must be a binding"); }
+    if (value.size() == 1 && value.contains("object")) {
+        return elements(v3_reference(value.at("object"), index, objects, true, label));
+    }
+    require_v3_members(value, {"parts"}, {}, label);
+    const auto& parts = value.at("parts");
+    if (!parts.is_array() || parts.empty()) {
+        throw ArtifactError(std::string(label) + ": parts must be nonempty");
+    }
+    std::uint64_t total = 0;
+    for (const auto& part : parts) {
+        require_v3_members(part, {"object", "range"}, {}, label);
+        const auto object = v3_reference(part.at("object"), index, objects, true, label);
+        const auto& range = part.at("range");
+        if (!range.is_array() || range.size() != 2) {
+            throw ArtifactError(std::string(label) + ": range must have two indices");
+        }
+        const auto begin = require_unsigned(range[0], label, false);
+        const auto end   = require_unsigned(range[1], label, false);
+        if (begin >= end || end > elements(object)) {
+            throw ArtifactError(std::string(label) + ": binding range exceeds source");
+        }
+        total = checked_add(total, end - begin, label);
+    }
+    return total;
+}
+
+void validate_v3_relations(const Json& root, const V3ObjectIndex& index,
+                           const std::vector<ObjectDescriptor>& objects) {
+    const auto& components = root.at("components");
+    if (!components.is_object() || components.empty()) {
+        throw ArtifactError("v3 components must be a nonempty object");
+    }
+    for (const auto& [name, entry] : components.items()) {
+        if (name.empty()) { throw ArtifactError("v3 component id is empty"); }
+        require_v3_members(entry, {"config"}, {"target", "resources", "proposal"}, name);
+        if (!entry.at("config").is_object()) {
+            throw ArtifactError(name + ": component config must be an object");
+        }
+        if (entry.contains("target")) {
+            const auto& target = require_string(entry.at("target"), "component target");
+            if (!components.contains(target)) { throw ArtifactError(name + ": missing target"); }
+        }
+        if (entry.contains("resources")) {
+            if (!entry.at("resources").is_object()) {
+                throw ArtifactError(name + ": resources must be an object");
+            }
+            for (const auto& [role, reference] : entry.at("resources").items()) {
+                (void)v3_reference(reference, index, objects, false, name + "/" + role);
+            }
+        }
+        if (entry.contains("proposal")) {
+            if (name != "text") { throw ArtifactError("only text may declare a proposal"); }
+            const auto& proposal = entry.at("proposal");
+            require_v3_members(proposal, {"domain"}, {"rows"}, "proposal");
+            const auto& domain = require_string(proposal.at("domain"), "proposal domain");
+            if (domain == "full") {
+                if (proposal.contains("rows")) {
+                    throw ArtifactError("full proposal must omit rows");
+                }
+            } else if (domain == "indexed") {
+                if (!proposal.contains("rows")) {
+                    throw ArtifactError("indexed proposal requires rows");
+                }
+                (void)require_unsigned(proposal.at("rows"), "proposal rows", true);
+            } else {
+                throw ArtifactError("invalid proposal domain");
+            }
+        }
+    }
+    const auto& bindings = root.at("bindings");
+    if (!bindings.is_object()) { throw ArtifactError("v3 bindings must be an object"); }
+    for (const auto& [name, binding] : bindings.items()) {
+        if (name.empty()) { throw ArtifactError("empty binding name"); }
+        (void)v3_binding_elements(binding, index, objects, name);
+    }
+    const auto& uses = root.at("uses");
+    if (!uses.is_array()) { throw ArtifactError("v3 uses must be an array"); }
+    std::set<std::pair<std::string, std::string>> seen;
+    for (const auto& use : uses) {
+        require_v3_members(use, {"parameter", "input"}, {"activation_policy", "auxiliaries"},
+                           "Use");
+        const auto& parameter = require_string(use.at("parameter"), "Use parameter");
+        const auto& input     = require_string(use.at("input"), "Use input");
+        if (!bindings.contains(parameter) || !seen.insert({parameter, input}).second) {
+            throw ArtifactError("Use has missing or duplicate parameter/input");
+        }
+        if (use.contains("activation_policy")) {
+            const auto& policy = require_string(use.at("activation_policy"), "activation policy");
+            if (policy != "A16Only" && policy != "AllowA8" && policy != "AllowA4") {
+                throw ArtifactError("unknown activation policy");
+            }
+        }
+        if (use.contains("auxiliaries")) {
+            if (!use.at("auxiliaries").is_object()) {
+                throw ArtifactError("Use auxiliaries must be an object");
+            }
+            for (const auto& [role, binding] : use.at("auxiliaries").items()) {
+                (void)v3_binding_elements(binding, index, objects, parameter + "/" + role);
+            }
+        }
+    }
+    for (const char* name : {"metadata", "provenance"}) {
+        if (root.contains(name) && !root.at(name).is_object()) {
+            throw ArtifactError(std::string(name) + " must be an object");
+        }
+    }
+    if (root.contains("metadata") && root.at("metadata").contains("name")) {
+        (void)require_string(root.at("metadata").at("name"), "metadata.name");
+    }
 }
 
 struct TransparentStringHash {
@@ -385,17 +678,29 @@ std::uint64_t object_bytes(const ObjectDescriptor& object) noexcept {
 }
 
 struct Reader::Impl {
-    explicit Impl(const std::filesystem::path& path) : file(path) {
+    explicit Impl(const std::filesystem::path& path)
+        : file(path), entry_path(path.parent_path()) {
         if (file.size() < kPrefixBytes) {
-            throw ArtifactError("artifact is shorter than the v2 prefix");
+            throw ArtifactError("artifact is shorter than the NInfer prefix");
         }
-        if (!std::equal(kMagic.begin(), kMagic.end(), file.data())) {
-            throw ArtifactError("artifact magic is not NInfer v2");
+        if (std::equal(kMagic.begin(), kMagic.end(), file.data())) {
+            version = 2;
+        } else if (std::equal(kV3Magic.begin(), kV3Magic.end(), file.data())) {
+            version = 3;
+        } else {
+            throw ArtifactError("artifact magic is neither NInfer v2 nor v3");
+        }
+        if (version == 3 && file.size() < kV3HeaderBytes) {
+            throw ArtifactError("artifact is shorter than the v3 header");
+        }
+        if (version == 3) {
+            std::copy_n(file.data() + 16, uuid.size(), uuid.begin());
         }
 
         const auto json_bytes = read_u64_le(file.data() + 8);
         if (json_bytes == 0) { throw ArtifactError("json_bytes must be positive"); }
-        const auto metadata_end = checked_add(kPrefixBytes, json_bytes, "JSON range");
+        const auto prefix = version == 3 ? kV3HeaderBytes : kPrefixBytes;
+        const auto metadata_end = checked_add(prefix, json_bytes, "JSON range");
         payload_start           = align_up(metadata_end, kPayloadAlignment, "payload offset");
         if (metadata_end > file.size() || payload_start > file.size()) {
             throw ArtifactError("declared JSON or payload start extends beyond the file");
@@ -403,10 +708,16 @@ struct Reader::Impl {
 
         Json directory;
         try {
-            const auto* begin = reinterpret_cast<const char*>(file.data() + kPrefixBytes);
-            directory         = Json::parse(begin, begin + json_bytes);
+            const auto* begin = reinterpret_cast<const char*>(file.data() + prefix);
+            directory = version == 3 ? parse_v3_json(begin, begin + json_bytes)
+                                     : Json::parse(begin, begin + json_bytes);
         } catch (const Json::exception& error) {
             throw ArtifactError(std::string("invalid JSON directory: ") + error.what());
+        }
+
+        if (version == 3) {
+            read_v3_directory(directory, path);
+            return;
         }
 
         static constexpr std::array root_members = {"identity", "objects"};
@@ -425,47 +736,140 @@ struct Reader::Impl {
         index.reserve(raw_objects.size());
 
         const auto payload_bytes = static_cast<std::uint64_t>(file.size()) - payload_start;
+        total_payload_bytes      = payload_bytes;
+        files.push_back(FilePart{std::nullopt, payload_bytes, 0});
         std::uint64_t cursor     = 0;
         for (const auto& raw_object : raw_objects) {
             auto object          = parse_object(raw_object);
-            const auto name      = object_name(object);
-            const auto offset    = object_offset(object);
-            const auto bytes     = object_bytes(object);
-            const auto alignment = std::visit(
-                [](const auto& descriptor) {
-                    using Descriptor = std::decay_t<decltype(descriptor)>;
-                    if constexpr (std::is_same_v<Descriptor, TensorDescriptor>) {
-                        return tensor_alignment(descriptor.layout);
-                    } else {
-                        return resource_alignment(descriptor.encoding);
-                    }
-                },
-                object);
-
-            if (offset < cursor) {
-                throw ArtifactError("object " + std::string(name) + " overlaps or is out of order");
-            }
-            if (offset % alignment != 0) {
-                throw ArtifactError("object " + std::string(name) + " is not " +
-                                    std::to_string(alignment) + "-byte aligned");
-            }
-            const auto end = checked_add(offset, bytes, "object payload range");
-            if (end > payload_bytes) {
-                throw ArtifactError("object " + std::string(name) + " extends beyond the file");
-            }
-            const auto object_index = entries.size();
-            auto [_, inserted]      = index.emplace(std::string(name), object_index);
-            if (!inserted) { throw ArtifactError("duplicate object name: " + std::string(name)); }
-            entries.push_back(std::move(object));
-            cursor = end;
+            register_object(std::move(object), cursor);
         }
     }
 
+    struct FilePart {
+        std::optional<std::string> path;
+        std::uint64_t payload_bytes = 0;
+        std::uint64_t logical_begin = 0;
+    };
+
+    void register_object(ObjectDescriptor object, std::uint64_t& cursor) {
+        const auto name      = object_name(object);
+        const auto offset    = object_offset(object);
+        const auto bytes     = object_bytes(object);
+        const auto alignment = std::visit(
+            [](const auto& descriptor) {
+                using Descriptor = std::decay_t<decltype(descriptor)>;
+                if constexpr (std::is_same_v<Descriptor, TensorDescriptor>) {
+                    return tensor_alignment(descriptor.layout);
+                } else {
+                    return resource_alignment(descriptor.encoding);
+                }
+            },
+            object);
+        if (offset < cursor) {
+            throw ArtifactError("object " + std::string(name) + " overlaps or is out of order");
+        }
+        if (offset % alignment != 0) {
+            throw ArtifactError("object " + std::string(name) + " is not " +
+                                std::to_string(alignment) + "-byte aligned");
+        }
+        const auto end = checked_add(offset, bytes, "object payload range");
+        if (end > total_payload_bytes) {
+            throw ArtifactError("object " + std::string(name) + " exceeds logical payload");
+        }
+        const auto [_, inserted] = index.emplace(std::string(name), entries.size());
+        if (!inserted) { throw ArtifactError("duplicate object name: " + std::string(name)); }
+        entries.push_back(std::move(object));
+        cursor = end;
+    }
+
+    void read_v3_directory(const Json& root, const std::filesystem::path& entry) {
+        require_v3_members(root, {"components", "objects", "bindings", "uses", "files"},
+                           {"metadata", "provenance"}, "v3 directory");
+        const auto& raw_files = root.at("files");
+        if (!raw_files.is_array() || raw_files.empty()) {
+            throw ArtifactError("v3 files must be a nonempty array");
+        }
+        std::set<std::string> filenames{entry.filename().string()};
+        for (const auto& record : raw_files) {
+            require_v3_members(record, {"path", "payload_bytes"}, {}, "v3 file");
+            std::optional<std::string> part_name;
+            if (files.empty()) {
+                if (!record.at("path").is_null()) {
+                    throw ArtifactError("v3 files[0].path must be null");
+                }
+            } else {
+                part_name = require_string(record.at("path"), "continuation filename");
+                if (*part_name == "." || *part_name == ".." ||
+                    part_name->find('/') != std::string::npos ||
+                    part_name->find('\\') != std::string::npos ||
+                    !filenames.insert(*part_name).second) {
+                    throw ArtifactError("invalid or duplicate continuation filename: " + *part_name);
+                }
+            }
+            const auto bytes = require_unsigned(record.at("payload_bytes"), "part bytes", true);
+            files.push_back(FilePart{std::move(part_name), bytes, total_payload_bytes});
+            total_payload_bytes = checked_add(total_payload_bytes, bytes, "logical payload bytes");
+        }
+        (void)checked_add(payload_start, total_payload_bytes, "virtual v3 file length");
+        if (checked_add(payload_start, files[0].payload_bytes, "entry length") != file.size()) {
+            throw ArtifactError("v3 entry file length differs from directory");
+        }
+        const auto& raw_objects = root.at("objects");
+        if (!raw_objects.is_array() || raw_objects.empty()) {
+            throw ArtifactError("v3 objects must be a nonempty array");
+        }
+        entries.reserve(raw_objects.size());
+        index.reserve(raw_objects.size());
+        std::uint64_t cursor = 0;
+        for (const auto& raw_object : raw_objects) {
+            if (!raw_object.is_object() || !raw_object.contains("kind")) {
+                throw ArtifactError("invalid v3 object descriptor");
+            }
+            register_object(parse_v3_object(raw_object), cursor);
+        }
+        V3ObjectIndex names;
+        names.reserve(index.size());
+        for (const auto& [name, object] : index) { names.emplace(name, object); }
+        validate_v3_relations(root, names, entries);
+        v3_directory = root;
+        part_files.resize(files.size());
+        // v3 has no v2 model_id/weights_id tuple; consumers should inspect components.
+    }
+
+    const MappedFile& mapped_file(std::size_t part) const {
+        if (part >= files.size()) { throw ArtifactError("invalid continuation index"); }
+        if (part == 0) { return file; }
+        if (!part_files[part]) {
+            const auto& record = files[part];
+            auto mapped = std::make_unique<MappedFile>(
+                entry_path / *record.path);
+            if (mapped->size() < kV3HeaderBytes ||
+                !std::equal(kV3PartMagic.begin(), kV3PartMagic.end(), mapped->data()) ||
+                read_u64_le(mapped->data() + 8) != part ||
+                !std::equal(uuid.begin(), uuid.end(), mapped->data() + 16)) {
+                throw ArtifactError(*record.path + ": continuation UUID/index/magic mismatch");
+            }
+            if (mapped->size() !=
+                checked_add(kPayloadAlignment, record.payload_bytes, "continuation length")) {
+                throw ArtifactError(*record.path + ": continuation length differs from directory");
+            }
+            part_files[part] = std::move(mapped);
+        }
+        return *part_files[part];
+    }
+
     MappedFile file;
+    std::filesystem::path entry_path = {};
+    std::uint8_t version = 0;
+    std::array<std::byte, 16> uuid{};
     ArtifactIdentity identity;
+    std::optional<Json> v3_directory;
     std::vector<ObjectDescriptor> entries;
     std::unordered_map<std::string, std::size_t, TransparentStringHash, std::equal_to<>> index;
     std::uint64_t payload_start = 0;
+    std::uint64_t total_payload_bytes = 0;
+    std::vector<FilePart> files;
+    mutable std::vector<std::unique_ptr<MappedFile>> part_files;
 };
 
 Reader::Reader(const std::filesystem::path& path) : impl_(std::make_unique<Impl>(path)) {}
@@ -476,6 +880,16 @@ Reader& Reader::operator=(Reader&&) noexcept = default;
 
 const ArtifactIdentity& Reader::identity() const noexcept { return impl_->identity; }
 
+const nlohmann::json* Reader::v3_directory() const noexcept {
+    return impl_->v3_directory ? &*impl_->v3_directory : nullptr;
+}
+
+std::uint8_t Reader::container_version() const noexcept { return impl_->version; }
+
+const std::array<std::byte, 16>& Reader::artifact_id() const noexcept {
+    return impl_->uuid;
+}
+
 const std::vector<ObjectDescriptor>& Reader::objects() const noexcept { return impl_->entries; }
 
 const ObjectDescriptor* Reader::find(std::string_view name) const noexcept {
@@ -483,18 +897,25 @@ const ObjectDescriptor* Reader::find(std::string_view name) const noexcept {
     return it == impl_->index.end() ? nullptr : &impl_->entries[it->second];
 }
 
-std::uint64_t Reader::file_bytes() const noexcept { return impl_->file.size(); }
+std::uint64_t Reader::file_bytes() const noexcept {
+    return impl_->payload_start + impl_->total_payload_bytes;
+}
 
 std::uint64_t Reader::payload_offset() const noexcept { return impl_->payload_start; }
 
 PayloadSpan Reader::payload(const ObjectDescriptor& object) const {
-    const auto absolute =
-        checked_add(impl_->payload_start, object_offset(object), "absolute payload offset");
-    const auto end = checked_add(absolute, object_bytes(object), "absolute payload range");
-    if (end > impl_->file.size()) { throw ArtifactError("object payload extends beyond the file"); }
+    const auto mapped = segments(object_offset(object), object_bytes(object));
+    if (mapped.size() != 1) {
+        throw ArtifactError("object " + std::string(object_name(object)) +
+                            " crosses v3 files; use read_object/read_range");
+    }
+    const auto& segment = mapped.front();
+    const auto absolute = checked_add(impl_->payload_start, object_offset(object),
+                                      "absolute payload offset");
+    const auto& file = impl_->mapped_file(segment.file_index);
     return {
         absolute,
-        std::span<const std::byte>(impl_->file.data() + absolute,
+        std::span<const std::byte>(file.data() + segment.file_offset,
                                    static_cast<std::size_t>(object_bytes(object))),
     };
 }
@@ -505,9 +926,68 @@ PayloadSpan Reader::payload(std::string_view name) const {
     return payload(*object);
 }
 
+std::vector<ReadSegment> Reader::segments(std::uint64_t offset, std::uint64_t bytes) const {
+    if (offset > impl_->total_payload_bytes || bytes > impl_->total_payload_bytes - offset) {
+        throw ArtifactError("read range exceeds logical artifact payload");
+    }
+    std::vector<ReadSegment> out;
+    std::uint64_t copied = 0;
+    std::size_t index = 0;
+    while (copied < bytes) {
+        const std::uint64_t current = offset + copied;
+        while (index + 1 < impl_->files.size() &&
+               current >= impl_->files[index + 1].logical_begin) {
+            ++index;
+        }
+        const auto& part = impl_->files[index];
+        const std::uint64_t local = current - part.logical_begin;
+        const std::uint64_t count = std::min(bytes - copied, part.payload_bytes - local);
+        const std::uint64_t start = index == 0 ? impl_->payload_start : kPayloadAlignment;
+        out.push_back({index, checked_add(start, local, "read file offset"), copied, count});
+        copied += count;
+    }
+    return out;
+}
+
+void Reader::read_into(std::uint64_t offset, std::span<std::byte> destination) const {
+    for (const auto& segment : segments(offset, destination.size())) {
+        const auto& file = impl_->mapped_file(segment.file_index);
+        std::memcpy(destination.data() + segment.destination_offset,
+                    file.data() + segment.file_offset, static_cast<std::size_t>(segment.bytes));
+    }
+}
+
+std::vector<std::byte> Reader::read_range(std::uint64_t offset, std::uint64_t bytes) const {
+    if (bytes > std::numeric_limits<std::size_t>::max()) {
+        throw ArtifactError("read size exceeds addressable memory");
+    }
+    (void)segments(offset, bytes);
+    std::vector<std::byte> out(static_cast<std::size_t>(bytes));
+    read_into(offset, out);
+    return out;
+}
+
+std::vector<std::byte> Reader::read_object(const ObjectDescriptor& object) const {
+    return read_range(object_offset(object), object_bytes(object));
+}
+
 std::size_t Reader::read_direct(std::uint64_t absolute_offset,
                                 std::span<std::byte> destination) const {
-    return impl_->file.read_direct(absolute_offset, destination);
+    if (impl_->version == 2) { return impl_->file.read_direct(absolute_offset, destination); }
+    if (absolute_offset % direct_io_alignment || destination.size() % direct_io_alignment ||
+        reinterpret_cast<std::uintptr_t>(destination.data()) % direct_io_alignment) {
+        throw ArtifactError("direct artifact read is not 4096-byte aligned");
+    }
+    if (absolute_offset < impl_->payload_start || absolute_offset > file_bytes()) {
+        throw ArtifactError("direct artifact read exceeds logical payload");
+    }
+    const auto logical = absolute_offset - impl_->payload_start;
+    const auto bytes = std::min<std::uint64_t>(destination.size(),
+                                               impl_->total_payload_bytes - logical);
+    // Continuation boundaries can be unaligned. A mapped copy preserves the virtual direct-read
+    // contract across those boundaries without requiring an offline v3-to-v2 repack.
+    read_into(logical, destination.first(static_cast<std::size_t>(bytes)));
+    return static_cast<std::size_t>(bytes);
 }
 
 } // namespace ninfer::artifact
