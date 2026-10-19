@@ -1,5 +1,6 @@
 #include "artifact/binder.h"
 #include "artifact/reader.h"
+#include "artifact/typed_binding.h"
 #include "artifact_fixture.h"
 #include "targets/qwen3_6_27b/impl/load/bindings.h"
 #include "targets/qwen3_6_27b/impl/variant.h"
@@ -11,6 +12,7 @@
 #include <array>
 #include <bit>
 #include <cmath>
+#include <cstddef>
 #include <cstring>
 #include <cstdint>
 #include <cstdlib>
@@ -24,6 +26,7 @@
 #include <string_view>
 #include <variant>
 #include <unordered_set>
+#include <vector>
 
 namespace {
 
@@ -576,6 +579,74 @@ int verify_real_v3_gsq_header() {
     }
     {
         auto invalid = root;
+        const auto id = invalid["bindings"]["vision/layers/0/attention/query"]["parts"][0]
+                            ["object"].get<std::string>();
+        for (auto& object : invalid["objects"]) {
+            if (object["id"] == id) {
+                object["format"] = "q5_g64_fp16";
+                break;
+            }
+        }
+        if (!feature_rejected(std::move(invalid), vision_only, "Vision QKV codec")) {
+            return 1;
+        }
+    }
+    {
+        auto invalid = root;
+        const auto id = invalid["bindings"]["vision/layers/0/attention/output"]["object"]
+                            .get<std::string>();
+        for (auto& object : invalid["objects"]) {
+            if (object["id"] == id) {
+                object["layout"] = "gguf_blocks_v1";
+                break;
+            }
+        }
+        if (!feature_rejected(std::move(invalid), vision_only, "Vision quantized layout")) {
+            return 1;
+        }
+    }
+    {
+        auto invalid = root;
+        const auto id = invalid["bindings"]["vision/layers/0/norm1_weight"]["object"]
+                            .get<std::string>();
+        for (auto& object : invalid["objects"]) {
+            if (object["id"] == id) {
+                object["layout"] = "row_split_k128_v1";
+                break;
+            }
+        }
+        if (!feature_rejected(std::move(invalid), vision_only, "Vision BF16 layout")) {
+            return 1;
+        }
+    }
+    {
+        auto invalid = root;
+        for (auto& use : invalid["uses"]) {
+            if (use["parameter"] == "vision/patch_embedding" &&
+                use["input"] == "vision/patch_input") {
+                use["activation_policy"] = "AllowA8";
+                break;
+            }
+        }
+        if (!feature_rejected(std::move(invalid), vision_only, "Vision activation policy")) {
+            return 1;
+        }
+    }
+    {
+        auto invalid = root;
+        const auto id = invalid["bindings"]["vision/merger/fc2"]["object"].get<std::string>();
+        for (auto& object : invalid["objects"]) {
+            if (object["id"] == id) {
+                object["shape"][1] = 4096;
+                break;
+            }
+        }
+        if (!feature_rejected(std::move(invalid), vision_only, "Vision merger input width")) {
+            return 1;
+        }
+    }
+    {
+        auto invalid = root;
         invalid["components"]["dflash2"]["config"]["dflash_config"]["selector_rank"] = 128;
         if (!feature_rejected(std::move(invalid),
                               features(ninfer::SpeculativeBackend::DFlash2),
@@ -888,6 +959,223 @@ int verify_real_v3_mtp_materialization(std::string_view filename,
     return 0;
 }
 
+int verify_real_v3_vision_materialization() {
+    // The real Vision tower occupies 282 MiB in the GSQ v3 artifact. Select only
+    // its 333 physical parents, then materialize them through the same common
+    // ModelView builder used during an actual Vision-enabled model startup.
+    const auto path = std::filesystem::path(NINFER_SOURCE_DIR) / ".." / ".." /
+                      "real-models" / "qwen3_8_gsq_rco_iq3_s_v3.ninfer";
+    if (!std::filesystem::is_regular_file(path)) {
+        std::cerr << "skip: real GSQ v3 Vision weights are not available\n";
+        return 77;
+    }
+    ninfer::artifact::Reader reader(path);
+    const auto* directory = reader.v3_directory();
+    if (!directory) {
+        throw std::runtime_error("real Vision source has no v3 directory");
+    }
+    const auto expected_bytes = reader.payload_offset() +
+        directory->at("files").at(0).at("payload_bytes").get<std::uint64_t>();
+    if (std::filesystem::file_size(path) != expected_bytes) {
+        std::cerr << "skip: real GSQ v3 Vision payload is incomplete\n";
+        return 77;
+    }
+    int device_count = 0;
+    if (cudaGetDeviceCount(&device_count) != cudaSuccess || device_count == 0) {
+        std::cerr << "skip: no CUDA device for real Vision materialization\n";
+        return 77;
+    }
+    auto choice = features(ninfer::SpeculativeBackend::None);
+    choice.vision = true;
+    ninfer::artifact::Binder complete_binder(reader);
+    const auto complete = bind_v3_text_artifact(complete_binder, *directory, choice);
+    const auto& binding = complete.bindings;
+    {
+        ninfer::artifact::Binder package_binder(reader);
+        ninfer::EngineOptions options;
+        options.enable_vision = true;
+        const auto package = Package::plan_load(
+            package_binder, options, WeightsProfile::Qwen38GroupwiseInt);
+        if (package.materialization().device_objects.size() !=
+                complete.materialization.device_objects.size()) {
+            throw std::runtime_error("Vision package route lost v3 physical parents");
+        }
+    }
+
+    std::unordered_set<std::size_t> selected;
+    const auto add = [&](ninfer::artifact::ObjectHandle object) {
+        selected.insert(object.index);
+    };
+    const auto& backbone = binding.vision_backbone;
+    add(backbone.patch_embedding);
+    add(backbone.patch_embedding_bias);
+    add(backbone.position_embedding);
+    for (const auto& layer : backbone.layers) {
+        for (const auto object : {
+                 layer.qkv, layer.qkv_bias, layer.output, layer.output_bias,
+                 layer.fc1, layer.fc1_bias, layer.fc2, layer.fc2_bias,
+                 layer.norm1_weight, layer.norm1_bias, layer.norm2_weight, layer.norm2_bias,
+             }) {
+            add(object);
+        }
+    }
+    for (const auto object : {
+             binding.vision_merger_input.fc1, binding.vision_merger_input.fc1_bias,
+             binding.vision_merger_norm.weight, binding.vision_merger_norm.bias,
+             binding.vision_merger_fc2, binding.vision_merger_fc2_bias,
+         }) {
+        add(object);
+    }
+    if (selected.size() != 333) {
+        throw std::runtime_error("real GSQ Vision physical parent count changed");
+    }
+
+    ninfer::artifact::Binder only_vision(reader);
+    for (std::size_t index = 0; index < reader.objects().size(); ++index) {
+        const auto& descriptor = reader.objects()[index];
+        if (const auto* tensor = std::get_if<ninfer::artifact::TensorDescriptor>(&descriptor)) {
+            const auto object = only_vision.require_tensor(
+                tensor->name, tensor->format, tensor->layout, tensor->shape);
+            if (selected.contains(index)) {
+                only_vision.materialize_on_device(object);
+            } else {
+                only_vision.validate_only(object);
+            }
+        } else {
+            const auto& resource = std::get<ninfer::artifact::ResourceDescriptor>(descriptor);
+            const auto object = only_vision.require_resource(resource.name, resource.encoding);
+            only_vision.validate_only(object);
+        }
+    }
+    const auto materialization = only_vision.finish();
+    if (materialization.device_objects.size() != selected.size() ||
+        !materialization.host_objects.empty() ||
+        materialization.device_capacity_bytes > (std::uint64_t{384} << 20)) {
+        throw std::runtime_error("Vision-only device upload exceeds expected memory");
+    }
+
+    ninfer::DeviceContext device(0);
+    const auto backing = ninfer::artifact::materialize(reader, materialization, device);
+    ninfer::targets::qwen3_6::VisionWeights native{};
+    native.common = ninfer::targets::qwen3_6::materialize_vision_common(
+        backing, backbone, binding.vision_merger_input, binding.vision_merger_norm);
+    native.merger_fc2 = ninfer::artifact::materialized_weight(
+        backing, binding.vision_merger_fc2, NumericFormat::W8G32_F16S,
+        TextConfig::hidden, ninfer::targets::qwen3_6::VisionBackboneConfig::merger_hidden);
+    native.merger_fc2_bias = ninfer::artifact::materialized_tensor(
+        backing, binding.vision_merger_fc2_bias, NumericFormat::BF16,
+        {TextConfig::hidden});
+
+    // Exact independent oracle: compare the first and last encoded block of
+    // each sampled GPU plane against the corresponding bytes in the source file.
+    // Checking qhigh and scales separately catches shifted plane pointers.
+    std::ifstream source(path, std::ios::binary);
+    const auto verify_bytes = [&](ninfer::artifact::ObjectHandle object,
+                                  std::uint64_t offset, const std::byte* gpu,
+                                  std::uint64_t count, std::string_view name) {
+        if (gpu == nullptr || count == 0) {
+            throw std::runtime_error(std::string(name) + ": empty Vision device plane");
+        }
+        const auto& physical = std::get<ninfer::artifact::TensorDescriptor>(
+            reader.objects().at(object.index));
+        const auto compare = [&](std::uint64_t at, std::size_t size) {
+            std::array<std::byte, 32> actual{}, expected{};
+            CUDA_CHECK(cudaMemcpy(actual.data(), gpu + at, size, cudaMemcpyDeviceToHost));
+            source.clear();
+            source.seekg(static_cast<std::streamoff>(
+                reader.payload_offset() + physical.offset + offset + at));
+            source.read(reinterpret_cast<char*>(expected.data()),
+                        static_cast<std::streamsize>(size));
+            if (!source || !std::equal(actual.begin(), actual.begin() + size, expected.begin())) {
+                throw std::runtime_error(std::string(name) + ": Vision GPU payload differs");
+            }
+        };
+        const auto sample = static_cast<std::size_t>(std::min<std::uint64_t>(count, 32));
+        compare(0, sample);
+        if (count > sample) { compare(count - sample, sample); }
+    };
+    const auto verify_weight = [&](std::string_view name,
+                                   ninfer::artifact::ObjectHandle object,
+                                   const ninfer::Weight& actual, NumericFormat format,
+                                   int rows, int columns) {
+        const auto& physical = std::get<ninfer::artifact::TensorDescriptor>(
+            reader.objects().at(object.index));
+        const auto shape = std::array<std::uint64_t, 2>{
+            static_cast<std::uint64_t>(rows), static_cast<std::uint64_t>(columns)};
+        const auto geometry = ninfer::artifact::row_split_geometry(format, shape);
+        const auto* base = static_cast<const std::byte*>(backing.device_data(object));
+        if (physical.format != format ||
+            physical.layout != ninfer::artifact::StorageLayout::RowSplitK128V1 ||
+            physical.shape != std::vector<std::uint64_t>(shape.begin(), shape.end()) ||
+            actual.qtype != ninfer::artifact::qtype_for(format) ||
+            actual.layout != ninfer::QuantLayout::RowSplit ||
+            actual.n != rows || actual.k != columns ||
+            actual.qdata != base || actual.payload != base ||
+            actual.payload_bytes != geometry.encoded_bytes ||
+            actual.scales != base + geometry.scale_plane_offset ||
+            actual.qhigh != (geometry.high_plane_bytes
+                                 ? base + geometry.high_plane_offset : nullptr)) {
+            throw std::runtime_error(std::string(name) + ": native Vision weight view differs");
+        }
+        verify_bytes(object, 0, static_cast<const std::byte*>(actual.qdata),
+                     geometry.low_plane_bytes, name);
+        if (geometry.high_plane_bytes) {
+            verify_bytes(object, geometry.high_plane_offset,
+                         static_cast<const std::byte*>(actual.qhigh),
+                         geometry.high_plane_bytes, name);
+        }
+        verify_bytes(object, geometry.scale_plane_offset,
+                     static_cast<const std::byte*>(actual.scales),
+                     geometry.scale_plane_bytes, name);
+    };
+    const auto verify_bf16 = [&](std::string_view name,
+                                 ninfer::artifact::ObjectHandle object,
+                                 const ninfer::Tensor& actual, std::uint64_t elements) {
+        const auto& physical = std::get<ninfer::artifact::TensorDescriptor>(
+            reader.objects().at(object.index));
+        if (physical.format != NumericFormat::BF16 ||
+            physical.layout != ninfer::artifact::StorageLayout::ContiguousLeV1 ||
+            actual.data != backing.device_data(object) ||
+            static_cast<std::uint64_t>(actual.numel()) != elements) {
+            throw std::runtime_error(std::string(name) + ": native Vision BF16 view differs");
+        }
+        verify_bytes(object, 0, static_cast<const std::byte*>(actual.data),
+                     elements * sizeof(std::uint16_t), name);
+    };
+    using V = ninfer::targets::qwen3_6::VisionBackboneConfig;
+    verify_weight("patch embedding", backbone.patch_embedding,
+                  native.common.patch_embedding, NumericFormat::Q6G64_F16S,
+                  V::hidden, V::patch_dim);
+    verify_bf16("position embedding", backbone.position_embedding,
+                native.common.position_embedding, V::position_embeddings * V::hidden);
+    for (const auto layer : {0, V::layers / 2, V::layers - 1}) {
+        const auto& plan = backbone.layers[layer];
+        const auto& view = native.common.layers[layer];
+        verify_weight("Vision QKV", plan.qkv, view.qkv, NumericFormat::Q4G64_F16S,
+                      3 * V::hidden, V::hidden);
+        verify_bf16("Vision QKV bias", plan.qkv_bias, view.qkv_bias, 3 * V::hidden);
+        verify_weight("Vision attention output", plan.output, view.output,
+                      NumericFormat::Q5G64_F16S, V::hidden, V::hidden);
+        verify_weight("Vision MLP fc1", plan.fc1, view.fc1,
+                      NumericFormat::Q4G64_F16S, V::intermediate, V::hidden);
+        verify_weight("Vision MLP fc2", plan.fc2, view.fc2,
+                      NumericFormat::Q5G64_F16S, V::hidden, V::intermediate);
+        verify_bf16("Vision norm1", plan.norm1_weight, view.norm1_weight, V::hidden);
+    }
+    verify_weight("Vision merger fc1", binding.vision_merger_input.fc1,
+                  native.common.merger_fc1, NumericFormat::W8G32_F16S,
+                  V::merger_hidden, V::merger_hidden);
+    verify_weight("Vision merger fc2", binding.vision_merger_fc2,
+                  native.merger_fc2, NumericFormat::W8G32_F16S,
+                  TextConfig::hidden, V::merger_hidden);
+    verify_bf16("Vision merger bias", binding.vision_merger_fc2_bias,
+                native.merger_fc2_bias, TextConfig::hidden);
+    std::cout << "real GSQ v3 Vision: " << selected.size()
+              << " physical parents, " << materialization.device_capacity_bytes
+              << " device bytes; native ModelView and source-file byte oracle passed\n";
+    return 0;
+}
+
 int verify_groupwise(const std::filesystem::path& path) {
     ninfer::artifact::Reader reader(path);
     if (Package::resolve_weights(reader.identity()) != WeightsProfile::Qwen36GroupwiseInt) {
@@ -1148,6 +1436,9 @@ int verify_vision_workspace_planning() {
 } // namespace
 
 int main(int argc, char** argv) {
+    if (argc == 2 && std::string_view(argv[1]) == "--v3-vision-device") {
+        return verify_real_v3_vision_materialization();
+    }
     if (argc == 2 && std::string_view(argv[1]) == "--v3-mtp-materialize") {
         for (const auto& [filename, format] : {
                  std::pair{"qwen3_8_gsq_rco_iq3_s_v3.ninfer", NumericFormat::GGUF_Q6_K},

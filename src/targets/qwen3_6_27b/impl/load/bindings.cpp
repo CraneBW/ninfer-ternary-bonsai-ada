@@ -1305,7 +1305,26 @@ std::vector<V3LogicalTensor> inspect_v3_feature_metadata(
                               std::initializer_list<std::uint64_t> dims,
                               std::string_view input = {},
                               std::optional<NumericFormat> format = std::nullopt) {
-            return add(n, dims, input, format);
+            // The shared Vision ModelView materializes BF16 as contiguous tensors
+            // and quantized projections as row-split planes. A matching codec with
+            // another physical layout cannot be interpreted by its Vision kernels.
+            if (!format) {
+                throw std::logic_error("Vision bindings require an explicit encoding");
+            }
+            const V3LogicalTensor& logical = add(n, dims, input, format);
+            const auto expected_layout =
+                *format == NumericFormat::BF16
+                    ? artifact::StorageLayout::ContiguousLeV1
+                    : artifact::StorageLayout::RowSplitK128V1;
+            if (logical.layout != expected_layout) {
+                throw artifact::ArtifactError(n + ": unsupported Vision physical layout");
+            }
+            // Vision projections consume A16 activations; allowing a different
+            // Use policy would silently promise a path that has no native kernel.
+            if (!input.empty() && logical.activation_policy != "A16Only") {
+                throw artifact::ArtifactError(n + ": unsupported Vision activation policy");
+            }
+            return logical;
         };
         vadd("vision/patch_embedding", {H, qwen3_6::VisionBackboneConfig::patch_dim},
              "vision/patch_input", NumericFormat::Q6G64_F16S);
