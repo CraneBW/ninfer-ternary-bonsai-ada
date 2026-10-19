@@ -13,9 +13,83 @@
 """
 import argparse, http.client, http.server, json, mmap, os, signal, socket, socketserver
 import struct, subprocess, sys, threading, time
+from pathlib import Path
 
 HOP = {"connection", "keep-alive", "transfer-encoding", "content-length", "te", "trailer",
        "upgrade", "proxy-connection"}
+
+
+def gpu_indices():
+    """Physical CUDA GPU ordinals available to CUDA_VISIBLE_DEVICES rank processes."""
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=index", "--format=csv,noheader"],
+            check=True, capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        raise ValueError(f"TP2 requires two accessible CUDA GPUs: {exc}") from exc
+    try:
+        return {int(line.strip()) for line in result.stdout.splitlines() if line.strip()}
+    except ValueError as exc:
+        raise ValueError("nvidia-smi returned invalid physical GPU indices") from exc
+
+
+def validate_rank_artifact(path, rank):
+    """Refuse a truncated/mismatched v3 rank artifact before launching GPUs.
+
+    V2 rank artifacts are checked only for the magic and existence; their
+    actual tensor-parallel registry/collective compatibility belongs to the
+    native TP2 engine and cannot be inferred from the proxy.
+    """
+    with Path(path).open("rb") as stream:
+        header = stream.read(32)
+        if len(header) < 16 or header[:8] not in (b"NINFER\0\2", b"NINFER\0\3"):
+            raise ValueError(f"rank{rank}: not a valid NInfer artifact header")
+        if header[:8] != b"NINFER\0\3":
+            return
+        size = int.from_bytes(header[8:16], "little")
+        if len(header) != 32 or not 0 < size <= 64 * 1024 * 1024:
+            raise ValueError(f"rank{rank}: invalid v3 directory length")
+        try:
+            directory = json.loads(stream.read(size))
+        except (UnicodeError, json.JSONDecodeError) as exc:
+            raise ValueError(f"rank{rank}: invalid v3 directory") from exc
+        metadata = directory.get("metadata", {})
+        tp = metadata.get("tensor_parallel", {})
+        if tp.get("world_size") != 2 or tp.get("rank") != rank or \
+                metadata.get("name") != f"qwen3.8-27b-tp2-rank{rank}":
+            raise ValueError(f"rank{rank}: v3 artifact is not the expected two-rank TP2 shard")
+        files = directory.get("files", [])
+        if len(files) != 1 or files[0].get("path", "missing") is not None or \
+                type(files[0].get("payload_bytes")) is not int or \
+                files[0]["payload_bytes"] <= 0:
+            raise ValueError(f"rank{rank}: expected one positive single-file v3 payload")
+        expected_size = ((32 + size + 4095) // 4096) * 4096 + files[0]["payload_bytes"]
+        if Path(path).stat().st_size != expected_size:
+            raise ValueError(f"rank{rank}: truncated or incorrect rank payload length")
+
+
+def preflight(args, devices=None):
+    """Check topology and rank inputs before any proxy socket/process action."""
+    if len(args.gpus) != 2 or len(set(args.gpus)) != 2 or any(x < 0 for x in args.gpus):
+        raise ValueError("TP2 needs two DISTINCT nonnegative GPU ordinals")
+    available = gpu_indices() if devices is None else set(devices)
+    if not set(args.gpus).issubset(available):
+        raise ValueError(f"TP2 needs two physical GPUs {args.gpus}; available {sorted(available)}. "
+                         "A one-GPU proxy cannot provide native tensor-parallel collectives")
+    if len(args.rank_ports) != 2 or len(set(args.rank_ports)) != 2 or any(
+            not 1 <= x <= 65535 for x in args.rank_ports):
+        raise ValueError("TP2 requires two distinct valid rank ports")
+    if args.max_inflight < 1 or args.max_waiting < 0:
+        raise ValueError("TP2 request concurrency/queue sizes are invalid")
+    binary = Path(args.binary)
+    if not binary.is_file() or not os.access(binary, os.X_OK):
+        raise ValueError("TP2 native binary is missing or is not executable")
+    for rank in (0, 1):
+        file = Path(f"{args.model_prefix}.rank{rank}.ninfer")
+        if not file.is_file():
+            raise ValueError(f"TP2 rank{rank} source artifact is missing: {file}")
+        validate_rank_artifact(file, rank)
+    return available
 
 
 def log(msg):
@@ -362,13 +436,15 @@ def main():
     ap.add_argument("--model-prefix", required=True)
     ap.add_argument("--rank-ports", default="18940,18941")
     ap.add_argument("--gpus", default="0,1")
+    ap.add_argument("--preflight-only", action="store_true",
+                    help="validate the two physical GPUs and rank artifacts, then exit without starting servers")
     ap.add_argument("--id-file", default="/tmp/ninfer_tp2.id")
     ap.add_argument("--lockstep-file", default="/dev/shm/ninfer_tp2_lockstep")
     ap.add_argument("--lockstep-timeout", type=int, default=300)
     ap.add_argument("--stall-seconds", type=int, default=180)
     ap.add_argument("--start-timeout", type=int, default=900)
     ap.add_argument("--ready-wait", type=int, default=600)
-    ap.add_argument("--api-key-file", required=True,
+    ap.add_argument("--api-key-file",
                     help="bearer key: passed to both ranks and used for health probes")
     ap.add_argument("--max-inflight", type=int, default=1,
                     help="generation requests running at once; start the ranks with "
@@ -387,8 +463,21 @@ def main():
                          "decision to NCCL, for NVLink machines or a working PCIe P2P path")
     ap.add_argument("serve_args", nargs=argparse.REMAINDER)
     a = ap.parse_args()
-    a.rank_ports = [int(x) for x in a.rank_ports.split(",")]
-    a.gpus = [int(x) for x in a.gpus.split(",")]
+    try:
+        a.rank_ports = [int(x) for x in a.rank_ports.split(",")]
+        a.gpus = [int(x) for x in a.gpus.split(",")]
+    except ValueError:
+        ap.error("--rank-ports and --gpus require comma-separated integer ordinals")
+    try:
+        available = preflight(a)
+    except (ValueError, OSError) as exc:
+        ap.error(str(exc))
+    if a.preflight_only:
+        print(f"TP2 preflight OK: ranks on GPU {a.gpus}; visible physical GPUs {sorted(available)}; "
+              "native collective execution is not established by preflight")
+        return
+    if not a.api_key_file:
+        ap.error("--api-key-file is required when starting TP2 rank servers")
     a.probe_key = open(a.api_key_file).read().strip()
     if a.serve_args and a.serve_args[0] == "--":
         a.serve_args = a.serve_args[1:]

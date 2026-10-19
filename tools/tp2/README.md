@@ -89,6 +89,27 @@ support `NINFER_TP_RANK`, shared lockstep, rank-specific weights and the
 all-reduce communication hooks; this fork's ordinary single-GPU server does
 not become tensor-parallel merely by launching two copies through the proxy.
 
+Before opening a port or launching either rank, the proxy now enforces two
+**distinct physical CUDA GPUs**, two distinct rank ports, an executable server
+binary, and both rank artifact files. For v3, it also checks the rank/world-size
+metadata and complete *declared file length*, rejecting header-only shards.
+Use `--preflight-only` to validate this without starting an HTTP server:
+
+```bash
+python3 -m tools.tp2.tp2_proxy \
+  --binary /path/to/tp2-enabled/ninfer-serve \
+  --model-prefix out/qwen38-tp2 \
+  --gpus 0,1 --rank-ports 18940,18941 --preflight-only
+python3 -m unittest -v tests.test_tp2_proxy_preflight
+```
+
+The file-length check is **not** a payload digest. Produce rank files from a
+SHA-256 verified full source (the sharder supports `--sha256`) and use an
+actual two-rank collective-capable executable. On a host with one GPU, the
+preflight fails explicitly; it does not attempt to simulate TP2 by running two
+non-communicating copies on that GPU. The proxy is a supervisor, **not** the
+still-missing native v3/NCCL TP2 model executor in this repository.
+
 For a native TP2 implementation, consult the corresponding
 `src/targets/qwen3_6_27b_tp2` and `runtime/engine/tp_lockstep` code in the
 upstream reference. The original script handles v2 row-split/NVFP4/FP8
