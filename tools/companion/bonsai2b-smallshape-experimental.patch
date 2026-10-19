@@ -1,0 +1,745 @@
+diff --git a/src/ops/gdn_gating_proj/bf16/bf16_gdn_gating_proj_kernels.cu b/src/ops/gdn_gating_proj/bf16/bf16_gdn_gating_proj_kernels.cu
+index 80ee532..e7b7d28 100644
+--- a/src/ops/gdn_gating_proj/bf16/bf16_gdn_gating_proj_kernels.cu
++++ b/src/ops/gdn_gating_proj/bf16/bf16_gdn_gating_proj_kernels.cu
+@@ -37,6 +37,45 @@ constexpr int k35N           = 32;
+ constexpr int k35K           = 2048;
+ constexpr int k35LogicalRows = 2 * k35N;
+ 
++// Bonsai 2B has 16 control heads and 2048 input channels. Larger-model
++// kernels hardcode 32 or 48 heads, so use a correct shape-specific SIMT path.
++__global__ void bf16_gdn_gating_proj_2b_kernel(
++    const __nv_bfloat16* __restrict__ x, const __nv_bfloat16* __restrict__ a,
++    const __nv_bfloat16* __restrict__ b, const float* __restrict__ A_log,
++    const float* __restrict__ dt_bias, float* __restrict__ g,
++    float* __restrict__ beta) {
++    constexpr int kInput = 2048;
++    constexpr int kHeads = 16;
++    constexpr int kBlock = 256;
++    const int head = static_cast<int>(blockIdx.x);
++    const int token = static_cast<int>(blockIdx.y);
++    const int thread = static_cast<int>(threadIdx.x);
++    __shared__ float a_sums[kBlock];
++    __shared__ float b_sums[kBlock];
++    float sum_a = 0.0f;
++    float sum_b = 0.0f;
++    for (int k = thread; k < kInput; k += kBlock) {
++        const float activation = __bfloat162float(x[token * kInput + k]);
++        sum_a = fmaf(activation, __bfloat162float(a[head * kInput + k]), sum_a);
++        sum_b = fmaf(activation, __bfloat162float(b[head * kInput + k]), sum_b);
++    }
++    a_sums[thread] = sum_a;
++    b_sums[thread] = sum_b;
++    __syncthreads();
++    for (int stride = kBlock / 2; stride > 0; stride >>= 1) {
++        if (thread < stride) {
++            a_sums[thread] += a_sums[thread + stride];
++            b_sums[thread] += b_sums[thread + stride];
++        }
++        __syncthreads();
++    }
++    if (thread == 0) {
++        const int dst = token * kHeads + head;
++        g[dst] = -expf(A_log[head]) * softplus(a_sums[0] + dt_bias[head]);
++        beta[dst] = sigmoid(b_sums[0]);
++    }
++}
++
+ template <int TokenTile, int KSlice, int RowsPerBlock>
+ __global__ void bf16_gdn_gating_proj_small_t_partial_kernel(
+     const __nv_bfloat16* __restrict__ x, const __nv_bfloat16* __restrict__ a_weight,
+@@ -441,6 +480,24 @@ void bf16_gdn_gating_proj_gemv_launch(const Tensor& x, const Weight& a_weight,
+     CUDA_CHECK(cudaGetLastError());
+ }
+ 
++void bf16_gdn_gating_proj_2b_launch(const Tensor& x, const Weight& a_weight,
++                                    const Weight& b_weight, const Tensor& A_log,
++                                    const Tensor& dt_bias, Tensor& g, Tensor& beta,
++                                    cudaStream_t stream) {
++    if (a_weight.n != 16 || a_weight.k != 2048 || b_weight.n != 16 ||
++        b_weight.k != 2048 || x.ne[0] != 2048 || g.ne[0] != 16 ||
++        beta.ne[0] != 16 || x.ne[1] <= 0 || x.ne[1] > 65'535) {
++        throw std::invalid_argument("gdn_gating_proj: invalid Bonsai2B projection shape");
++    }
++    bf16_gdn_gating_proj_2b_kernel<<<dim3(16, static_cast<unsigned>(x.ne[1])), 256, 0, stream>>>(
++        static_cast<const __nv_bfloat16*>(x.data),
++        static_cast<const __nv_bfloat16*>(a_weight.qdata),
++        static_cast<const __nv_bfloat16*>(b_weight.qdata),
++        static_cast<const float*>(A_log.data), static_cast<const float*>(dt_bias.data),
++        static_cast<float*>(g.data), static_cast<float*>(beta.data));
++    CUDA_CHECK(cudaGetLastError());
++}
++
+ void bf16_gdn_gating_proj_small_t_split10_launch(const Tensor& x, const Weight& a_weight,
+                                                  const Weight& b_weight, const Tensor& A_log,
+                                                  const Tensor& dt_bias, void* workspace,
+diff --git a/src/ops/gdn_gating_proj/bf16/bf16_gdn_gating_proj_kernels.h b/src/ops/gdn_gating_proj/bf16/bf16_gdn_gating_proj_kernels.h
+index 73d57fd..642746a 100644
+--- a/src/ops/gdn_gating_proj/bf16/bf16_gdn_gating_proj_kernels.h
++++ b/src/ops/gdn_gating_proj/bf16/bf16_gdn_gating_proj_kernels.h
+@@ -10,6 +10,11 @@
+ 
+ namespace ninfer::ops::detail {
+ 
++void bf16_gdn_gating_proj_2b_launch(const Tensor& x, const Weight& a_weight,
++                                    const Weight& b_weight, const Tensor& A_log,
++                                    const Tensor& dt_bias, Tensor& g, Tensor& beta,
++                                    cudaStream_t stream);
++
+ void bf16_gdn_norm_gating_proj_27_launch(const Tensor& x, const Tensor& norm_weight, float eps,
+                                          Tensor& h, const Weight& a_weight, const Weight& b_weight,
+                                          const Tensor& alog, const Tensor& bias, Tensor& g,
+diff --git a/src/ops/gdn_gating_proj/bf16/bf16_gdn_gating_proj_plan.cpp b/src/ops/gdn_gating_proj/bf16/bf16_gdn_gating_proj_plan.cpp
+index da18255..047af19 100644
+--- a/src/ops/gdn_gating_proj/bf16/bf16_gdn_gating_proj_plan.cpp
++++ b/src/ops/gdn_gating_proj/bf16/bf16_gdn_gating_proj_plan.cpp
+@@ -188,6 +188,10 @@ bool is_35(const Bf16GdnGatingProblem& problem) noexcept {
+     return problem.heads == 32 && problem.input_rows == 2048;
+ }
+ 
++bool is_2b(const Bf16GdnGatingProblem& problem) noexcept {
++    return problem.heads == 16 && problem.input_rows == 2048;
++}
++
+ bool schedule_uses_mma(Bf16GdnGatingScheduleId schedule) noexcept {
+     switch (schedule) {
+     case Bf16GdnGatingScheduleId::MmaCooperativeSplit32:
+@@ -197,6 +201,7 @@ bool schedule_uses_mma(Bf16GdnGatingScheduleId schedule) noexcept {
+     case Bf16GdnGatingScheduleId::MmaCooperativeSplit2:
+     case Bf16GdnGatingScheduleId::MmaUnsplit:
+         return true;
++    case Bf16GdnGatingScheduleId::Bonsai2bSimt:
+     case Bf16GdnGatingScheduleId::GemvPairedRows:
+     case Bf16GdnGatingScheduleId::SmallTSplit10:
+     case Bf16GdnGatingScheduleId::SimtWarpRowC4:
+@@ -224,6 +229,7 @@ std::int32_t schedule_split_k(Bf16GdnGatingScheduleId schedule) {
+         return 4;
+     case Bf16GdnGatingScheduleId::MmaCooperativeSplit2:
+         return 2;
++    case Bf16GdnGatingScheduleId::Bonsai2bSimt:
+     case Bf16GdnGatingScheduleId::GemvPairedRows:
+     case Bf16GdnGatingScheduleId::SimtWarpRowC4:
+     case Bf16GdnGatingScheduleId::SimtWarpRowC8:
+@@ -265,6 +271,9 @@ bool cooperative_35_grid_is_resident(Bf16GdnGatingScheduleId schedule, std::int3
+ bool candidate_is_legal(Bf16GdnGatingScheduleId schedule, const Bf16GdnGatingProblem& problem,
+                         std::int32_t sm_count) noexcept {
+     if (!bf16_gdn_gating_admits(problem)) { return false; }
++    if (is_2b(problem)) {
++        return schedule == Bf16GdnGatingScheduleId::Bonsai2bSimt && problem.cols <= 65'535;
++    }
+     if (is_27(problem)) {
+         switch (schedule) {
+         case Bf16GdnGatingScheduleId::GemvPairedRows:
+@@ -277,6 +286,7 @@ bool candidate_is_legal(Bf16GdnGatingScheduleId schedule, const Bf16GdnGatingPro
+             return cooperative_27_grid_is_resident(schedule, problem.cols, sm_count);
+         case Bf16GdnGatingScheduleId::MmaUnsplit:
+             return true;
++        case Bf16GdnGatingScheduleId::Bonsai2bSimt:
+         case Bf16GdnGatingScheduleId::SimtWarpRowC4:
+         case Bf16GdnGatingScheduleId::SimtWarpRowC8:
+         case Bf16GdnGatingScheduleId::MmaCooperativeSplit32:
+@@ -298,6 +308,7 @@ bool candidate_is_legal(Bf16GdnGatingScheduleId schedule, const Bf16GdnGatingPro
+     case Bf16GdnGatingScheduleId::MmaCooperativeSplit4:
+     case Bf16GdnGatingScheduleId::MmaCooperativeSplit2:
+         return cooperative_35_grid_is_resident(schedule, problem.cols, sm_count);
++    case Bf16GdnGatingScheduleId::Bonsai2bSimt:
+     case Bf16GdnGatingScheduleId::GemvPairedRows:
+     case Bf16GdnGatingScheduleId::SmallTSplit10:
+         return false;
+@@ -345,6 +356,10 @@ void execute_resolved(const Bf16GdnGatingPlan& plan, const Bf16GdnGatingProblem&
+     };
+ 
+     switch (plan.schedule) {
++    case Bf16GdnGatingScheduleId::Bonsai2bSimt:
++        bf16_gdn_gating_proj_2b_launch(x, a_weight, b_weight, A_log, dt_bias, g, beta,
++                                       execution.stream);
++        return;
+     case Bf16GdnGatingScheduleId::GemvPairedRows:
+         bf16_gdn_gating_proj_gemv_launch(x, a_weight, b_weight, A_log, dt_bias, g, beta,
+                                          execution.stream);
+@@ -430,6 +445,8 @@ std::size_t plan_capacity(const Bf16GdnGatingProblem& base, std::int32_t min_col
+ 
+ const char* bf16_gdn_gating_schedule_name(Bf16GdnGatingScheduleId schedule) noexcept {
+     switch (schedule) {
++    case Bf16GdnGatingScheduleId::Bonsai2bSimt:
++        return "gdn_gating_proj.bf16.bonsai2b.simt";
+     case Bf16GdnGatingScheduleId::GemvPairedRows:
+         return "gdn_gating_proj.bf16.gemv.paired_rows";
+     case Bf16GdnGatingScheduleId::SmallTSplit10:
+@@ -468,7 +485,7 @@ const char* bf16_gdn_norm_gating_schedule_name(Bf16GdnNormGatingScheduleId sched
+ 
+ bool bf16_gdn_gating_admits(const Bf16GdnGatingProblem& problem) noexcept {
+     if (problem.cols < 1) { return false; }
+-    return is_27(problem) || is_35(problem);
++    return is_27(problem) || is_35(problem) || is_2b(problem);
+ }
+ 
+ Bf16GdnGatingPlan bf16_gdn_gating_resolve_candidate(Bf16GdnGatingScheduleId schedule,
+@@ -525,6 +542,10 @@ Bf16GdnGatingPlan bf16_gdn_gating_resolve_plan(const Bf16GdnGatingProblem& probl
+         throw std::invalid_argument(
+             "BF16 GDN gating: exact problem or column count is not admitted");
+     }
++    if (is_2b(problem)) {
++        return bf16_gdn_gating_resolve_candidate(Bf16GdnGatingScheduleId::Bonsai2bSimt,
++                                                 problem, sm_count);
++    }
+     return is_27(problem) ? resolve_from_routes(k27Routes, problem, sm_count)
+                           : resolve_from_routes(k35Routes, problem, sm_count);
+ }
+diff --git a/src/ops/gdn_gating_proj/bf16/bf16_gdn_gating_proj_plan.h b/src/ops/gdn_gating_proj/bf16/bf16_gdn_gating_proj_plan.h
+index 1f4c528..f2ffd20 100644
+--- a/src/ops/gdn_gating_proj/bf16/bf16_gdn_gating_proj_plan.h
++++ b/src/ops/gdn_gating_proj/bf16/bf16_gdn_gating_proj_plan.h
+@@ -14,6 +14,7 @@
+ namespace ninfer::ops::detail {
+ 
+ enum class Bf16GdnGatingScheduleId {
++    Bonsai2bSimt,
+     GemvPairedRows,
+     SmallTSplit10,
+     SimtWarpRowC4,
+diff --git a/src/ops/gdn_input_proj/gdn_projected_conv.cu b/src/ops/gdn_input_proj/gdn_projected_conv.cu
+index d2fab2d..a41be4f 100644
+--- a/src/ops/gdn_input_proj/gdn_projected_conv.cu
++++ b/src/ops/gdn_input_proj/gdn_projected_conv.cu
+@@ -126,6 +126,12 @@ void dispatch(const Tensor& projected, const Tensor& conv_weight, const Tensor&
+                                        initial_state_slots, query, key, value, publish, stream);
+         return;
+     }
++    if (projected.ne[0] == 6144 && query.ne[0] == 2048 && key.ne[0] == 2048 &&
++        value.ne[0] == 2048) {
++        launch<6144, 2048, 2048, 2048>(projected, conv_weight, state_read, valid_columns,
++                                       initial_state_slots, query, key, value, publish, stream);
++        return;
++    }
+     throw std::invalid_argument("GDN projected-conv received an unregistered geometry");
+ }
+ 
+diff --git a/src/ops/linear/t2/t2_dispatch.cpp b/src/ops/linear/t2/t2_dispatch.cpp
+index b358260..af4e89b 100644
+--- a/src/ops/linear/t2/t2_dispatch.cpp
++++ b/src/ops/linear/t2/t2_dispatch.cpp
+@@ -31,6 +31,23 @@ T2Launch select_t2_a16_launch(std::int32_t n, std::int32_t k, std::int32_t t) {
+     };
+ 
+     switch (k) {
++    case 2048:
++        // Bonsai 2 2B: Q/K/V/Z projections, fused gate/up, output
++        // projections, and its full vocabulary head all use T2 rowsplit
++        // weights in a 2048-wide hidden space. The tensor-core kernels below
++        // are shape-parameterized; unlike the optional SIMT GEMV, they do not
++        // bake in the 27B input width.
++        switch (n) {
++        case 512:
++        case 2048:
++        case 4096:
++        case 12288:
++        case 248320:
++            return small_t();
++        default:
++            break;
++        }
++        break;
+     case 5120:
+         switch (n) {
+         case 1024:
+@@ -52,6 +69,7 @@ T2Launch select_t2_a16_launch(std::int32_t n, std::int32_t k, std::int32_t t) {
+         }
+         break;
+     case 6144:
++        if (n == 2048) { return small_t(); } // Bonsai 2 2B MLP down
+         if (n == 5120) {
+             if (t == 1 && decode_simt) { return launch_t2_gemv_r8_w1_k6144; }
+             return small_t();
+diff --git a/src/ops/weight_input.cpp b/src/ops/weight_input.cpp
+index 2c3fe53..7a762dc 100644
+--- a/src/ops/weight_input.cpp
++++ b/src/ops/weight_input.cpp
+@@ -181,7 +181,14 @@ ProjectionWeights input_projection(std::span<const WeightInput, 4> inputs, bool
+                         k == std::vector<std::uint64_t>{512, 2048} && third == q && fourth == k
+                   : q == std::vector<std::uint64_t>{2048, 2048} && k == q &&
+                         third == std::vector<std::uint64_t>{4096, 2048} && fourth == third;
+-    require(dense || moe, "input projection: unsupported logical projection geometry");
++    // Bonsai 2 2B uses the same T2 row-split physical parents but a narrower
++    // GDN value width than Qwen's 2048-hidden MoE profile.
++    const bool bonsai2b =
++        attention ? q == std::vector<std::uint64_t>{2048, 2048} &&
++                        k == std::vector<std::uint64_t>{512, 2048} && third == q && fourth == k
++                  : q == std::vector<std::uint64_t>{2048, 2048} && k == q &&
++                        third == q && fourth == q;
++    require(dense || moe || bonsai2b, "input projection: unsupported logical projection geometry");
+     if (std::any_of(inputs.begin(), inputs.end(), gguf_parent)) {
+         require(dense, "input projection: GGUF parts need the dense geometry");
+         const auto q = static_cast<std::int32_t>(matrix(inputs[0])[0]);
+@@ -206,7 +213,7 @@ ProjectionWeights input_projection(std::span<const WeightInput, 4> inputs, bool
+         require(supported, "input projection: unsupported single-parent format");
+         return result;
+     }
+-    require(dense, "input projection: unsupported multi-parent geometry");
++    require(dense || bonsai2b, "input projection: unsupported multi-parent geometry");
+     const auto first  = single(inputs.first<2>());
+     const auto second = single(inputs.last<2>());
+     const bool q4_q5 =
+@@ -262,7 +269,8 @@ ProjectionWeights prepare_gdn_input_proj_weights(const WeightInput& query, const
+ ProjectionWeights prepare_gdn_gating_proj_weights(const WeightInput& a, const WeightInput& b) {
+     const auto& shape = matrix(a);
+     require(shape == matrix(b) && (shape == std::vector<std::uint64_t>{48, 5120} ||
+-                                   shape == std::vector<std::uint64_t>{32, 2048}),
++                                   shape == std::vector<std::uint64_t>{32, 2048} ||
++                                   shape == std::vector<std::uint64_t>{16, 2048}),
+             "GDN control: unsupported A/B geometry");
+     const std::array inputs{a, b};
+     if (contiguous(concatenate_rows(inputs))) {
+@@ -270,7 +278,8 @@ ProjectionWeights prepare_gdn_gating_proj_weights(const WeightInput& a, const We
+         require(result.weight.qtype == QType::BF16, "GDN control requires BF16 weights");
+         return result;
+     }
+-    require(shape[0] == 48, "GDN control: this geometry requires a combined parent");
++    require(shape[0] == 48 || shape[0] == 16,
++            "GDN control: this geometry requires a combined parent");
+     const auto first  = prepare_linear_weight(a);
+     const auto second = prepare_linear_weight(b);
+     require(first.weight.qtype == QType::BF16 && second.weight.qtype == QType::BF16,
+diff --git a/src/ops/wrapper/attn_input_proj.cpp b/src/ops/wrapper/attn_input_proj.cpp
+index 4be9fc1..ddc4d8b 100644
+--- a/src/ops/wrapper/attn_input_proj.cpp
++++ b/src/ops/wrapper/attn_input_proj.cpp
+@@ -47,7 +47,8 @@ void require_matrix(const Tensor& tensor, std::int32_t rows, std::int32_t cols,
+     }
+ }
+ 
+-void require_rowsplit(const Weight& weight, QType qtype, std::int32_t rows, const char* label) {
++void require_rowsplit(const Weight& weight, QType qtype, std::int32_t rows, const char* label,
++                      std::int32_t hidden = 5120) {
+     const bool no_high   = weight.qhigh == nullptr && weight.high_plane_bytes == 0;
+     const bool q4_planes = qtype != QType::Q4_G64_FP16 || no_high;
+     const bool t2_planes = qtype != QType::T2_G128_FP16 || no_high;
+@@ -58,9 +59,9 @@ void require_rowsplit(const Weight& weight, QType qtype, std::int32_t rows, cons
+     if (weight.qtype != qtype || !is_row_split(weight.layout) ||
+         weight.scale_dtype != DType::FP16 ||
+         weight.group_size != static_cast<std::uint32_t>(group) || weight.group != group ||
+-        !t2_planes || weight.ndim != 2 || weight.n != rows || weight.k != 5120 ||
+-        weight.shape[0] != rows || weight.shape[1] != 5120 || weight.padded_shape[0] != rows ||
+-        weight.padded_shape[1] != 5120 || !q4_planes || !q5_planes ||
++        !t2_planes || weight.ndim != 2 || weight.n != rows || weight.k != hidden ||
++        weight.shape[0] != rows || weight.shape[1] != hidden || weight.padded_shape[0] != rows ||
++        weight.padded_shape[1] != hidden || !q4_planes || !q5_planes ||
+         !aligned_to(weight.qdata, 16) || !aligned_to(weight.scales, 4) ||
+         (qtype == QType::Q5_G64_FP16 && !aligned_to(weight.qhigh, 16))) {
+         throw std::invalid_argument(std::string("attn_input_proj: invalid ") + label);
+@@ -341,16 +342,21 @@ bool t2_pair_project(const Tensor& x, const Weight& query_key_weight,
+         throw std::invalid_argument("attn_input_proj: the two parents must share the T2 format");
+     }
+     if (!qk) { return false; }
+-    constexpr std::int32_t kQRows  = 6144;
+-    constexpr std::int32_t kKvRows = 1024;
++    const bool bonsai2b = x.ne[0] == 2048 && query_key_weight.n == 2560 &&
++                          gate_value_weight.n == 2560;
++    const std::int32_t kHidden = bonsai2b ? 2048 : 5120;
++    const std::int32_t kQRows  = bonsai2b ? 2048 : 6144;
++    const std::int32_t kKvRows = bonsai2b ? 512 : 1024;
+     const std::int32_t cols        = x.ne[1];
+-    require_matrix(x, 5120, cols, "x");
++    require_matrix(x, kHidden, cols, "x");
+     require_matrix(q, kQRows, cols, "q");
+     require_matrix(gate, kQRows, cols, "gate");
+     require_matrix(k, kKvRows, cols, "k");
+     require_matrix(v, kKvRows, cols, "v");
+-    require_rowsplit(query_key_weight, QType::T2_G128_FP16, kQRows + kKvRows, "query/key weight");
+-    require_rowsplit(gate_value_weight, QType::T2_G128_FP16, kQRows + kKvRows, "gate/value weight");
++    require_rowsplit(query_key_weight, QType::T2_G128_FP16, kQRows + kKvRows,
++                     "query/key weight", kHidden);
++    require_rowsplit(gate_value_weight, QType::T2_G128_FP16, kQRows + kKvRows,
++                     "gate/value weight", kHidden);
+     if (workspace != nullptr && detail::sm70::covers(query_key_weight, cols) &&
+         detail::sm70::covers(gate_value_weight, cols)) {
+         sm70_split(x, query_key_weight, {&q, &k}, &gate_value_weight, {&gate, &v}, policy,
+@@ -433,12 +439,15 @@ std::size_t split_route_bytes(QType query_key_qtype, std::int32_t query_key_rows
+                               std::int32_t input_rows, LinearPolicy policy, std::int32_t min_tokens,
+                               std::int32_t max_tokens) {
+     if (query_key_qtype == QType::T2_G128_FP16 || gate_value_qtype == QType::T2_G128_FP16) {
+-        if (query_key_qtype != gate_value_qtype || query_key_rows != 7168 ||
+-            gate_value_rows != 7168 || input_rows != 5120) {
++        const bool profile27 = query_key_rows == 7168 && gate_value_rows == 7168 &&
++                               input_rows == 5120;
++        const bool profile2b = query_key_rows == 2560 && gate_value_rows == 2560 &&
++                               input_rows == 2048;
++        if (query_key_qtype != gate_value_qtype || (!profile27 && !profile2b)) {
+             throw std::invalid_argument("attn_input_proj workspace: unregistered T2 pair");
+         }
+         std::size_t bytes = 0;
+-        for (const std::int32_t rows : {6144, 1024}) {
++        for (const std::int32_t rows : {profile2b ? 2048 : 6144, profile2b ? 512 : 1024}) {
+             bytes = std::max(bytes,
+                              linear_workspace_capacity_bytes(QType::T2_G128_FP16, rows, input_rows,
+                                                              policy, min_tokens, max_tokens));
+diff --git a/src/ops/wrapper/gdn_gating_proj.cpp b/src/ops/wrapper/gdn_gating_proj.cpp
+index 4b8900d..6ad1f3b 100644
+--- a/src/ops/wrapper/gdn_gating_proj.cpp
++++ b/src/ops/wrapper/gdn_gating_proj.cpp
+@@ -57,6 +57,10 @@ GdnControlParentGeometry require_bf16_parent(const Weight& parent) {
+         require_bf16_weight(parent, 64, 2048, "ab_weight");
+         return {.input_rows = 2048, .heads = 32};
+     }
++    if (parent.n == 32 && parent.k == 2048) {
++        require_bf16_weight(parent, 32, 2048, "ab_weight");
++        return {.input_rows = 2048, .heads = 16};
++    }
+     throw std::invalid_argument("gdn_gating_proj: unsupported ab_weight geometry");
+ }
+ 
+diff --git a/src/ops/wrapper/gdn_input_proj.cpp b/src/ops/wrapper/gdn_input_proj.cpp
+index 6c92fad..1e63f13 100644
+--- a/src/ops/wrapper/gdn_input_proj.cpp
++++ b/src/ops/wrapper/gdn_input_proj.cpp
+@@ -867,12 +867,17 @@ void t2_two_parent_project(const Tensor& x, const Weight& qk_weight, const Weigh
+                            Tensor& qkv, Tensor& z, LinearPolicy policy, WorkspaceArena& workspace,
+                            cudaStream_t stream) {
+     constexpr std::int32_t kQkRows    = 4096;
+-    constexpr std::int32_t kValueRows = 6144;
+-    constexpr std::int32_t kZRows     = 6144;
+-    constexpr std::int32_t kQkvRows   = kQkRows + kValueRows;
++    // 27B: x=5120, value/z=6144 each. Bonsai 2B: x=2048, value/z=2048.
++    // These are distinct registered layouts; do not infer arbitrary tensor sizes.
++    const bool bonsai2b = x.ne[0] == 2048 && qk_weight.n == kQkRows &&
++                          value_z_weight.n == 4096;
++    const std::int32_t kHidden = bonsai2b ? 2048 : 5120;
++    const std::int32_t kValueRows = bonsai2b ? 2048 : 6144;
++    const std::int32_t kZRows = kValueRows;
++    const std::int32_t kQkvRows = kQkRows + kValueRows;
+     constexpr std::size_t kBytes      = 2;
+     const std::int32_t cols           = x.ne[1];
+-    require_matrix(x, 5120, cols, "x");
++    require_matrix(x, kHidden, cols, "x");
+     require_matrix(qkv, kQkvRows, cols, "qkv");
+     require_matrix(z, kZRows, cols, "z");
+     require_rowsplit(qk_weight, QType::T2_G128_FP16, kQkRows, "qk weight");
+@@ -910,19 +915,21 @@ void t2_two_parent_project(const Tensor& x, const Weight& qk_weight, const Weigh
+ // integer route's activation planes where it takes the width, otherwise the q/k and value planes of
+ // the A16 route (whose T2 linears take no workspace).
+ std::size_t t2_two_parent_projection_bytes(std::int32_t min_columns, std::int32_t max_columns,
+-                                           LinearPolicy policy = LinearPolicy::A16Only) {
++                                           LinearPolicy policy = LinearPolicy::A16Only,
++                                           std::int32_t input_rows = 5120,
++                                           std::int32_t value_rows = 6144) {
+     // sm_70 projects both parents through its own routes at every width.
+     if (detail::sm70::enabled()) {
+-        return sm70_projection_bytes(QType::T2_G128_FP16, QType::T2_G128_FP16, 12288, 5120,
++        return sm70_projection_bytes(QType::T2_G128_FP16, QType::T2_G128_FP16, 2 * value_rows, input_rows,
+                                      min_columns, max_columns, policy);
+     }
+     std::size_t bytes = 0;
+     for (std::int32_t columns = min_columns; columns <= max_columns; ++columns) {
+         WorkspaceLayoutBuilder layout;
+         if (!detail::t2_a8_admits(policy) ||
+-            !detail::t2_a8_layout_activations(layout, 5120, columns)) {
++            !detail::t2_a8_layout_activations(layout, input_rows, columns)) {
+             (void)layout.alloc(DType::BF16, {4096, columns});
+-            (void)layout.alloc(DType::BF16, {6144, columns});
++            (void)layout.alloc(DType::BF16, {value_rows, columns});
+         }
+         bytes = std::max(bytes, layout.peak_bytes(1));
+     }
+@@ -982,11 +989,13 @@ std::size_t gdn_input_proj_split_workspace_capacity_bytes(
+         throw std::invalid_argument("gdn_input_proj workspace: invalid token interval");
+     }
+     if (qk_qtype == QType::T2_G128_FP16 || value_z_qtype == QType::T2_G128_FP16) {
+-        if (qk_qtype != value_z_qtype || qk_rows != 4096 || value_z_rows != 12288 ||
+-            input_rows != 5120) {
++        const bool profile27 = qk_rows == 4096 && value_z_rows == 12288 && input_rows == 5120;
++        const bool profile2b = qk_rows == 4096 && value_z_rows == 4096 && input_rows == 2048;
++        if (qk_qtype != value_z_qtype || (!profile27 && !profile2b)) {
+             throw std::invalid_argument("gdn_input_proj workspace: unregistered T2 pair");
+         }
+-        return t2_two_parent_projection_bytes(min_tokens, max_tokens, policy);
++        return t2_two_parent_projection_bytes(min_tokens, max_tokens, policy, input_rows,
++                                               value_z_rows / 2);
+     }
+     const bool registered = qk_qtype == QType::Q4_G64_FP16 && qk_rows == 4096 &&
+                             value_z_qtype == QType::Q5_G64_FP16 && value_z_rows == 12288 &&
+@@ -1290,15 +1299,17 @@ void gdn_input_proj_conv_snapshot(const Tensor& x, const Weight& qk_weight,
+                                   Tensor& value, Tensor& z, LinearPolicy policy, WorkspaceArena& ws,
+                                   cudaStream_t stream) {
+     validate_policy(policy);
+-    constexpr std::int32_t kHidden     = 5120;
++    const bool ternary                 = t2_two_parent(qk_weight, value_z_weight);
++    const bool bonsai2b               = ternary && x.ne[0] == 2048 && qk_weight.n == 4096 &&
++                                        value_z_weight.n == 4096;
++    const std::int32_t kHidden        = bonsai2b ? 2048 : 5120;
+     constexpr std::int32_t kQueryRows  = 2048;
+     constexpr std::int32_t kKeyRows    = 2048;
+-    constexpr std::int32_t kValueRows  = 6144;
+-    constexpr std::int32_t kZRows      = 6144;
+-    constexpr std::int32_t kChannels   = kQueryRows + kKeyRows + kValueRows;
+-    constexpr std::int32_t kParentRows = kValueRows + kZRows;
++    const std::int32_t kValueRows     = bonsai2b ? 2048 : 6144;
++    const std::int32_t kZRows        = kValueRows;
++    const std::int32_t kChannels     = kQueryRows + kKeyRows + kValueRows;
++    const std::int32_t kParentRows   = kValueRows + kZRows;
+     const ConvGeometry geometry        = require_snapshot_input(x, kHidden);
+-    const bool ternary                 = t2_two_parent(qk_weight, value_z_weight);
+     require_rowsplit(qk_weight, ternary ? QType::T2_G128_FP16 : QType::Q4_G64_FP16,
+                      kQueryRows + kKeyRows, "qk weight");
+     require_rowsplit(value_z_weight, ternary ? QType::T2_G128_FP16 : QType::Q5_G64_FP16,
+@@ -1363,15 +1374,17 @@ void gdn_input_proj_conv_record(const Tensor& x, const Weight& qk_weight,
+                                 LinearPolicy policy, WorkspaceArena& workspace,
+                                 cudaStream_t stream) {
+     validate_policy(policy);
+-    constexpr std::int32_t kHidden     = 5120;
++    const bool ternary                 = t2_two_parent(qk_weight, value_z_weight);
++    const bool bonsai2b               = ternary && x.ne[0] == 2048 && qk_weight.n == 4096 &&
++                                        value_z_weight.n == 4096;
++    const std::int32_t kHidden        = bonsai2b ? 2048 : 5120;
+     constexpr std::int32_t kQueryRows  = 2048;
+     constexpr std::int32_t kKeyRows    = 2048;
+-    constexpr std::int32_t kValueRows  = 6144;
+-    constexpr std::int32_t kZRows      = 6144;
+-    constexpr std::int32_t kChannels   = kQueryRows + kKeyRows + kValueRows;
+-    constexpr std::int32_t kParentRows = kValueRows + kZRows;
++    const std::int32_t kValueRows     = bonsai2b ? 2048 : 6144;
++    const std::int32_t kZRows        = kValueRows;
++    const std::int32_t kChannels     = kQueryRows + kKeyRows + kValueRows;
++    const std::int32_t kParentRows   = kValueRows + kZRows;
+     const ConvGeometry geometry        = require_record_input(x, kHidden);
+-    const bool ternary                 = t2_two_parent(qk_weight, value_z_weight);
+     require_rowsplit(qk_weight, ternary ? QType::T2_G128_FP16 : QType::Q4_G64_FP16,
+                      kQueryRows + kKeyRows, "qk weight");
+     require_rowsplit(value_z_weight, ternary ? QType::T2_G128_FP16 : QType::Q5_G64_FP16,
+diff --git a/tests/ops/linear/test_t2_a16.cpp b/tests/ops/linear/test_t2_a16.cpp
+index 606df43..c050418 100644
+--- a/tests/ops/linear/test_t2_a16.cpp
++++ b/tests/ops/linear/test_t2_a16.cpp
+@@ -38,6 +38,23 @@ int t2_a16_conformance() {
+     failures += run_shape("T2_A16", ActivationCompute::A16, make_t2_g128_fp16_weight,
+                           {248320, 5120, 213U, Comparison::SampledRows, false, kDecode});
+ 
++    // Bonsai 2 2B actual v3 dimensions, including both a fused source parent
++    // and the per-row input width of its down projection. Exercise decode,
++    // 16-token small prefill, and the 33-column MMA transition.
++    constexpr std::array kSmall{a16(1), a16(16), a16(33)};
++    failures += run_shape("T2_A16_Bonsai2B", ActivationCompute::A16,
++                          make_t2_g128_fp16_weight,
++                          {2048, 2048, 215U, Comparison::Full, false, kSmall});
++    failures += run_shape("T2_A16_Bonsai2B", ActivationCompute::A16,
++                          make_t2_g128_fp16_weight,
++                          {4096, 2048, 217U, Comparison::SampledRows, false, kSmall});
++    failures += run_shape("T2_A16_Bonsai2B", ActivationCompute::A16,
++                          make_t2_g128_fp16_weight,
++                          {12288, 2048, 219U, Comparison::SampledRows, false, kSmall});
++    failures += run_shape("T2_A16_Bonsai2B", ActivationCompute::A16,
++                          make_t2_g128_fp16_weight,
++                          {2048, 6144, 221U, Comparison::Full, false, kSmall});
++
+     return failures;
+ }
+ 
+diff --git a/tests/ops/test_attn_input_proj.cpp b/tests/ops/test_attn_input_proj.cpp
+index 13e9eb7..e117b01 100644
+--- a/tests/ops/test_attn_input_proj.cpp
++++ b/tests/ops/test_attn_input_proj.cpp
+@@ -192,9 +192,12 @@ int run_q4_q5() {
+ 
+ // The ternary pair through the policy form: the integer routes (one quantisation, each parent split
+ // into its two destinations), the small-T kernel up to 192 tokens and the padded GEMM above it.
+-int run_t2_case(DevicePackedWeight& query_key, DevicePackedWeight& gate_value, int tokens) {
+-    constexpr int hidden = 5120, qrows = 6144, kvrows = 1024;
+-    constexpr ops::LinearPolicy policy = ops::LinearPolicy::AllowA8Int;
++int run_t2_case(DevicePackedWeight& query_key, DevicePackedWeight& gate_value, int tokens,
++                bool bonsai2b = false,
++                ops::LinearPolicy policy = ops::LinearPolicy::AllowA8Int) {
++    const int hidden = bonsai2b ? 2048 : 5120;
++    const int qrows = bonsai2b ? 2048 : 6144;
++    const int kvrows = bonsai2b ? 512 : 1024;
+     const auto activation              = make_bf16_activation(hidden, tokens, 131U + tokens);
+     const auto activation_bits         = bf16_bits(activation);
+     DeviceBuffer input                 = to_device(activation_bits);
+@@ -203,7 +206,8 @@ int run_t2_case(DevicePackedWeight& query_key, DevicePackedWeight& gate_value, i
+     Tensor x(input.p, DType::BF16, {hidden, tokens}), q = query.tensor(), g = gate.tensor(),
+                                                       k = key.tensor(), v = value.tensor();
+     const auto capacity = ops::attn_input_proj_split_workspace_capacity_bytes(
+-        QType::T2_G128_FP16, 7168, QType::T2_G128_FP16, 7168, hidden, policy, tokens, tokens);
++        QType::T2_G128_FP16, qrows + kvrows, QType::T2_G128_FP16, qrows + kvrows, hidden,
++        policy, tokens, tokens);
+     GuardedDeviceBuffer scratch(std::max<std::size_t>(capacity, 1));
+     DeviceArena workspace(DeviceSpan{scratch.data(), std::max<std::size_t>(capacity, 1)});
+     DeviceContext device;
+@@ -214,7 +218,8 @@ int run_t2_case(DevicePackedWeight& query_key, DevicePackedWeight& gate_value, i
+     ops::attn_input_proj(x, query_key.view(), gate_value.view(), q, g, k, v, policy, workspace,
+                          device.stream);
+     cuda_synchronize(device.stream);
+-    const std::string suffix = " T2 allow-a8-int T=" + std::to_string(tokens);
++    const std::string suffix = std::string(bonsai2b ? " Bonsai2B" : " 27B") +
++                               " T2 T=" + std::to_string(tokens);
+     int failures = verify_output("attn q" + suffix, query, query_key.host, 0, qrows, activation,
+                                  hidden, tokens, kAttnInputProjA8Tolerance, 31);
+     failures += verify_output("attn k" + suffix, key, query_key.host, qrows, kvrows, activation,
+@@ -248,6 +253,21 @@ int run_t2() {
+     return failures;
+ }
+ 
++int run_t2_bonsai2b() {
++    constexpr std::int32_t kHidden = 2048;
++    constexpr std::int32_t kParent = 2560;
++    DevicePackedWeight query_key(
++        quantized_weight::make_patterned_weight(QType::T2_G128_FP16, kParent, kHidden, 163U));
++    DevicePackedWeight gate_value(
++        quantized_weight::make_patterned_weight(QType::T2_G128_FP16, kParent, kHidden, 167U));
++    int failures = 0;
++    for (int tokens : {1, 16, 33}) {
++        failures += run_t2_case(query_key, gate_value, tokens, true,
++                                ops::LinearPolicy::A16Only);
++    }
++    return failures;
++}
++
+ std::vector<double> bf16_attention_oracle(const HostWeight& weight,
+                                           std::span<const float> activation) {
+     std::vector<double> result(static_cast<std::size_t>(weight.n));
+@@ -728,8 +748,9 @@ int run_weight_inputs() {
+ int main(int argc, char** argv) {
+     const bool dflash2_only = argc == 2 && std::string(argv[1]) == "--dflash2-only";
+     const bool inputs_only  = argc == 2 && std::string(argv[1]) == "--weight-inputs-only";
+-    if (argc != 1 && !dflash2_only && !inputs_only) {
+-        std::cerr << "usage: ninfer_attn_input_proj_test [--dflash2-only|--weight-inputs-only]\n";
++    const bool bonsai2b_only = argc == 2 && std::string(argv[1]) == "--bonsai2b";
++    if (argc != 1 && !dflash2_only && !inputs_only && !bonsai2b_only) {
++        std::cerr << "usage: ninfer_attn_input_proj_test [--dflash2-only|--weight-inputs-only|--bonsai2b]\n";
+         return 2;
+     }
+     if (cuda_unavailable()) {
+@@ -738,6 +759,11 @@ int main(int argc, char** argv) {
+     }
+ 
+     int failures = 0;
++    if (bonsai2b_only) {
++        failures = run_t2_bonsai2b();
++        std::cout << (failures == 0 ? "OK" : "FAIL") << " attn_input_proj Bonsai2B\n";
++        return failures == 0 ? 0 : 1;
++    }
+     if (inputs_only) { return run_weight_inputs() == 0 ? 0 : 1; }
+     if (!dflash2_only) {
+         failures += run_q4_q5();
+diff --git a/tests/ops/test_gdn_gating_proj.cpp b/tests/ops/test_gdn_gating_proj.cpp
+index 8241e79..86d434a 100644
+--- a/tests/ops/test_gdn_gating_proj.cpp
++++ b/tests/ops/test_gdn_gating_proj.cpp
+@@ -33,6 +33,7 @@ struct Geometry {
+ constexpr Geometry kQwen27{"qwen3_6_27b", 5120, 48, false};
+ constexpr Geometry kQwen38Parent{"qwen3_8_27b_parent", 5120, 48, true};
+ constexpr Geometry kQwen35{"qwen3_6_35b_a3b", 2048, 32, true};
++constexpr Geometry kBonsai2b{"bonsai2b", 2048, 16, true};
+ 
+ #if defined(NINFER_SFU_SOFTPLUS) && NINFER_SFU_SOFTPLUS
+ // The SFU softplus carries lg2.approx's error, about 2e-6 of the result.
+@@ -740,7 +741,7 @@ int run_rotated_norm_case(std::int32_t tokens, std::uint32_t seed, DeviceExecuti
+     return failures;
+ }
+ 
+-int main() {
++int main(int argc, char** argv) {
+     if (cuda_unavailable()) {
+         std::cout << "SKIP: no usable CUDA device\n";
+         return 77;
+@@ -749,6 +750,16 @@ int main() {
+     DeviceContext device;
+     const DeviceExecutionView execution{nullptr, device.multiprocessor_count()};
+     const DeviceExecutionView norm_execution{device.stream, device.multiprocessor_count()};
++    if (argc == 2 && std::string(argv[1]) == "--bonsai2b") {
++        int failures = 0;
++        for (const int tokens : {1, 16, 65}) {
++            failures += run_projection_case(kBonsai2b, tokens, 0x6200u + tokens, execution);
++            failures += run_norm_projection_case(kBonsai2b, tokens, 0x7200u + tokens,
++                                                 norm_execution);
++        }
++        std::cout << (failures == 0 ? "OK" : "FAIL") << " Bonsai2B GDN gating\n";
++        return failures == 0 ? 0 : 1;
++    }
+     int failures = sm_count_routes::verify_plan_across_sm_counts();
+     // Both sides of each route boundary of this device's plan (768/769, 1664/1665 and 3456/3457 on
+     // an 82-SM sm_86 part; residency moves them with the SM count and the SM's occupancy).
+diff --git a/tests/ops/test_gdn_input_proj.cpp b/tests/ops/test_gdn_input_proj.cpp
+index e81aad8..29ba379 100644
+--- a/tests/ops/test_gdn_input_proj.cpp
++++ b/tests/ops/test_gdn_input_proj.cpp
+@@ -185,13 +185,13 @@ int run_q4_q5() {
+ // tokens, the padded prefill GEMM above) write q/k and value straight into qkv and z into its plane
+ // from one quantisation.
+ int run_t2_case(DevicePackedWeight& query_key, DevicePackedWeight& value_z_weight,
+-                std::int32_t tokens) {
+-    constexpr std::int32_t kHidden      = 5120;
++                std::int32_t tokens, bool bonsai2b = false,
++                ops::LinearPolicy policy = ops::LinearPolicy::AllowA8Int) {
++    const std::int32_t kHidden          = bonsai2b ? 2048 : 5120;
+     constexpr std::int32_t kQkRows      = 4096;
+-    constexpr std::int32_t kValueRows   = 6144;
+-    constexpr std::int32_t kZRows       = 6144;
+-    constexpr std::int32_t kRows        = kQkRows + kValueRows;
+-    constexpr ops::LinearPolicy kPolicy = ops::LinearPolicy::AllowA8Int;
++    const std::int32_t kValueRows       = bonsai2b ? 2048 : 6144;
++    const std::int32_t kZRows           = kValueRows;
++    const std::int32_t kRows            = kQkRows + kValueRows;
+     const std::vector<float> activation = make_bf16_activation(kHidden, tokens, 431U + tokens);
+     const std::vector<std::uint16_t> activation_bits = bf16_bits(activation);
+     DeviceBuffer device_activation                   = to_device(activation_bits);
+@@ -201,16 +201,17 @@ int run_t2_case(DevicePackedWeight& query_key, DevicePackedWeight& value_z_weigh
+     Tensor output              = qkv.tensor();
+     Tensor z_output            = z.tensor();
+     const std::size_t capacity = ops::gdn_input_proj_split_workspace_capacity_bytes(
+-        QType::T2_G128_FP16, kQkRows, QType::T2_G128_FP16, kValueRows + kZRows, kHidden, kPolicy,
++        QType::T2_G128_FP16, kQkRows, QType::T2_G128_FP16, kValueRows + kZRows, kHidden, policy,
+         tokens, tokens);
+     GuardedDeviceBuffer scratch(std::max<std::size_t>(capacity, 1));
+     DeviceArena workspace(DeviceSpan{scratch.data(), std::max<std::size_t>(capacity, 1)});
+     scratch.fill(0x5a);
+-    ops::gdn_input_proj(x, query_key.view(), value_z_weight.view(), output, z_output, kPolicy,
++    ops::gdn_input_proj(x, query_key.view(), value_z_weight.view(), output, z_output, policy,
+                         workspace, nullptr);
+     cuda_synchronize();
+ 
+-    const std::string suffix = " T2 allow-a8-int T=" + std::to_string(tokens);
++    const std::string suffix = std::string(bonsai2b ? " Bonsai2B" : " 27B") +
++                               " T2 T=" + std::to_string(tokens);
+     int failures             = qkv.verify_guards("gdn qkv" + suffix);
+     failures += z.verify_guards("gdn z" + suffix);
+     failures += qkv.verify_fully_written("gdn qkv" + suffix);
+@@ -248,6 +249,20 @@ int run_t2() {
+     return failures;
+ }
+ 
++int run_t2_bonsai2b() {
++    constexpr std::int32_t kHidden = 2048;
++    DevicePackedWeight query_key(
++        quantized_weight::make_patterned_weight(QType::T2_G128_FP16, 4096, kHidden, 443U));
++    DevicePackedWeight value_z_weight(
++        quantized_weight::make_patterned_weight(QType::T2_G128_FP16, 4096, kHidden, 449U));
++    int failures = 0;
++    for (const std::int32_t tokens : {1, 16, 33}) {
++        failures += run_t2_case(query_key, value_z_weight, tokens, true,
++                                ops::LinearPolicy::A16Only);
++    }
++    return failures;
++}
++
+ int run_q8_case(DevicePackedWeight& parent, std::int32_t tokens) {
+     constexpr std::int32_t kHidden      = 2048;
+     constexpr std::int32_t kQkvRows     = 8192;
+@@ -532,12 +547,18 @@ int run_fp8() {
+ 
+ } // namespace
+ 
+-int main() {
++int main(int argc, char** argv) {
+     if (cuda_unavailable()) {
+         std::cout << "SKIP: no usable CUDA device\n";
+         return 77;
+     }
+ 
++    if (argc == 2 && std::string_view(argv[1]) == "--bonsai2b") {
++        const int failures = run_t2_bonsai2b();
++        std::cout << (failures == 0 ? "OK" : "FAIL") << " gdn_input_proj Bonsai2B\n";
++        return failures == 0 ? 0 : 1;
++    }
++
+     int failures = 0;
+     failures += run_q4_q5();
+     failures += run_t2();
