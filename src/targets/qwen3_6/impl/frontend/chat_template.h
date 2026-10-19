@@ -143,6 +143,12 @@ enum class ChatTemplateSemantics : std::uint8_t {
     ReasoningEffort,
 };
 
+// Native v3 artifacts intentionally carry NInfer's exact, vetted Jinja derivative
+// while preserving the upstream template in tokenizer_config.json. Only the two
+// registered upstream/derived pairs are allowed to differ in this way.
+[[nodiscard]] bool registered_v3_template_pair(std::string_view tokenizer_config_template,
+                                               std::string_view frontend_template);
+
 class CompiledChatTemplate {
 public:
     [[nodiscard]] static CompiledChatTemplate resolve(std::string_view source);

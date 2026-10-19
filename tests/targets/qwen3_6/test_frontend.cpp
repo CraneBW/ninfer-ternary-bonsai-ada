@@ -1106,6 +1106,54 @@ int test_official_resource_guards() {
     return failures;
 }
 
+int test_v3_derived_resource_guards() {
+    // These fixtures are the byte-exact Apache-2.0 derivatives actually stored
+    // in the verified 27B v3 artifacts, not reconstructed hash-only stand-ins.
+    const auto verify_pair = [&](const char* path, const std::string& upstream,
+                                 const std::string& other, bool reasoning_effort) {
+        FrontendResources derived = resources(read_file(path));
+        nlohmann::json config = nlohmann::json::parse(derived.tokenizer_config_json);
+        config["chat_template"] = upstream;
+        derived.tokenizer_config_json = config.dump();
+        int failures = check(fi::registered_v3_template_pair(upstream, derived.chat_template_jinja),
+                             "v3 approved upstream/derived template pair was not registered");
+        try {
+            const Frontend frontend = FrontendFactory::create_component(derived, false);
+            failures += check(frontend.prompt_capabilities().reasoning_effort.xhigh == reasoning_effort,
+                              "v3 derived template resolved to the wrong native semantics");
+        } catch (const std::exception& error) {
+            std::cerr << "v3 approved derived frontend failed: " << error.what() << '\n';
+            ++failures;
+        }
+
+        FrontendResources swapped = derived;
+        config["chat_template"] = other;
+        swapped.tokenizer_config_json = config.dump();
+        failures += check(!fi::registered_v3_template_pair(other, derived.chat_template_jinja) &&
+                              throws_invalid_argument([&] {
+                                  (void)FrontendFactory::create_component(swapped, false);
+                              }),
+                          "cross-profile v3 derived template was accepted");
+
+        FrontendResources altered = derived;
+        altered.chat_template_jinja[20] ^= 1;
+        failures += check(throws_invalid_argument([&] {
+                              (void)FrontendFactory::create_component(altered, false);
+                          }),
+                          "modified v3 derived template was accepted");
+        return failures;
+    };
+
+    return verify_pair(
+               NINFER_SOURCE_DIR
+               "/tests/fixtures/frontend/v3_thinking_toggle_derived_chat_template.jinja",
+               thinking_toggle_template_source(), reasoning_effort_template_source(), false) +
+           verify_pair(
+               NINFER_SOURCE_DIR
+               "/tests/fixtures/frontend/v3_reasoning_effort_derived_chat_template.jinja",
+               reasoning_effort_template_source(), thinking_toggle_template_source(), true);
+}
+
 int test_text_and_image_prepare(const Frontend& frontend) {
     ninfer::ChatMessage text_message;
     text_message.role = ninfer::ChatRole::User;
@@ -2298,6 +2346,7 @@ int main() {
     failures += test_rewrite_checkpoint_trace();
     failures += test_adjacent_tool_message_boundary();
     failures += test_official_resource_guards();
+    failures += test_v3_derived_resource_guards();
     failures += test_invalid_public_part_enums(frontend);
     failures += test_text_and_image_prepare(frontend);
     failures += test_literal_control_tokens_with_media();

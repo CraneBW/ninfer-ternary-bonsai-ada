@@ -27,6 +27,19 @@ constexpr Sha256Digest kReasoningEffortTemplateDigest{
     0xd3, 0xe2, 0xa7, 0x25, 0xb6, 0xc2, 0x58, 0x6a, 0xaa, 0x3a, 0x8a, 0xf9, 0xd7, 0xa8, 0x10, 0x41,
 };
 
+// Byte-exact derived Jinja sources embedded by the official NInfer v3 converters.
+// They add non-leading developer turns, final-message continuation and truncated
+// tool-response histories. The C++ renderer already implements these semantics.
+constexpr Sha256Digest kV3ThinkingToggleDerivedDigest{
+    0x71, 0x45, 0x31, 0x6b, 0xcc, 0x83, 0x7d, 0xdc, 0x11, 0x97, 0x1f, 0xb9, 0xfd, 0xca, 0x58, 0x89,
+    0x71, 0x50, 0x2e, 0x70, 0x7b, 0x9e, 0x6d, 0xf8, 0x3a, 0xf0, 0xe9, 0xb6, 0x83, 0xb2, 0xbd, 0x39,
+};
+
+constexpr Sha256Digest kV3ReasoningEffortDerivedDigest{
+    0xa4, 0x97, 0xdb, 0x9e, 0x66, 0x39, 0x41, 0xe6, 0xf7, 0xa0, 0x53, 0x07, 0xc2, 0xba, 0xfa, 0x83,
+    0x74, 0xc1, 0x2e, 0x14, 0x2a, 0xd1, 0xfb, 0xea, 0x62, 0x29, 0x88, 0x8d, 0x41, 0xf1, 0xab, 0x16,
+};
+
 constexpr std::string_view kLowReasoningInstructions =
     "Reasoning effort is set to low. Keep your thinking brief and focused, moving directly to "
     "the conclusion without unnecessary elaboration.";
@@ -427,12 +440,24 @@ RenderedFragment ChatMessage::rendered_content(bool add_vision_id, int* image_co
     return std::move(out).release();
 }
 
+bool registered_v3_template_pair(std::string_view tokenizer_config_template,
+                                 std::string_view frontend_template) {
+    const Sha256Digest upstream = sha256(tokenizer_config_template);
+    const Sha256Digest derived  = sha256(frontend_template);
+    return (upstream == kThinkingToggleTemplateDigest &&
+            derived == kV3ThinkingToggleDerivedDigest) ||
+           (upstream == kReasoningEffortTemplateDigest &&
+            derived == kV3ReasoningEffortDerivedDigest);
+}
+
 CompiledChatTemplate CompiledChatTemplate::resolve(std::string_view source) {
     const Sha256Digest digest = sha256(source);
-    if (digest == kThinkingToggleTemplateDigest) {
+    if (digest == kThinkingToggleTemplateDigest ||
+        digest == kV3ThinkingToggleDerivedDigest) {
         return CompiledChatTemplate(ChatTemplateSemantics::ThinkingToggle);
     }
-    if (digest == kReasoningEffortTemplateDigest) {
+    if (digest == kReasoningEffortTemplateDigest ||
+        digest == kV3ReasoningEffortDerivedDigest) {
         return CompiledChatTemplate(ChatTemplateSemantics::ReasoningEffort);
     }
     throw std::invalid_argument("unsupported frontend/chat_template.jinja (sha256 " +
