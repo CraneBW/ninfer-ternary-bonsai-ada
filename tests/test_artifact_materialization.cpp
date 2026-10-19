@@ -80,7 +80,8 @@ void require(bool condition, const char* message) {
     if (!condition) { throw std::runtime_error(message); }
 }
 
-void verify_v3_multi_file_materialization(ninfer::DeviceContext& device) {
+void verify_v3_multi_file_materialization(ninfer::DeviceContext& device,
+                                          bool managed_weights = false) {
     using Json = ninfer::test::artifact_fixture::Json;
     const Json root = {
         {"components", {{"text", {{"config", Json::object()}}}}},
@@ -119,7 +120,13 @@ void verify_v3_multi_file_materialization(ninfer::DeviceContext& device) {
     const auto quant = ninfer::artifact::bind_declared_tensor(
         binder, "quantized", {1, 256}, ninfer::artifact::TensorPlacement::Device);
     auto plan = binder.finish();
-    auto materialized = ninfer::artifact::materialize(reader, plan, device);
+    auto materialized = ninfer::artifact::materialize(reader, plan, device, nullptr,
+                                                      managed_weights);
+    cudaPointerAttributes attributes{};
+    CUDA_CHECK(cudaPointerGetAttributes(&attributes, materialized.device_data(tensor)));
+    require(attributes.type ==
+                (managed_weights ? cudaMemoryTypeManaged : cudaMemoryTypeDevice),
+            "v3 materialization used the wrong CUDA allocation kind");
     std::array<std::byte, 512> downloaded{};
     CUDA_CHECK(cudaMemcpy(downloaded.data(), materialized.device_data(tensor), downloaded.size(),
                           cudaMemcpyDeviceToHost));
@@ -263,6 +270,7 @@ int main() {
                     materialized.device_arena().used() == plan.device_capacity_bytes,
                 "materialized tensor does not own the planned device backing");
         verify_v3_multi_file_materialization(device);
+        verify_v3_multi_file_materialization(device, true);
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

@@ -68,10 +68,24 @@ void validate_options(const EngineOptions& options) {
 }
 
 std::size_t runtime_bytes_after_planned_weights(std::uint64_t weight_bytes,
-                                                bool wddm_evictable_budget = false) {
+                                                bool wddm_evictable_budget = false,
+                                                bool managed_weights = false) {
     std::size_t free_bytes  = 0;
     std::size_t total_bytes = 0;
     CUDA_CHECK(cudaMemGetInfo(&free_bytes, &total_bytes));
+    if (managed_weights) {
+        // CUDA-managed model storage may exceed physical VRAM. Reserve a bounded
+        // resident runtime budget before uploading weights; CUDA is responsible
+        // for migrating model pages as kernels access them. Avoid reporting this
+        // as free VRAM or claiming the whole model will be resident.
+        constexpr std::size_t kRuntimeBudget = 1024ULL * 1024ULL * 1024ULL;
+        constexpr std::size_t kMinimumFree = 512ULL * 1024ULL * 1024ULL;
+        if (free_bytes < kMinimumFree) {
+            throw std::invalid_argument(
+                "managed weights require at least 512 MiB initially free device memory");
+        }
+        return std::min(kRuntimeBudget, free_bytes / 2);
+    }
 #if defined(_WIN32)
     // Allow WDDM to evict background apps down to a 512 MiB non-evictable DWM display floor.
     // Opt-in only: on a card that is also driving the desktop the background allocations are
@@ -145,12 +159,13 @@ ConstructedTarget construct_registered(const EngineOptions& options, DeviceConte
     auto sequence_planner = Target::make_sequence_planner(device, options, weights_profile);
     const runtime::SequenceCapacityCurve curve = sequence_planner.capacity_curve();
     const std::size_t preflight_runtime_bytes = runtime_bytes_after_planned_weights(
-        load_plan.materialization().device_capacity_bytes, options.wddm_evictable_budget);
+        load_plan.materialization().device_capacity_bytes, options.wddm_evictable_budget,
+        options.managed_weights);
     (void)runtime::resolve_kv_capacity(options.kv_capacity, curve, preflight_runtime_bytes);
     target_plan_phase.complete();
 
     auto materialized = artifact::materialize(reader, load_plan.materialization(), device,
-                                              &options.startup_observer);
+                                              &options.startup_observer, options.managed_weights);
     const artifact::MaterializationStats stats = materialized.stats();
 
     StartupPhaseScope target_finalize_phase(options.startup_observer, StartupPhase::TargetFinalize);
@@ -159,8 +174,10 @@ ConstructedTarget construct_registered(const EngineOptions& options, DeviceConte
     const std::size_t weights_capacity_bytes = stats.h2d_bytes;
     runtime::KvCapacityResolution capacity_resolution = runtime::resolve_kv_capacity(
         options.kv_capacity, curve,
-        current_free_device_bytes(weights_capacity_bytes, options.wddm_evictable_budget,
-                                  preflight_runtime_bytes));
+        options.managed_weights
+            ? preflight_runtime_bytes
+            : current_free_device_bytes(weights_capacity_bytes, options.wddm_evictable_budget,
+                                        preflight_runtime_bytes));
     auto sequence_plan = std::move(sequence_planner).finalize(capacity_resolution.main_page_groups);
     if (sequence_plan.device_reservation_bytes() != capacity_resolution.runtime_reservation_bytes ||
         sequence_plan.kv_capacity() != capacity_resolution.resolved_tokens) {

@@ -25,6 +25,15 @@ The command uses Qwen3.8-27B NVFP4. Each request has a 240,000-token logical cei
 240,000-token Main Text KV pool serves admitted requests; either request may use the full capacity
 when running alone, and two requests run concurrently when their complete reservations fit.
 
+For artifacts with more static weight bytes than available VRAM, `--managed-weights`
+allocates model weights through CUDA Unified Memory and permits the driver to migrate
+weight pages between system RAM and the GPU. This requires sufficient available host
+memory and can incur substantial paging latency; it does not make weights fully
+VRAM-resident. Keep the runtime reservation small while verifying such a model, for
+example `--managed-weights --max-context 1024 --kv-capacity 1024
+--max-concurrency 1 --host-kv-mib 256 --no-cuda-graph`. Default CUDA weight
+allocations are unchanged when this flag is absent.
+
 With `C=2` and two extra Device checkpoint slots, the process owns two active StateImage guarantees
 plus a global pool of two Device-resident checkpoints. Eight pinned Host State slots and 8 GiB of
 pinned Host KV retain inactive continuations under Device pressure. Active request capacity is two.

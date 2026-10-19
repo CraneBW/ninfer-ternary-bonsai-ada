@@ -61,7 +61,9 @@ public:
         std::size_t saved_offset_ = 0;
     };
 
-    explicit DeviceArena(std::size_t capacity_bytes);
+    // Managed backing allows opt-in inference with model weights larger than VRAM.
+    // Device workspaces keep their default strictly device-resident allocation.
+    explicit DeviceArena(std::size_t capacity_bytes, bool managed = false);
     // Non-owning arena over an already allocated device region.
     explicit DeviceArena(DeviceSpan storage);
     ~DeviceArena();

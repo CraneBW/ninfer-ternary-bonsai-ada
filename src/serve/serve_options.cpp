@@ -94,7 +94,7 @@ std::string serve_usage_text(const char* argv0) {
            "[--lm-head-draft] [--no-thinking] [--preserve-thinking] "
            "[--tolerant-tool-calls] [--cors] "
            "[--temperature F] [--top-p F] [--top-k N] [--min-p F] [--presence-penalty F] "
-           "[--frequency-penalty F] [--seed N] [--greedy] [--wddm-evictable-budget]\n"
+           "[--frequency-penalty F] [--seed N] [--greedy] [--wddm-evictable-budget] [--managed-weights]\n"
            "       [--log-level trace|debug|info|warning|error|critical|off]\n"
            "       serves OpenAI Responses/Chat Completions and Anthropic Messages endpoints\n"
            "       --default-max-tokens defaults to " +
@@ -152,7 +152,9 @@ std::string serve_usage_text(const char* argv0) {
            "       --greedy forces temperature 0 (exact argmax).\n"
            "       --wddm-evictable-budget budgets runtime memory against total VRAM on dedicated "
            "GPUs, ignoring the WDDM process budget (Windows only; the GPU must not drive a "
-           "concurrent desktop GPU workload)\n";
+           "concurrent desktop GPU workload)\n"
+           "       --managed-weights demand-pages model weights through CUDA Unified Memory; "
+           "may load models exceeding VRAM, with slower generation and system RAM requirements\n";
 }
 
 ServeOptions parse_serve_options(int argc, char** argv) {
@@ -435,6 +437,8 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             options.greedy = true;
         } else if (arg == "--wddm-evictable-budget") {
             options.wddm_evictable_budget = true;
+        } else if (arg == "--managed-weights") {
+            options.managed_weights = true;
         } else if (arg == "--log-level") {
             options.log_level = product::parse_log_level(require_value("--log-level"));
         } else {

@@ -59,6 +59,7 @@ struct ServeOptions {
     // only: the runtime planner budgets from physical device capacity instead of the WDDM
     // process budget reported by cudaMemGetInfo.
     bool wddm_evictable_budget = false;
+    bool managed_weights = false;
     bool allow_prefix_reuse = true;
     bool enable_thinking =
         true; // default thinking mode for the generation prompt (--no-thinking opts out)

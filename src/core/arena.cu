@@ -357,7 +357,7 @@ DeviceArena::Scope::Scope(Scope&& other) noexcept
     other.arena_ = nullptr;
 }
 
-DeviceArena::DeviceArena(std::size_t capacity_bytes) {
+DeviceArena::DeviceArena(std::size_t capacity_bytes, bool managed) {
     if (capacity_bytes == 0) {
         throw std::invalid_argument("DeviceArena capacity must be nonzero");
     }
@@ -370,9 +370,11 @@ DeviceArena::DeviceArena(std::size_t capacity_bytes) {
 #endif
 
     if (ptr == nullptr) {
-        const cudaError_t err = cudaMalloc(&ptr, capacity_bytes);
+        const cudaError_t err = managed ? cudaMallocManaged(&ptr, capacity_bytes, cudaMemAttachGlobal)
+                                        : cudaMalloc(&ptr, capacity_bytes);
         if (err != cudaSuccess) {
-            throw std::runtime_error(cuda_error_message("cudaMalloc failed", err));
+            throw std::runtime_error(
+                cuda_error_message(managed ? "cudaMallocManaged failed" : "cudaMalloc failed", err));
         }
 
 #if defined(_WIN32)

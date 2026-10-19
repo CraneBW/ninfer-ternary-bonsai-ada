@@ -98,7 +98,8 @@ DeviceArena& MaterializedArtifact::device_arena() {
 }
 
 MaterializedArtifact materialize(const Reader& reader, const MaterializationPlan& plan,
-                                 DeviceContext& device, const StartupObserver* startup_observer) {
+                                 DeviceContext& device, const StartupObserver* startup_observer,
+                                 bool managed_weights) {
     const StartupObserver no_startup_observer;
     const StartupObserver& startup =
         startup_observer == nullptr ? no_startup_observer : *startup_observer;
@@ -114,7 +115,8 @@ MaterializedArtifact materialize(const Reader& reader, const MaterializationPlan
     if (capacity == 0 || capacity > static_cast<std::uint64_t>(SIZE_MAX)) {
         throw ArtifactError("artifact tensor backing size is invalid");
     }
-    out.device_arena_ = std::make_unique<DeviceArena>(static_cast<std::size_t>(capacity));
+    out.device_arena_ = std::make_unique<DeviceArena>(static_cast<std::size_t>(capacity),
+                                                     managed_weights);
     out.stats_.device_capacity_bytes = capacity;
     out.stats_.tensor_count          = plan.device_objects.size();
     out.stats_.resource_count        = plan.host_objects.size();

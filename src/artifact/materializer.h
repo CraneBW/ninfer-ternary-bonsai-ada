@@ -43,7 +43,7 @@ public:
 
 private:
     friend MaterializedArtifact materialize(const Reader&, const MaterializationPlan&,
-                                            DeviceContext&, const StartupObserver*);
+                                            DeviceContext&, const StartupObserver*, bool);
 
     struct ObjectStorage {
         void* device = nullptr;
@@ -57,6 +57,7 @@ private:
 
 MaterializedArtifact materialize(const Reader& reader, const MaterializationPlan& plan,
                                  DeviceContext& device,
-                                 const StartupObserver* startup_observer = nullptr);
+                                 const StartupObserver* startup_observer = nullptr,
+                                 bool managed_weights = false);
 
 } // namespace ninfer::artifact

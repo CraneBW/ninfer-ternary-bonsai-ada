@@ -441,6 +441,9 @@ struct EngineOptions {
     // only): budgets runtime capacity from physical device capacity minus static weights and a
     // minimum eviction floor, instead of the WDDM process budget reported by cudaMemGetInfo.
     bool wddm_evictable_budget             = false;
+    // Opt-in demand-paged CUDA Unified Memory for weight storage. Useful for
+    // large artifacts on smaller GPUs at the cost of PCIe paging and speed.
+    bool managed_weights                   = false;
     ContextCacheOptions context_cache;
     ContextCostOptions context_cost;
     KvMemOptions kvmem;
