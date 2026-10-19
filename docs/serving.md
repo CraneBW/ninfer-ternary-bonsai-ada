@@ -363,17 +363,51 @@ resource errors.
 Chat Completions and Responses translate OpenAI cache hints into optional shared-prefix write
 candidates:
 
-- omitted `prompt_cache_options` creates a default implicit candidate at the latest representable
-  content boundary;
-- `mode:"implicit"` requests the same automatic candidate explicitly;
-- `mode:"explicit"` disables that implicit write for the request;
-- `prompt_cache_breakpoint:{"mode":"explicit"}` on supported content creates an explicit
-  candidate.
+- omitted `prompt_cache_options` leaves the request to its declared boundaries: without a
+  `prompt_cache_breakpoint` that means the default implicit candidate at the latest representable
+  content boundary, and with one it means no implicit candidate at all;
+- `mode:"implicit"` requests that automatic candidate explicitly, even beside a declared boundary;
+- `mode:"explicit"` disables implicit writes for the request;
+- `prompt_cache_breakpoint:{"mode":"explicit"}` on supported content declares a candidate.
 
 One request carries at most four distinct writes. An implicit target occupies one slot unless it
 coincides with an explicit target; the remaining slots contain the latest explicit boundaries.
 Earlier schema-valid historical breakpoints are accepted but are not new write candidates. Exact
 reads of already-published prefixes do not require the request to repeat a marker.
+
+A declared breakpoint therefore states the whole write policy: the boundary a client chose is the
+write, and the engine does not queue a second, weaker write beside it. The automatic candidate
+cannot displace a resident -- it only takes a vacant slot -- so beside a declared boundary it adds
+captures rather than hits. On an eight-turn agent session that rewrites its history every three
+turns, dropping it beside the declared boundary cut completed captures from 29 to 17, removed the
+shared-prefix degradations and evictions (8 and 7, now 0 and 0) and raised reused prompt tokens from
+545,938 to 607,685, with no change in answers or in the reuse of append-only turns.
+
+### Keeping a prefix across a history rewrite
+
+An append-only loop keeps every request on the previous request's prefix. A harness that
+periodically *rewrites* its history -- compaction, summarised tool output, re-ordered items -- only
+keeps a prefix up to the last unchanged item, so declare that item:
+
+- put `prompt_cache_breakpoint:{"mode":"explicit"}` on the last content part, turn, or tool
+  definition that survives the rewrite (usually the frozen instructions or the oldest retained
+  turn);
+- keep sending that part verbatim in every later request; the marker travels with it, so the
+  declaration does not have to be repeated per turn;
+- do not repeat markers for reads: an exact resident prefix is reused without one.
+
+Measured on this build with an eight-turn session whose prompts run 41K to 62K tokens and which
+compacts its history at turns four and seven: the two rewrite rounds recomputed only the rewritten
+tail -- 30,869 cached tokens, 7.0 s and 7.0 s against 22.2 s and 23.0 s cold -- while the append-only
+turns reused 41K to 52K tokens. Across the eight turns the session prefilled 63,036 tokens against
+124,774 for the same session without a declared boundary. Two concurrent sessions that share the
+frozen prefix kept the same 30,869-token reuse on every rewrite round of both sessions.
+
+A marker is a write candidate, not a pin. When the scheduler runs out of device or host state
+images the checkpoint can be dropped and the rewrite round falls back to a cold prefill; a
+twelve-turn session still hit its frozen prefix on all three rewrite rounds with three device and
+two host state images, and raising `--device-state-slots`/`--host-state-slots` (or lowering
+concurrency) buys more retention.
 
 These fields are optimization hints. A legal boundary that cannot be represented as an exact
 rendered-token frontier is ignored without changing prompt content. `prompt_cache_key` is not an

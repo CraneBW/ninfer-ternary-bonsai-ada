@@ -778,6 +778,54 @@ int test_common_objects() {
     return failures;
 }
 
+int test_prompt_cache_boundary_policy() {
+    int failures = 0;
+    const auto boundary_parts = [](const Json& extra) {
+        Json body = base_request();
+        body["messages"] =
+            Json::array({Json{{"role", "user"},
+                              {"content", Json::array(
+                                   {Json{{"type", "text"}, {"text", "frozen"}},
+                                    Json{{"type", "text"},
+                                         {"text", "stable"},
+                                         {"prompt_cache_breakpoint", Json{{"mode", "explicit"}}}}})}},
+                         Json{{"role", "assistant"}, {"content", "OK"}},
+                         Json{{"role", "user"}, {"content", "next"}}});
+        for (const auto& item : extra.items()) { body[item.key()] = item.value(); }
+        return body;
+    };
+    const auto markers = [](const OpenAIChatRequest& request) {
+        std::vector<CacheBoundary> out;
+        for (const ToolDefinition& tool : request.generation.tools) {
+            if (tool.cache_boundary_after) { out.push_back(*tool.cache_boundary_after); }
+        }
+        for (const ChatTurn& turn : request.generation.messages) {
+            for (const ContentPart& part : turn.content) {
+                if (part.cache_boundary_after) { out.push_back(*part.cache_boundary_after); }
+            }
+            if (turn.cache_boundary_after) { out.push_back(*turn.cache_boundary_after); }
+        }
+        return out;
+    };
+
+    const std::vector<CacheBoundary> declared = markers(parse(boundary_parts(Json::object())));
+    failures += check(
+        declared.size() == 1 &&
+            declared[0].evidence == ninfer::SharedCandidateEvidence::ExplicitBoundary,
+        "a declared boundary is the request's only shared-prefix write");
+    const std::vector<CacheBoundary> requested = markers(
+        parse(boundary_parts(Json{{"prompt_cache_options", Json{{"mode", "implicit"}}}})));
+    bool explicit_seen   = false;
+    bool automatic_seen  = false;
+    for (const CacheBoundary& marker : requested) {
+        explicit_seen |= marker.evidence == ninfer::SharedCandidateEvidence::ExplicitBoundary;
+        automatic_seen |= marker.evidence == ninfer::SharedCandidateEvidence::RequestedAutomatic;
+    }
+    failures += check(requested.size() == 2 && explicit_seen && automatic_seen,
+                      "an implicit request keeps its automatic candidate beside a declared boundary");
+    return failures;
+}
+
 } // namespace
 
 int main() {
@@ -793,6 +841,7 @@ int main() {
     failures += test_stream_response();
     failures += test_stream_observations();
     failures += test_common_objects();
+    failures += test_prompt_cache_boundary_policy();
     if (failures == 0) { std::cout << "OpenAI Chat protocol tests passed\n"; }
     return failures == 0 ? 0 : 1;
 }

@@ -141,8 +141,17 @@ void apply_openai_prompt_cache_policy(GenerationRequest& request, OpenAIPromptCa
         automatic_target = &request.tools.back().cache_boundary_after;
     }
 
-    const bool automatic_enabled =
-        policy.automatic != OpenAIPromptCacheAutomatic::Disabled && automatic_target != nullptr;
+    // A declared boundary states the whole write policy. Without an explicit request for implicit
+    // writes the automatic candidate would only add a second, weaker write beside it -- one that
+    // announces itself as DefaultAutomatic and therefore may not displace a resident, so it queues
+    // behind the declared write instead of helping it. Measured on an eight-turn agent session the
+    // declared boundary alone kept every rewrite round on its frozen prefix while the extra
+    // candidate showed up as capture churn (sixteen captures against nine) and shared-prefix
+    // degradation (two against zero).
+    const bool automatic_overtaken =
+        policy.automatic == OpenAIPromptCacheAutomatic::Default && !explicit_boundaries.empty();
+    const bool automatic_enabled = policy.automatic != OpenAIPromptCacheAutomatic::Disabled &&
+                                   automatic_target != nullptr && !automatic_overtaken;
     const bool automatic_merges_explicit   = automatic_enabled && automatic_target->has_value();
     const std::size_t explicit_write_slots = !automatic_enabled || automatic_merges_explicit
                                                  ? kMaximumExplicitPromptCacheMarkers
