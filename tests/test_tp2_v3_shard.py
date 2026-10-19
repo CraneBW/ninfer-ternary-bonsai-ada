@@ -332,6 +332,18 @@ class TestV3TP2Sharder(unittest.TestCase):
             tp.build(plan, destination)
         self.assertEqual(rank0.read_bytes(), b"owner data")
 
+    def test_trusted_source_digest_checked_before_writing(self):
+        import hashlib
+        plan = tp.make_plan(self.source)
+        actual = hashlib.sha256(self.source.read_bytes()).hexdigest()
+        with self.assertRaisesRegex(tp.ShardError, "SHA-256 mismatch"):
+            tp.build(plan, self.dir / "bad-hash", "0" * 64)
+        self.assertFalse(list(self.dir.glob("bad-hash*")))
+        with self.assertRaisesRegex(tp.ShardError, "64 hex digits"):
+            tp.build(plan, self.dir / "invalid-hash", "xyz")
+        ranks = tp.build(plan, self.dir / "good-hash", actual.upper())
+        self.assertTrue(all(path.is_file() for path in ranks))
+
     @unittest.skipUnless(hasattr(os, "SEEK_DATA") and hasattr(os, "SEEK_HOLE"),
                          "sparse allocation checks need POSIX SEEK_HOLE")
     def test_sparse_file_with_full_declared_length_is_not_complete_weights(self):

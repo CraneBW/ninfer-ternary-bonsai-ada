@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -680,7 +681,8 @@ def _write_rank(source: BinaryIO, dest: BinaryIO, plan: ShardPlan, rank: int,
         raise ShardError("rank output payload length differs from v3 directory")
 
 
-def build(plan: ShardPlan, prefix: str | Path) -> tuple[Path, Path]:
+def build(plan: ShardPlan, prefix: str | Path,
+          expected_sha256: str | None = None) -> tuple[Path, Path]:
     """Preflight both shards, then write into two temporary files and publish."""
     base = Path(prefix)
     destinations = (Path(f"{base}.rank0.ninfer"), Path(f"{base}.rank1.ninfer"))
@@ -693,6 +695,21 @@ def build(plan: ShardPlan, prefix: str | Path) -> tuple[Path, Path]:
     temporary: list[Path] = []
     with plan.source.open("rb") as source:
         column_map = check_full_source(source, plan)
+        if expected_sha256 is not None:
+            if len(expected_sha256) != 64 or any(
+                ch not in "0123456789abcdefABCDEF" for ch in expected_sha256
+            ):
+                raise ShardError("expected SHA-256 must contain exactly 64 hex digits")
+            digest = hashlib.sha256()
+            source.seek(0)
+            while data := source.read(CHUNK_BYTES):
+                digest.update(data)
+            actual_hash = digest.hexdigest()
+            if actual_hash != expected_sha256.lower():
+                raise ShardError(
+                    f"source SHA-256 mismatch: expected {expected_sha256.lower()}, "
+                    f"got {actual_hash}"
+                )
         try:
             for rank in (0, 1):
                 fd, name = tempfile.mkstemp(prefix=".tp2-v3-", suffix=".ninfer.tmp",
@@ -730,11 +747,16 @@ def main(argv: list[str] | None = None) -> int:
                         help="validate metadata and report exact shard geometry without reading weights")
     parser.add_argument("--plan-json", metavar="PATH",
                         help="optionally save both rank JSON directories in plan mode")
+    parser.add_argument("--sha256", metavar="HEX",
+                        help="verify the entire source artifact against a trusted SHA-256 "
+                             "before creating either rank")
     args = parser.parse_args(argv)
     if not args.plan_only and not args.output_prefix:
         parser.error("output_prefix is required unless --plan-only is set")
     if args.plan_json and not args.plan_only:
         parser.error("--plan-json requires --plan-only")
+    if args.sha256 and args.plan_only:
+        parser.error("--sha256 requires full write mode")
     try:
         plan = make_plan(args.source)
         if args.plan_only:
@@ -744,7 +766,7 @@ def main(argv: list[str] | None = None) -> int:
                 }, ensure_ascii=False, indent=2), encoding="utf-8")
             print(json.dumps(plan.summary(), indent=2))
         else:
-            outputs = build(plan, args.output_prefix)
+            outputs = build(plan, args.output_prefix, args.sha256)
             print(json.dumps({**plan.summary(), "written": [str(p) for p in outputs]}, indent=2))
         return 0
     except (ShardError, OSError) as error:

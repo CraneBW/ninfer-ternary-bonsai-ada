@@ -42,6 +42,7 @@ Once **all declared input payload bytes** are present, write both ranks:
 
 ```bash
 python3 -m tools.tp2.shard_v3_qwen38 /path/qwen3_8_gsq_rco_iq3_s_v3.ninfer out/qwen38-tp2
+python3 -m tools.tp2.shard_v3_qwen38 /path/qwen3_8_gsq_rco_iq3_s_v3.ninfer out/qwen38-tp2-verified --sha256 29e54467ca0ddae7e9aac04439f72ad20dbf6dc8fb5e84833b41ec7de9c46750
 python3 -m unittest -v tests.test_tp2_v3_shard
 ```
 
@@ -51,8 +52,9 @@ offsets, and single-file payload sizes are rewritten for each rank. Existing
 output files are never silently replaced. Writing validates declared source
 length, all physical byte spans, and (on supported filesystems) rejects sparse
 holes in weight records. It refuses an incomplete input before creating rank
-files. No trusted upstream checksum is available, so these checks cannot prove
-the model's scientific provenance or byte-level authenticity.
+files. Supply the published full-file digest with `--sha256` to verify all source
+bytes before creating either rank; a metadata-only or length-only check does not
+establish authentic weights.
 
 Rows are split within each attention Q/G/K/V, GDN Q/K/V/Z, A/B, `a_log`,
 `dt_bias`, and MLP gate/up region, including fused GGUF tensors. Columns are
