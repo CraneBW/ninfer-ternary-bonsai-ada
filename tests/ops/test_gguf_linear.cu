@@ -74,9 +74,9 @@ void verify(int tokens) {
     std::printf("GGUF Q8_0 T=%d max_abs_error=%.6f PASS\n", tokens, worst);
 }
 
-void verify_real_iq3s(const char* artifact_path) {
-    // Test the actual mixed-format GSQ-RCO checkpoint, even while the large
-    // file is downloading: weight/000001 lives in the first 100 MiB.
+void verify_real_mixed_formats(const char* artifact_path) {
+    // Test actual mixed-format GSQ-RCO checkpoint bytes from the already
+    // downloaded prefix; the same CUDA bridge supplies GEMV and MMQ.
     std::ifstream file(artifact_path, std::ios::binary);
     require(bool(file), "GSQ model file is unavailable");
     std::array<unsigned char, 32> header{};
@@ -97,22 +97,38 @@ void verify_real_iq3s(const char* artifact_path) {
             "GSQ directory is incomplete");
     const nlohmann::json directory = nlohmann::json::parse(json_text);
 
+    struct FormatSample {
+        const char* name;
+        ninfer::QType qtype;
+    };
+    constexpr std::array<FormatSample, 5> samples{{
+        {"gguf_iq4_xs", ninfer::QType::GGUF_IQ4_XS},
+        {"gguf_iq3_s", ninfer::QType::GGUF_IQ3_S},
+        {"gguf_iq3_xxs", ninfer::QType::GGUF_IQ3_XXS},
+        {"gguf_iq2_xs", ninfer::QType::GGUF_IQ2_XS},
+        {"gguf_q2_k", ninfer::QType::GGUF_Q2_K},
+    }};
+    for (const auto& sample : samples) {
     const nlohmann::json* object = nullptr;
     for (const auto& item : directory.at("objects")) {
-        if (item.value("id", "") == "weight/000001" &&
-            item.value("format", "") == "gguf_iq3_s") {
+        if (item.value("format", "") == sample.name && item.value("kind", "") == "tensor" &&
+            item.at("shape").size() == 2 &&
+            item.at("shape")[0].get<int>() >= 128 &&
+            item.at("shape")[1].get<int>() % 256 == 0) {
             object = &item;
             break;
         }
     }
-    require(object != nullptr, "GSQ artifact lacks IQ3_S tensor weight/000001");
+    require(object != nullptr, "GSQ mixed-format tensor missing");
     constexpr int rows = 128;
     const int k = object->at("shape")[1].get<int>();
     require(k > 0 && k % 256 == 0 && object->at("shape")[0].get<int>() >= rows,
-            "IQ3_S checkpoint geometry invalid");
-    constexpr int block_size = 110;
+            "GSQ checkpoint geometry invalid");
+    const auto block = ninfer::gguf_block_shape(sample.qtype);
+    require(block.elements > 0 && k % block.elements == 0,
+            "GSQ block geometry invalid");
     const std::uint64_t bytes_per_row =
-        static_cast<std::uint64_t>(k / 256) * block_size;
+        static_cast<std::uint64_t>(k / block.elements) * block.bytes;
     const std::uint64_t start =
         ((32 + json_length + 4095) / 4096) * 4096 + object->at("offset").get<std::uint64_t>();
     require(object->at("bytes").get<std::uint64_t>() >= rows * bytes_per_row,
@@ -122,13 +138,13 @@ void verify_real_iq3s(const char* artifact_path) {
     file.read(reinterpret_cast<char*>(codes.data()),
               static_cast<std::streamsize>(codes.size()));
     require(static_cast<std::size_t>(file.gcount()) == codes.size(),
-            "GSQ IQ3_S tensor data not yet downloaded");
+            "GSQ selected tensor data not yet downloaded");
     ninfer::DeviceBuffer weights(codes.size()), decoded(rows * k * sizeof(float));
     weights.copy_from_host(codes.data(), codes.size());
     ninfer::ops::gguf::dequantize_rows(
-        ninfer::ops::gguf::GgmlType::IQ3_S, weights.p, bytes_per_row, k, nullptr,
+        ninfer::ops::detail::gguf_type(sample.qtype), weights.p, bytes_per_row, k, nullptr,
         rows, static_cast<float*>(decoded.p), k, nullptr);
-    require(cudaDeviceSynchronize() == cudaSuccess, "IQ3_S CUDA dequantization");
+    require(cudaDeviceSynchronize() == cudaSuccess, "GGUF CUDA dequantization");
     std::vector<float> weights_f32(rows * k);
     decoded.copy_to_host(weights_f32.data(), weights_f32.size() * sizeof(float));
     std::vector<float> expected(rows, 0.0f);
@@ -137,7 +153,7 @@ void verify_real_iq3s(const char* artifact_path) {
     }
 
     ninfer::Weight w{};
-    w.qtype = ninfer::QType::GGUF_IQ3_S;
+    w.qtype = sample.qtype;
     w.layout = ninfer::QuantLayout::GgufBlocks;
     w.qdata = weights.p;
     w.n = rows;
@@ -154,7 +170,7 @@ void verify_real_iq3s(const char* artifact_path) {
         ninfer::Tensor x(input.p, ninfer::DType::BF16, {k, tokens});
         ninfer::Tensor y(output.p, ninfer::DType::BF16, {rows, tokens});
         ninfer::ops::detail::gguf_linear_dispatch(x, w, y, ws, nullptr);
-        require(cudaDeviceSynchronize() == cudaSuccess, "IQ3_S CUDA product");
+        require(cudaDeviceSynchronize() == cudaSuccess, "GSQ CUDA product");
         output.copy_to_host(result.data(), result.size() * sizeof(__nv_bfloat16));
         float worst = 0.0f;
         for (int token = 0; token < tokens; ++token) {
@@ -164,11 +180,12 @@ void verify_real_iq3s(const char* artifact_path) {
                 worst = std::max(worst, error);
                 const float tolerance = std::max(0.7f, std::fabs(expected[row]) * 0.012f);
                 require(std::isfinite(value) && error < tolerance,
-                        "GSQ IQ3_S tensor numerical mismatch");
+                        "GSQ mixed-format tensor numerical mismatch");
             }
         }
-        std::printf("real GSQ IQ3_S T=%d rows=%d K=%d max_abs_error=%.6f PASS\n",
-                    tokens, rows, k, worst);
+        std::printf("real GSQ %s T=%d rows=%d K=%d max_abs_error=%.6f PASS\n",
+                    sample.name, tokens, rows, k, worst);
+    }
     }
 }
 
@@ -178,7 +195,7 @@ int main(int argc, char** argv) {
     try {
         verify(1);   // GGUF vector decode
         verify(16);  // GGUF integer tensor-core prefill
-        if (argc == 2) { verify_real_iq3s(argv[1]); }
+        if (argc == 2) { verify_real_mixed_formats(argv[1]); }
         return 0;
     } catch (const std::exception& e) {
         std::fprintf(stderr, "GGUF test failed: %s\n", e.what());
