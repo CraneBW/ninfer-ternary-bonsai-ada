@@ -70,6 +70,8 @@ int main() {
     stats.kvmem.compact_skips            = 2;
     stats.kvmem.stage_in_blocks          = 11;
     stats.kvmem.stage_out_blocks         = 12;
+    stats.kvmem.transfer_runs            = 3;
+    stats.kvmem.transfer_us              = 450;
     stats.kvmem.scoreable_blocks         = 13;
     stats.kvmem.zero_score_blocks        = 14;
     stats.kvmem.window_tokens            = 98304;
@@ -100,6 +102,10 @@ int main() {
                       "accepted draft tokens are wrong");
     failures += check(contains(text, "ninfer:computed_prefill_tokens_total 1234"),
                       "engine prefill tokens are missing");
+    failures += check(contains(text, "ninfer:kvmem_transfer_runs_total 3"),
+                      "kvmem transfer runs are missing");
+    failures += check(contains(text, "ninfer:kvmem_transfer_us_total 450"),
+                      "kvmem transfer us are missing");
     failures += check(contains(text, "ninfer:kvmem_window_tokens 98304"),
                       "kvmem window is missing");
     failures += check(contains(text, "ninfer:capture_skips_total 2"),

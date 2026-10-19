@@ -465,6 +465,10 @@ int main() {
         // slot 0), 3/4/5 move down, {1,2} are evicted to the host arena.
         int sel1[4] = {0, 3, 4, 5};
         verify_window(sel1, 4);
+        CHECK(store.kvmem_usage().stage_out_blocks == 2 && store.kvmem_usage().transfer_runs == 1,
+              "compact #1 stage-out did not merge consecutive pages: blocks=%llu runs=%llu",
+              static_cast<unsigned long long>(store.kvmem_usage().stage_out_blocks),
+              static_cast<unsigned long long>(store.kvmem_usage().transfer_runs));
         resident[1] = 0; resident[2] = 0;  // evicted by compact #1
         for (int s = 0; s < 4; ++s) { baked_now[static_cast<std::size_t>(sel1[s])] = s * kTokens; }
 
@@ -477,7 +481,30 @@ int main() {
         CHECK(w2 == 4 * kTokens, "compact #2 window = %u", w2);
         int sel2[4] = {0, 1, 4, 5};
         verify_window(sel2, 4);
-        resident[1] = 1; resident[2] = 1; resident[3] = 0;  // compact #2 diff
+        CHECK(store.kvmem_usage().stage_in_blocks == 1 && store.kvmem_usage().stage_out_blocks == 3,
+              "compact #2 stage counts wrong: in=%llu out=%llu",
+              static_cast<unsigned long long>(store.kvmem_usage().stage_in_blocks),
+              static_cast<unsigned long long>(store.kvmem_usage().stage_out_blocks));
+        resident[1] = 1; resident[2] = 0; resident[3] = 0;  // compact #2 diff
+        for (int s = 0; s < 4; ++s) { baked_now[static_cast<std::size_t>(sel2[s])] = s * kTokens; }
+
+        // ---- compact #3: restore two adjacent host blocks {2, 3} in one H2D run ----
+        // Blocks 2 and 3 sit at adjacent host arena pages (pages 1 and 2), and
+        // releasing {1, 4} leaves a contiguous free device run [1..4], so the
+        // 2-page stage-in merges into 1 H2D run (plus 2 D2H runs for non-adjacent
+        // device pages 1 and 4 -> 3 runs total instead of 4).
+        const std::uint64_t runs_before_c3 = store.kvmem_usage().transfer_runs;
+        const std::uint32_t w3 = store.kvmem_compact(*handle, 4 * kTokens, nullptr, {2, 3});
+        CHECK(w3 == 4 * kTokens, "compact #3 window = %u", w3);
+        int sel3[4] = {0, 2, 3, 5};
+        verify_window(sel3, 4);
+        const std::uint64_t c3_runs = store.kvmem_usage().transfer_runs - runs_before_c3;
+        CHECK(store.kvmem_usage().stage_in_blocks == 3 &&
+                  store.kvmem_usage().stage_out_blocks == 5 && c3_runs == 3,
+              "compact #3 stage-in did not merge adjacent host pages: in=%llu out=%llu c3_runs=%llu",
+              static_cast<unsigned long long>(store.kvmem_usage().stage_in_blocks),
+              static_cast<unsigned long long>(store.kvmem_usage().stage_out_blocks),
+              static_cast<unsigned long long>(c3_runs));
 
         std::printf("failures=%d  VERDICT: %s\n", failures, failures == 0 ? "PASS" : "FAIL");
         cudaFree(backing);

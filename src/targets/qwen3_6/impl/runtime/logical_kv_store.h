@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <array>
 #include <cstddef>
+#include <chrono>
 #include <cstdint>
 #include <exception>
 #include <limits>
@@ -2488,16 +2489,67 @@ public:
         }
 
         // ---- 1) stage out: park evicted pages in the host arena ----
-        for (const std::uint32_t id : plan.stage_out) {
-            if (block_pages.size() <= id) { block_pages.resize(id + 1); }
-            if (block_hosts.size() <= id) { block_hosts.resize(id + 1); }
-            std::optional<HostKVAllocation> slot =
-                kvmem_host_arena_->allocate(kvmem_host_layout_, 1);
-            if (!slot) { throw std::runtime_error("KVMem host arena exhausted (SSD tier is K4)"); }
-            block_hosts[id] = std::move(*slot);
-            DeviceKVPageHandle ph = pages_->physical(block_pages[id]);
-            pool.copy_to_host(std::span<const DeviceKVPageHandle>(&ph, 1),
-                              kvmem_host_arena_->writable_view(block_hosts[id]));
+        // One copy per evicted block used to cost one cudaMemcpy2DAsync per plane per page
+        // (64 planes on the 27B text cache), the same per-page fragmentation melis2023 measured
+        // at 26% link utilisation (ninfer-kvmem-actkv b6c8337, docs/kvmem-recall-opt-20261019.md
+        // section 8). Instead, order the evicted pages by physical index, park them in ONE
+        // contiguous host extent split back into per-block slots (each block still releases on
+        // its own), and issue a single gather whose device-consecutive stretches move as one
+        // strided copy per plane. A fragmented arena falls back to per-page slots, which still
+        // merge wherever they happen to sit back to back.
+        const auto transfer_start = std::chrono::steady_clock::now();
+        std::uint64_t transfer_runs = 0;
+        if (!plan.stage_out.empty()) {
+            struct Evicted {
+                std::int32_t physical = 0;
+                std::uint32_t id      = 0;
+                DeviceKVPageHandle handle;
+            };
+            std::vector<Evicted> evicted;
+            evicted.reserve(plan.stage_out.size());
+            for (const std::uint32_t id : plan.stage_out) {
+                if (block_pages.size() <= id) { block_pages.resize(id + 1); }
+                if (block_hosts.size() <= id) { block_hosts.resize(id + 1); }
+                const DeviceKVPageHandle handle = pages_->physical(block_pages[id]);
+                evicted.push_back(Evicted{.physical = pool.physical_index_of(handle),
+                                          .id       = id,
+                                          .handle   = handle});
+            }
+            std::sort(evicted.begin(), evicted.end(),
+                      [](const Evicted& a, const Evicted& b) { return a.physical < b.physical; });
+            const auto count = static_cast<std::uint32_t>(evicted.size());
+            std::vector<HostKVAllocation> slots(count);
+            if (std::optional<HostKVAllocation> extent =
+                    kvmem_host_arena_->allocate(kvmem_host_layout_, count)) {
+                HostKVAllocation rest = std::move(*extent);
+                for (std::uint32_t i = 0; i + 1 < count; ++i) {
+                    auto [head, tail] = kvmem_host_arena_->split(std::move(rest), 1);
+                    slots[i]          = std::move(head);
+                    rest              = std::move(tail);
+                }
+                slots[count - 1] = std::move(rest);
+            } else {
+                for (std::uint32_t i = 0; i < count; ++i) {
+                    std::optional<HostKVAllocation> slot =
+                        kvmem_host_arena_->allocate(kvmem_host_layout_, 1);
+                    if (!slot) {
+                        throw std::runtime_error("KVMem host arena exhausted (SSD tier is K4)");
+                    }
+                    slots[i] = std::move(*slot);
+                }
+            }
+            std::vector<DeviceKVPageHandle> handles;
+            std::vector<HostKVAllocationView> views;
+            handles.reserve(count);
+            views.reserve(count);
+            for (std::uint32_t i = 0; i < count; ++i) {
+                handles.push_back(evicted[i].handle);
+                views.push_back(kvmem_host_arena_->writable_view(slots[i]));
+            }
+            transfer_runs += pool.copy_to_host_pages(handles, views, stream);
+            for (std::uint32_t i = 0; i < count; ++i) {
+                block_hosts[evicted[i].id] = std::move(slots[i]);
+            }
         }
 
         // ---- 1b) give the evicted pages' device storage back BEFORE anything reserves ----
@@ -2512,27 +2564,47 @@ public:
             if (pages_->active_address_references(logical) != 0) {
                 pages_->release_active_reference(logical);
             }
-            pages_->release_reference(logical, false);
+            (void)pages_->release_reference(logical, false);
             block_pages[id] = LogicalKVPageHandle{};
         }
 
         // ---- 2) stage in: fresh pages for cold selected blocks ----
+        // Materializing in ascending parked-host-address order pairs adjacent host slots (such as
+        // blocks evicted together in an earlier compaction) with consecutive physical device pages
+        // from free_page_runs_, so plan_kv_transfer_runs merges them into single H2D runs.
         if (!plan.stage_in.empty()) {
             std::optional<DeviceKVPageReservation> reservation =
                 pool.reserve(static_cast<std::uint32_t>(plan.stage_in.size()));
             if (!reservation) {
                 throw std::runtime_error("KVMem stage-in found no free device page");
             }
-            for (const std::uint32_t id : plan.stage_in) {
+            std::vector<std::uint32_t> ordered = plan.stage_in;
+            for (const std::uint32_t id : ordered) {
                 if (block_pages.size() <= id) { block_pages.resize(id + 1); }
                 if (block_hosts.size() <= id) { block_hosts.resize(id + 1); }
+            }
+            std::stable_sort(ordered.begin(), ordered.end(),
+                             [&](std::uint32_t a, std::uint32_t b) {
+                                 const bool va = block_hosts[a].valid();
+                                 const bool vb = block_hosts[b].valid();
+                                 if (va != vb) { return va > vb; }
+                                 if (!va) { return false; }
+                                 return kvmem_host_arena_->view(block_hosts[a]).data() <
+                                        kvmem_host_arena_->view(block_hosts[b]).data();
+                             });
+            std::vector<HostKVAllocationConstView> views;
+            std::vector<DeviceKVPageHandle> handles;
+            std::vector<std::uint32_t> restored_ids;
+            views.reserve(ordered.size());
+            handles.reserve(ordered.size());
+            restored_ids.reserve(ordered.size());
+            for (const std::uint32_t id : ordered) {
                 LogicalKVPageHandle logical = pages_->materialize(*reservation);
                 block_pages[id]             = logical;
                 if (block_hosts[id].valid()) {
-                    DeviceKVPageHandle ph = pages_->physical(logical);
-                    pool.copy_from_host(kvmem_host_arena_->writable_view(block_hosts[id]),
-                                        std::span<const DeviceKVPageHandle>(&ph, 1));
-                    block_hosts[id].release();
+                    views.push_back(kvmem_host_arena_->view(block_hosts[id]));
+                    handles.push_back(pages_->physical(logical));
+                    restored_ids.push_back(id);
                 }
                 pages_->commit_coverage(logical, kPagedKVPageSize);
                 // A restored page joins the window of a LIVE address the same way a grown page
@@ -2540,7 +2612,20 @@ public:
                 // deactivate finds a window page with no active reference and refuses.
                 if (address.active) { pages_->retain_active_reference(logical); }
             }
+            if (!views.empty()) {
+                transfer_runs += pool.copy_from_host_pages(views, handles, stream);
+            }
+            if (transfer_runs != 0) {
+                KVMEM_CUDA_CHECK(cudaStreamSynchronize(stream));
+            }
+            for (const std::uint32_t id : restored_ids) { block_hosts[id].release(); }
+        } else if (transfer_runs != 0) {
+            KVMEM_CUDA_CHECK(cudaStreamSynchronize(stream));
         }
+        const auto transfer_us = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - transfer_start)
+                .count());
 
         // ---- 3) re-phase every moved block from its baked slot to the new one ----
         if (!plan.remaps.empty()) {
@@ -2609,8 +2694,19 @@ public:
         kvmem_reuse_floors_[index] = reuse_floor_slots;
         kvmem_stage_out_blocks_ += plan.stage_out.size();
         kvmem_stage_in_blocks_ += plan.stage_in.size();
+        kvmem_transfer_runs_ += transfer_runs;
+        kvmem_transfer_us_ += transfer_us;
         kvmem_window_tokens_ = kv_window;
         ++kvmem_compactions_;
+        if (const char* env = std::getenv("KVMEM_RESELECT"); env != nullptr && env[0] != '\0' &&
+            env[0] != '0') {
+            std::fprintf(stderr,
+                         "KVMEM_RESELECT blocks=%u stage_out=%zu stage_in=%zu runs=%llu "
+                         "transfer_us=%llu window=%u\n",
+                         repo.block_count(), plan.stage_out.size(), plan.stage_in.size(),
+                         static_cast<unsigned long long>(transfer_runs),
+                         static_cast<unsigned long long>(transfer_us), kv_window);
+        }
         return kv_window;
     }
 
@@ -2726,6 +2822,8 @@ public:
         usage.compact_skips     = kvmem_compact_skips_;
         usage.stage_in_blocks   = kvmem_stage_in_blocks_;
         usage.stage_out_blocks  = kvmem_stage_out_blocks_;
+        usage.transfer_runs     = kvmem_transfer_runs_;
+        usage.transfer_us       = kvmem_transfer_us_;
         usage.scoreable_blocks  = kvmem_scoreable_blocks_;
         usage.zero_score_blocks = kvmem_zero_score_blocks_;
         usage.window_tokens     = kvmem_window_tokens_;
@@ -2763,6 +2861,8 @@ private:
     std::uint64_t kvmem_compact_skips_     = 0;
     std::uint64_t kvmem_stage_in_blocks_   = 0;
     std::uint64_t kvmem_stage_out_blocks_  = 0;
+    std::uint64_t kvmem_transfer_runs_     = 0;
+    std::uint64_t kvmem_transfer_us_       = 0;
     std::uint64_t kvmem_scoreable_blocks_  = 0;
     std::uint64_t kvmem_zero_score_blocks_ = 0;
     std::uint32_t kvmem_window_tokens_     = 0;

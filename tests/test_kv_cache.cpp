@@ -411,6 +411,75 @@ int exercise_layout_and_transfer(ninfer::DeviceContext& context, ninfer::KVPageG
                            !subrelease_arena.can_allocate_after_suballocation_releases(
                                subrelease, three_page_target),
                        label + " Host suballocation release feasibility is not extent exact");
+
+    // Gather/scatter page transfers (KVMem stage-out / stage-in): 5 source pages {0,1,2,6,7}
+    // parked in 5 split single-page host slots merge into 2 D2H runs; restoring those 5 adjacent
+    // host slots into 5 contiguous destination pages {0,1,2,3,4} merges into 1 H2D run.
+    ninfer::HostKVArena stage_arena(host_layout.page_stride * 8,
+                                    std::span<const ninfer::HostKVPageLayout>(layouts));
+    auto stage_extent = stage_arena.allocate(host_layout, 5);
+    failures += expect(stage_extent.has_value(), label + " stage extent allocation failed");
+    std::vector<ninfer::HostKVAllocation> stage_slots(5);
+    {
+        ninfer::HostKVAllocation rest = std::move(*stage_extent);
+        for (std::uint32_t i = 0; i < 4; ++i) {
+            auto [head_slot, tail_slot] = stage_arena.split(std::move(rest), 1);
+            stage_slots[i]              = std::move(head_slot);
+            rest                        = std::move(tail_slot);
+        }
+        stage_slots[4] = std::move(rest);
+    }
+    std::vector<ninfer::HostKVAllocationView> stage_views;
+    std::vector<ninfer::HostKVAllocationConstView> stage_const_views;
+    for (auto& slot : stage_slots) {
+        ninfer::HostKVAllocationView v = stage_arena.writable_view(slot);
+        std::memset(v.data(), 0, host_layout.page_stride);
+        stage_views.push_back(v);
+        stage_const_views.push_back(v);
+    }
+    const std::size_t d2h_runs =
+        source.copy_to_host_pages(source_handles, stage_views, context.stream);
+    context.synchronize();
+    failures += expect_size(d2h_runs, 2, label + " D2H page gather did not merge contiguous runs");
+    for (std::size_t i = 0; i < 5; ++i) {
+        failures += expect(std::memcmp(stage_views[i].data(),
+                                       expected.data() + i * host_layout.page_stride,
+                                       host_layout.page_stride) == 0,
+                           label + " D2H page gather payload mismatch");
+    }
+
+    destination.zero_pages(restored_handles, context.stream);
+    const std::size_t h2d_runs =
+        destination.copy_from_host_pages(stage_const_views, restored_handles, context.stream);
+    std::memset(roundtrip_view.data(), 0, host_layout.page_stride * roundtrip_view.page_count());
+    destination.copy_to_host(restored_handles, roundtrip_view, context.stream);
+    context.synchronize();
+    failures += expect_size(h2d_runs, 1, label + " H2D page scatter did not merge contiguous run");
+    failures += expect(std::memcmp(roundtrip_view.data(), expected.data(), expected.size()) == 0,
+                       label + " H2D page scatter roundtrip changed bytes");
+
+    // Non-adjacent host order {0,1,3,2,4} splits at the host-stride discontinuity (3 runs:
+    // {0,1}, {3}, {2}, {4} -> 4 runs) while still landing each slot on its target device page.
+    const std::array<ninfer::HostKVAllocationConstView, 5> permuted_views{
+        stage_const_views[0], stage_const_views[1], stage_const_views[3], stage_const_views[2],
+        stage_const_views[4]};
+    destination.zero_pages(restored_handles, context.stream);
+    const std::size_t permuted_runs =
+        destination.copy_from_host_pages(permuted_views, restored_handles, context.stream);
+    std::memset(roundtrip_view.data(), 0, host_layout.page_stride * roundtrip_view.page_count());
+    destination.copy_to_host(restored_handles, roundtrip_view, context.stream);
+    context.synchronize();
+    failures += expect_size(permuted_runs, 4,
+                            label + " permuted H2D page scatter run count is wrong");
+    const std::array<std::size_t, 5> expected_order{0, 1, 3, 2, 4};
+    for (std::size_t i = 0; i < 5; ++i) {
+        failures += expect(
+            std::memcmp(roundtrip_view.data() + i * host_layout.page_stride,
+                        expected.data() + expected_order[i] * host_layout.page_stride,
+                        host_layout.page_stride) == 0,
+            label + " permuted H2D page scatter landed wrong page");
+    }
+
     (void)left;
     (void)tail;
     (void)blockers;

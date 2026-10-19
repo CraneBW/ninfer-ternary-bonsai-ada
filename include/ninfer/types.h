@@ -1170,12 +1170,18 @@ struct CaptureSkipStats {
 // KVMem residency and retrieval evidence. The block counters are lifetime totals; window_tokens
 // is the most recent successful compaction's traffic (the newest window across the two KV address
 // spaces), and host_bytes is the arena those evicted blocks occupy.
+// transfer_runs counts the merged copy runs the staged blocks travelled as (one run moves every
+// plane of a stretch of device-consecutive, host-adjacent pages); stage blocks / transfer_runs is
+// the mean run length, and a value near 1 means the stage traffic degraded to one copy per page.
+// transfer_us is the wall time of the stage-out + stage-in copies, synchronised.
 struct KvMemUsage {
     std::uint64_t plans            = 0;
     std::uint64_t compactions      = 0;
     std::uint64_t compact_skips    = 0;
     std::uint64_t stage_in_blocks  = 0;
     std::uint64_t stage_out_blocks = 0;
+    std::uint64_t transfer_runs    = 0;
+    std::uint64_t transfer_us      = 0;
     std::uint64_t scoreable_blocks = 0;
     std::uint64_t zero_score_blocks = 0;
     std::uint32_t window_tokens     = 0;
@@ -1187,6 +1193,8 @@ struct KvMemUsage {
         compact_skips += other.compact_skips;
         stage_in_blocks += other.stage_in_blocks;
         stage_out_blocks += other.stage_out_blocks;
+        transfer_runs += other.transfer_runs;
+        transfer_us += other.transfer_us;
         scoreable_blocks += other.scoreable_blocks;
         zero_score_blocks += other.zero_score_blocks;
         if (other.window_tokens > window_tokens) { window_tokens = other.window_tokens; }

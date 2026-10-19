@@ -93,10 +93,11 @@ saturation does not make the Engine unavailable. The endpoint remains unauthenti
 `GET /metrics` exposes the same counters the server logs, in the Prometheus text format. The
 `llamacpp:` prefix keeps the usual prompt, generation, and queue counters compatible with existing
 dashboards; `ninfer:` counters cover context-cache occupancy and reuse, KVMem plans, compactions,
-stage-in/stage-out blocks, scored blocks, and the working-set window, and `ninfer:capture_skips`
-breaks skipped captures down by reason. `GET /slots` lists the requests the Engine is currently
-processing, with protocol, model, prompt-token count, stream mode, and elapsed time. Neither endpoint
-reads or changes the request log, and both remain unauthenticated.
+stage-in/stage-out blocks, merged transfer runs and elapsed microseconds, scored blocks, and the
+working-set window, and `ninfer:capture_skips` breaks skipped captures down by reason. `GET /slots`
+lists the requests the Engine is currently processing, with protocol, model, prompt-token count,
+stream mode, and elapsed time. Neither endpoint reads or changes the request log, and both remain
+unauthenticated.
 
 Every OpenAI-compatible response carries a unique `x-request-id` header, including streaming and
 error responses. Anthropic endpoints use their separate `request-id` contract.
@@ -963,7 +964,13 @@ context: the device pages plus the pages `--host-kv-mib` buys, capped at `--max-
 Concurrent long sessions draw parked middle blocks from that one arena, so raise
 `--max-context` and `--host-kv-mib` together when many sessions each park a large middle;
 admission still accounts only the engine's continuation Host KV, so a mix that outgrows the
-KVMem arena fails during compaction rather than by queueing.
+KVMem arena fails during compaction rather than by queueing. During compaction, evicted blocks
+are sorted by physical device page index and parked into one contiguous host extent that is
+split back into per-block slots, while restored blocks are materialized in ascending host-slot
+address order so consecutive physical device pages and adjacent host slots merge into strided
+multi-page transfer runs (`ninfer:kvmem_transfer_runs_total` and `ninfer:kvmem_transfer_us_total`
+in `GET /metrics`; `KVMEM_RESELECT=1` logs `KVMEM_RESELECT blocks=<n> stage_out=<n> stage_in=<n>
+runs=<n> transfer_us=<n> window=<n>` per compaction on stderr).
 
 `--max-context` may exceed the model's native 262,144-token rotary window, up to twice it (524,288
 tokens). Past the native window the text RoPE divisors are published once at startup with the YaRN

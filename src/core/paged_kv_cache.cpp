@@ -663,6 +663,144 @@ void DeviceKVPagePool::copy_from_host(HostKVAllocationConstView source,
     }
 }
 
+std::vector<KVTransferRun> plan_kv_transfer_runs(std::span<const std::int32_t> device_pages,
+                                                 std::span<const std::byte* const> host_pages,
+                                                 std::size_t host_page_stride) {
+    if (device_pages.size() != host_pages.size()) {
+        throw std::invalid_argument("Paged KV transfer plan sides differ in length");
+    }
+    std::vector<KVTransferRun> runs;
+    std::size_t begin = 0;
+    while (begin < device_pages.size()) {
+        std::size_t end = begin + 1;
+        while (end < device_pages.size() && device_pages[end] == device_pages[end - 1] + 1 &&
+               host_pages[end] == host_pages[end - 1] + host_page_stride) {
+            ++end;
+        }
+        runs.push_back(KVTransferRun{.begin = begin, .count = end - begin});
+        begin = end;
+    }
+    return runs;
+}
+
+namespace {
+
+// Shared validation of a gather/scatter list: every slot is one page of the pool's geometry and
+// all slots share one layout object, so a single page stride addresses a whole merged run.
+template <typename View>
+const HostKVPageLayout& single_page_host_layout(std::span<const View> host,
+                                                const KVPageGeometry& geometry,
+                                                std::vector<const std::byte*>& addresses) {
+    const HostKVPageLayout* layout = nullptr;
+    addresses.clear();
+    addresses.reserve(host.size());
+    for (const View& view : host) {
+        if (!view.valid() || view.page_count() != 1 || view.layout().geometry != geometry) {
+            throw std::invalid_argument("Paged KV page transfer slot is not one page of this pool");
+        }
+        if (layout == nullptr) {
+            layout = &view.layout();
+        } else if (&view.layout() != layout && view.layout() != *layout) {
+            throw std::invalid_argument("Paged KV page transfer slots disagree on host layout");
+        }
+        addresses.push_back(view.data());
+    }
+    if (layout == nullptr) { throw std::invalid_argument("Paged KV page transfer list is empty"); }
+    return *layout;
+}
+
+} // namespace
+
+std::size_t DeviceKVPagePool::copy_to_host_pages(std::span<const DeviceKVPageHandle> source,
+                                                 std::span<const HostKVAllocationView> destination,
+                                                 cudaStream_t stream) const {
+    if (source.size() != destination.size()) {
+        throw std::invalid_argument("Paged KV page D2H sides differ in length");
+    }
+    if (source.empty()) { return 0; }
+    std::vector<const std::byte*> addresses;
+    const HostKVPageLayout& host = single_page_host_layout(destination, geometry(), addresses);
+    std::vector<std::int32_t> indices;
+    indices.reserve(source.size());
+    for (DeviceKVPageHandle page : source) { indices.push_back(physical_index(page)); }
+
+    const std::vector<KVTransferRun> runs =
+        plan_kv_transfer_runs(indices, addresses, host.page_stride);
+    for (const KVTransferRun& run : runs) {
+        const std::int32_t first = indices[run.begin];
+        std::byte* run_host      = destination[run.begin].data();
+        for (std::size_t plane_index = 0; plane_index < planes_.size(); ++plane_index) {
+            const Tensor& plane                 = planes_[plane_index];
+            const HostKVPlaneLayout& host_plane = host.planes[plane_index];
+            auto* host_base                     = run_host + host_plane.offset;
+            const auto* device_base             = static_cast<const unsigned char*>(plane.data);
+            if (geometry().device_plane_order == PagedKVPlaneOrder::PageMajor) {
+                CUDA_CHECK(cudaMemcpy2DAsync(
+                    host_base, host.page_stride,
+                    device_base + static_cast<std::int64_t>(first) * plane.nb[3], plane.nb[3],
+                    host_plane.page_payload_bytes, run.count, cudaMemcpyDeviceToHost, stream));
+            } else {
+                for (std::int32_t head = 0; head < plane.ne[3]; ++head) {
+                    CUDA_CHECK(cudaMemcpy2DAsync(
+                        host_base + static_cast<std::size_t>(head) * host_plane.head_payload_bytes,
+                        host.page_stride,
+                        device_base + static_cast<std::int64_t>(head) * plane.nb[3] +
+                            static_cast<std::int64_t>(first) * plane.nb[2],
+                        plane.nb[2], host_plane.head_payload_bytes, run.count,
+                        cudaMemcpyDeviceToHost, stream));
+                }
+            }
+        }
+    }
+    return runs.size();
+}
+
+std::size_t
+DeviceKVPagePool::copy_from_host_pages(std::span<const HostKVAllocationConstView> source,
+                                       std::span<const DeviceKVPageHandle> destination,
+                                       cudaStream_t stream) const {
+    if (source.size() != destination.size()) {
+        throw std::invalid_argument("Paged KV page H2D sides differ in length");
+    }
+    if (source.empty()) { return 0; }
+    validate_distinct_pages(destination, "Paged KV H2D destination contains duplicate pages");
+    std::vector<const std::byte*> addresses;
+    const HostKVPageLayout& host = single_page_host_layout(source, geometry(), addresses);
+    std::vector<std::int32_t> indices;
+    indices.reserve(destination.size());
+    for (DeviceKVPageHandle page : destination) { indices.push_back(physical_index(page)); }
+
+    const std::vector<KVTransferRun> runs =
+        plan_kv_transfer_runs(indices, addresses, host.page_stride);
+    for (const KVTransferRun& run : runs) {
+        const std::int32_t first  = indices[run.begin];
+        const std::byte* run_host = source[run.begin].data();
+        for (std::size_t plane_index = 0; plane_index < planes_.size(); ++plane_index) {
+            const Tensor& plane                 = planes_[plane_index];
+            const HostKVPlaneLayout& host_plane = host.planes[plane_index];
+            const auto* host_base               = run_host + host_plane.offset;
+            auto* device_base                   = static_cast<unsigned char*>(plane.data);
+            if (geometry().device_plane_order == PagedKVPlaneOrder::PageMajor) {
+                CUDA_CHECK(cudaMemcpy2DAsync(
+                    device_base + static_cast<std::int64_t>(first) * plane.nb[3], plane.nb[3],
+                    host_base, host.page_stride, host_plane.page_payload_bytes, run.count,
+                    cudaMemcpyHostToDevice, stream));
+            } else {
+                for (std::int32_t head = 0; head < plane.ne[3]; ++head) {
+                    CUDA_CHECK(cudaMemcpy2DAsync(
+                        device_base + static_cast<std::int64_t>(head) * plane.nb[3] +
+                            static_cast<std::int64_t>(first) * plane.nb[2],
+                        plane.nb[2],
+                        host_base + static_cast<std::size_t>(head) * host_plane.head_payload_bytes,
+                        host.page_stride, host_plane.head_payload_bytes, run.count,
+                        cudaMemcpyHostToDevice, stream));
+                }
+            }
+        }
+    }
+    return runs.size();
+}
+
 std::vector<DeviceKVPageReservation>
 reserve_device_kv_page_bundle(std::span<const DeviceKVPageReservationRequest> requests) {
     for (std::size_t index = 0; index < requests.size(); ++index) {

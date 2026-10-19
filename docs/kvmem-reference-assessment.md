@@ -191,3 +191,21 @@ K3 的位置压缩是锦上添花，但它是内核级改动 + MRoPE 适配，�
 - `docs/zatfung-sm86-sm75-port.md` 回答"SM86/SM75 架构移植"
 - 两者的交汇点：**K3 的 re-RoPE 内核需要按架构分别实现**（sm_75 无 cp.async、
   sm_86 的 smem 档位），且要绕开为 sm_75/sm_86 剔除的 FP8 路径
+
+---
+
+## 6. 2026-10-19 生态跟进与 Stage 传输连段合并
+
+对外部 `melis2023/ninfer-kvmem-actkv` 最新提交（`b6c8337`、`2a1e569`）及两份技术报告的复盘结论：
+
+1. **Compaction 耗时分布（`docs/kvmem-recall-opt-20261019.md` §8）**：
+   - 打分（`kvmem_score_blocks`）仅占约 4.3%（~40 ms），Top-K 选择仅占 ~0.004%（38 µs），而 **PCIe 页面换入/换出占 >95%**。
+   - 原本按单块逐页调用 `copy_to_host` / `copy_from_host`（`count=1`）时，每个 64-token 页在 27B 文本 KV 池上会拆成 64 次 26 KiB 的 `cudaMemcpy2DAsync`，PCIe 有效带宽仅 ~4.0 GB/s（链路利用率 ~26%，对比连续大块 13.7–14.1 GB/s）。
+2. **本仓落地（`src/core/paged_kv_cache.*` + `src/targets/qwen3_6/impl/runtime/logical_kv_store.h`）**：
+   - 新增 `plan_kv_transfer_runs(device_pages, host_pages, host_page_stride)`、`DeviceKVPagePool::copy_to_host_pages` 与 `copy_from_host_pages`：同时支持 `PageMajor`（多页连段直接退化为单次 `cudaMemcpyAsync`）与 `HeadMajor`（单次 `cudaMemcpy2DAsync` 跨 `run.count * tokens_per_page`），只要物理设备页连续且宿主槽位满足 `page_stride` 相邻即自动合并为单个传输连段（Run）。
+   - **Stage-Out**：按物理设备页号升序排列待换出块，从 `kvmem_host_arena_` 一次性申请 `count` 页连续 extent 并用 `split()` 切回独立生命周期的 1 页 `HostKVAllocation` 槽位（碎片化时自动回退逐页分配），随后在绑定 `cudaStream_t` 上单次调用 `copy_to_host_pages`。
+   - **Stage-In**：在释放完 `stage_out` 设备页后，将 `stage_in` 按宿主驻留地址升序稳定排序后再从 `free_page_runs_` 顺序 `materialize`，使先前成批换出的相邻宿主槽位自然配对到连续物理设备页，单次调用 `copy_from_host_pages` 并在同一 `stream` 上同步后释放宿主槽位。
+   - **可观测性**：`KvMemUsage` 与 `GET /metrics` 新增 `ninfer:kvmem_transfer_runs_total`、`ninfer:kvmem_transfer_us_total`；环境变量 `KVMEM_RESELECT=1` 按轮向 stderr 输出 `KVMEM_RESELECT blocks=<n> stage_out=<n> stage_in=<n> runs=<n> transfer_us=<n> window=<n>`。
+3. **DFlash2 × KVMem 正交性结论（`docs/dflash2-kvmem-audit-20261019.md`）**：
+   - DFlash2 自带 5 层局部滑窗 KV 池，与主模型 16 层全注意力 KVMem 池完全独立；所有接缝均走公开接口（`store.window_tokens(kv)`、`store.block_table(kv)`），仅生成期中段主动压缩因 `speculative_active` 守卫跳过（prefill 后重选与跨轮重选正常生效）。
+

@@ -107,6 +107,24 @@ class KVExecutionTablePool;
 class HostKVAllocationView;
 class HostKVAllocationConstView;
 
+// One merged Host<->Device copy: pages [begin, begin + count) of a gather/scatter list whose
+// device pages are consecutive physical indices and whose host pages sit back to back at the
+// host layout's page stride, so every plane of the stretch moves as a single strided copy.
+struct KVTransferRun {
+    std::size_t begin  = 0;
+    std::size_t count  = 0;
+
+    friend bool operator==(const KVTransferRun&, const KVTransferRun&) = default;
+};
+
+// Splits a page list into the fewest runs that satisfy BOTH contiguity conditions. Either side
+// alone is not enough: device-consecutive pages parked in scattered host slots, or host-adjacent
+// slots restored to scattered device pages, still need one copy per page. Pure and host-only so
+// the merge rule is testable without a GPU.
+[[nodiscard]] std::vector<KVTransferRun>
+plan_kv_transfer_runs(std::span<const std::int32_t> device_pages,
+                      std::span<const std::byte* const> host_pages, std::size_t host_page_stride);
+
 /** Copyable, non-owning physical-page capability minted by one DeviceKVPagePool. */
 class DeviceKVPageHandle {
 public:
@@ -239,6 +257,17 @@ public:
     void copy_from_host(HostKVAllocationConstView source,
                         std::span<const DeviceKVPageHandle> destination,
                         cudaStream_t stream = nullptr) const;
+
+    // Gather/scatter forms for pages parked in independently owned single-page host slots
+    // (KVMem stage traffic). Page i moves between source[i] and destination[i]; stretches that
+    // plan_kv_transfer_runs merges travel as one strided copy per plane (per plane and head for
+    // HeadMajor pools) instead of one per page. Returns the number of merged runs issued.
+    std::size_t copy_to_host_pages(std::span<const DeviceKVPageHandle> source,
+                                   std::span<const HostKVAllocationView> destination,
+                                   cudaStream_t stream = nullptr) const;
+    std::size_t copy_from_host_pages(std::span<const HostKVAllocationConstView> source,
+                                     std::span<const DeviceKVPageHandle> destination,
+                                     cudaStream_t stream = nullptr) const;
 
 private:
     friend class DeviceKVPageLease;

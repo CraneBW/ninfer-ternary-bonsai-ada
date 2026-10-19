@@ -142,6 +142,8 @@ std::string ServeMetrics::render(const ninfer::RuntimeStats& stats,
     metric(out, "ninfer:kvmem_compact_skips_total", stats.kvmem.compact_skips);
     metric(out, "ninfer:kvmem_stage_in_blocks_total", stats.kvmem.stage_in_blocks);
     metric(out, "ninfer:kvmem_stage_out_blocks_total", stats.kvmem.stage_out_blocks);
+    metric(out, "ninfer:kvmem_transfer_runs_total", stats.kvmem.transfer_runs);
+    metric(out, "ninfer:kvmem_transfer_us_total", stats.kvmem.transfer_us);
     metric(out, "ninfer:kvmem_scoreable_blocks_total", stats.kvmem.scoreable_blocks);
     metric(out, "ninfer:kvmem_zero_score_blocks_total", stats.kvmem.zero_score_blocks);
     metric(out, "ninfer:kvmem_window_tokens", static_cast<std::uint64_t>(stats.kvmem.window_tokens));
