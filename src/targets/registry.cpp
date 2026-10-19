@@ -121,13 +121,14 @@ std::size_t current_free_device_bytes(std::size_t weights_bytes = 0,
 
 template <class Target, class Loaded, class Instance>
 ConstructedTarget construct_registered(const EngineOptions& options, DeviceContext& device,
-                                       artifact::Reader& reader, Clock::time_point load_start,
+                                       artifact::Reader& reader,
+                                       const artifact::ArtifactIdentity& identity,
+                                       Clock::time_point load_start,
                                        std::string_view target_key) {
 #if defined(_WIN32)
     core::set_wddm_residency_lock_enabled(options.wddm_evictable_budget);
 #endif
     StartupPhaseScope target_plan_phase(options.startup_observer, StartupPhase::TargetPlan);
-    const auto& identity                          = reader.identity();
     const auto weights_profile                    = Target::resolve_weights(identity);
     const ModelSamplingDefaults sampling_defaults = Target::sampling_defaults(identity.model_id);
     const runtime::ContextCostIdentity context_cost_identity{
@@ -197,6 +198,32 @@ ConstructedTarget construct_registered(const EngineOptions& options, DeviceConte
                              .context_cost      = std::move(context_cost.model)};
 }
 
+artifact::ArtifactIdentity registered_identity(const artifact::Reader& reader) {
+    if (const auto* directory = reader.v3_directory()) {
+        // v3 carries model identity in the validated component config, rather
+        // than the v2 top-level identity. A new architecture must register
+        // its own target instead of accidentally receiving the 27B program.
+        const auto& components = directory->at("components");
+        if (!components.contains("text")) {
+            throw artifact::ArtifactError("v3 artifact has no text component");
+        }
+        const auto& config = components.at("text").at("config");
+        const auto& metadata = directory->at("metadata");
+        if (metadata.value("name", "") == "qwen3.8-27b" &&
+            config.value("model_type", "") == "qwen3_5_text" &&
+            config.value("hidden_size", 0) == 5120 &&
+            config.value("num_hidden_layers", 0) == 64) {
+            // Text's mixed GGUF formats are dispatched from their descriptors
+            // by the Qwen3.8 target. The legacy weights profile is currently
+            // the target's model-family identifier, not its per-tensor codec.
+            return {std::string(Qwen3_6_27B::qwen3_8_model_id), "groupwise-int"};
+        }
+        throw artifact::ArtifactError(
+            "v3 component geometry is not registered as an executable target");
+    }
+    return reader.identity();
+}
+
 } // namespace
 
 LoadedQwen3_6_27B::LoadedQwen3_6_27B(std::unique_ptr<Qwen3_6_27B::LoadedModel> stable_model,
@@ -242,18 +269,18 @@ ConstructedTarget construct_target(const EngineOptions& options, DeviceContext& 
     StartupPhaseScope inspect_phase(options.startup_observer, StartupPhase::ArtifactInspect);
     artifact::Reader reader(options.artifact_path);
     inspect_phase.complete();
-    const auto& identity = reader.identity();
+    const auto identity = registered_identity(reader);
     if (identity.model_id == Qwen3_6_27B::model_id) {
         return construct_registered<Qwen3_6_27B, LoadedQwen3_6_27B, Qwen3_6_27BInstance>(
-            options, device, reader, load_start, Qwen3_6_27B::target_key);
+            options, device, reader, identity, load_start, Qwen3_6_27B::target_key);
     }
     if (identity.model_id == Qwen3_6_27B::qwen3_8_model_id) {
         return construct_registered<Qwen3_6_27B, LoadedQwen3_6_27B, Qwen3_6_27BInstance>(
-            options, device, reader, load_start, Qwen3_6_27B::qwen3_8_target_key);
+            options, device, reader, identity, load_start, Qwen3_6_27B::qwen3_8_target_key);
     }
     if (identity.model_id == Qwen3_6_35BA3B::model_id) {
         return construct_registered<Qwen3_6_35BA3B, LoadedQwen3_6_35BA3B, Qwen3_6_35BA3BInstance>(
-            options, device, reader, load_start, Qwen3_6_35BA3B::target_key);
+            options, device, reader, identity, load_start, Qwen3_6_35BA3B::target_key);
     }
     throw std::runtime_error("artifact identity '" + identity.model_id + "/" + identity.weights_id +
                              "' has no registered target for this device");
