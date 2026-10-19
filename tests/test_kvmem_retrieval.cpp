@@ -38,13 +38,14 @@ int main() {
     query[2] = 0.0F;  // head 1: (0, 1)
     query[3] = 2.0F;
 
-    std::vector<float> mean_k(kBlocks * kLayers * kKvHeads * kHeadDim, 0.0F);
-    mean_k[0] = 4.0F;  // block 0 layer 0: sum (4, 0) over 4 tokens
-    mean_k[1] = 0.0F;
-    mean_k[2] = 4.0F;  // block 1 layer 0: sum (-4, 0)
-    mean_k[3] = 0.0F;
+    constexpr std::size_t kStride =
+        kLayers * kKvHeads * ninfer::kvmem::kMeanKeySubblocks * kHeadDim;
+    std::vector<float> mean_k(kBlocks * kStride, 0.0F);
+    mean_k[0] = 4.0F;       // block 0 subblock 0 follows query head 0
+    mean_k[kHeadDim] = -4.0F; // block 0 subblock 1 opposes query head 0
+    mean_k[kStride] = -4.0F;  // block 1 subblock 0 opposes query head 0
     // block 2 has no mean-K yet (never resident long enough to export).
-    std::vector<std::uint32_t> tokens{4, 4, 0};
+    std::vector<std::uint32_t> tokens{32, 4, 0};
 
     const ninfer::kvmem::MeanKeyQueryView view{query.data(), kLayers, kHeadDim, kQueryHeads,
                                                kKvHeads};
@@ -52,8 +53,8 @@ int main() {
         ninfer::kvmem::mean_key_scores(kBlocks, mean_k.data(), tokens.data(), view);
 
     require(scores.size() == kBlocks, "one score per block");
-    // Block 0 aligns with head 0 exactly; GQA max keeps that 1.0 where a group
-    // mean would have reported 0.707. Inactive layer 1 must not halve it.
+    // Block 0 retains the signal in subblock 0 even though subblock 1 opposes it.
+    // Inactive layer 1 must not halve it.
     require(close_to(scores[0], 1.0F), "aligned block scores one");
     // Block 1 is opposed by head 0 and orthogonal to head 1, so its best cosine is 0.
     require(close_to(scores[1], 0.0F), "opposed block scores zero");

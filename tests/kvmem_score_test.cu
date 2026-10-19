@@ -278,7 +278,8 @@ int main() {
                   query_mismatch);
 
             // ---- export the resident mean keys, score the ledger on the host ----
-            const std::size_t stride = static_cast<std::size_t>(kLayers) * kHeads * kDim;
+            const std::size_t stride =
+                static_cast<std::size_t>(kLayers) * kHeads * kMeanKeySubblocks * kDim;
             std::vector<std::int32_t> export_pages{kPages - 1, 0};
             std::vector<std::int32_t> export_baked{baked[kPages - 1], baked[0]};
             std::vector<std::uint32_t> export_tokens{kTokens, kTokens};
@@ -310,40 +311,43 @@ int main() {
                 for (int layer = 0; layer < kLayers; ++layer) {
                     for (int head = 0; head < kHeads; ++head) {
                         const int group = kQHeads / kHeads;
-                        float mean_k[kDim];
-                        for (int d = 0; d < kDim; ++d) { mean_k[d] = 0.0f; }
-                        for (int token = 0; token < kTokens; ++token) {
-                            float row[kDim];
-                            for (int d = 0; d < kDim; ++d) {
-                                const std::int64_t code_at =
-                                    static_cast<std::int64_t>(page) * kCodePageStride +
-                                    code_off(head, token, d);
-                                const std::int64_t scale_at =
-                                    static_cast<std::int64_t>(page) * kScalePageStride +
-                                    scale_off(head, token, d / 64);
-                                row[d] = static_cast<float>(
-                                             codes[layer][static_cast<std::size_t>(code_at)]) *
-                                         __half2float(__ushort_as_half(
-                                             scales[layer][static_cast<std::size_t>(scale_at)]));
-                            }
-                            hadamard256_host(row);
-                            rope_rotary(row, baked[page] + token, true);
-                            for (int d = 0; d < kDim; ++d) { mean_k[d] += row[d]; }
-                        }
-                        // GQA max: one cosine per probe head of the group, best one wins.
+                        // Independent oracle: reconstruct and score each 16-token
+                        // region from encoded pages, then take the best cosine.
                         double best = -1.0;
-                        for (int gi = 0; gi < group; ++gi) {
-                            const int probe = head * group + gi;
-                            double dot = 0.0, q_norm = 0.0, k_norm = 0.0;
-                            for (int d = 0; d < kDim; ++d) {
-                                const double q = query_sums[(
-                                    static_cast<std::size_t>(layer) * kQHeads + probe) * kDim + d];
-                                dot += q * mean_k[d];
-                                q_norm += q * q;
-                                k_norm += static_cast<double>(mean_k[d]) * mean_k[d];
+                        for (int sub = 0; sub < static_cast<int>(kMeanKeySubblocks); ++sub) {
+                            float mean_k[kDim] = {};
+                            for (int token = sub * kMeanKeyTokensPerSubblock;
+                                 token < (sub + 1) * kMeanKeyTokensPerSubblock; ++token) {
+                                float row[kDim];
+                                for (int d = 0; d < kDim; ++d) {
+                                    const std::int64_t code_at =
+                                        static_cast<std::int64_t>(page) * kCodePageStride +
+                                        code_off(head, token, d);
+                                    const std::int64_t scale_at =
+                                        static_cast<std::int64_t>(page) * kScalePageStride +
+                                        scale_off(head, token, d / 64);
+                                    row[d] = static_cast<float>(
+                                                 codes[layer][static_cast<std::size_t>(code_at)]) *
+                                             __half2float(__ushort_as_half(
+                                                 scales[layer][static_cast<std::size_t>(scale_at)]));
+                                }
+                                hadamard256_host(row);
+                                rope_rotary(row, baked[page] + token, true);
+                                for (int d = 0; d < kDim; ++d) { mean_k[d] += row[d]; }
                             }
-                            const double den = q_norm * k_norm;
-                            best = std::max(best, den > 0.0 ? dot / std::sqrt(den) : 0.0);
+                            for (int gi = 0; gi < group; ++gi) {
+                                const int probe = head * group + gi;
+                                double dot = 0.0, q_norm = 0.0, k_norm = 0.0;
+                                for (int d = 0; d < kDim; ++d) {
+                                    const double q = query_sums[(
+                                        static_cast<std::size_t>(layer) * kQHeads + probe) * kDim + d];
+                                    dot += q * mean_k[d];
+                                    q_norm += q * q;
+                                    k_norm += static_cast<double>(mean_k[d]) * mean_k[d];
+                                }
+                                const double den = q_norm * k_norm;
+                                best = std::max(best, den > 0.0 ? dot / std::sqrt(den) : 0.0);
+                            }
                         }
                         total += best;
                     }

@@ -96,8 +96,8 @@ void kvmem_accumulate_query(const void* q_rope, std::uint32_t q_heads, std::uint
                             std::uint32_t query_begin, std::uint32_t query_end, void* sums,
                             std::uint32_t layer, cudaStream_t stream);
 
-// Reconstructs the raw mean-K sum of every device-resident block and writes it
-// to `mean_k_out` (host), laid out [n_blocks][layers][kv_heads][head_dim] f32.
+// Reconstructs four independent raw-K sums per 64-token page and writes them
+// to `mean_k_out` (host): [blocks][layers][kv_heads][subblocks=4][dim] f32.
 // `page_indices[i]` is the block's physical page within the pool's planes;
 // `token_counts[i]` is the number of written tokens in the block (a window's
 // last page may be partial), so unwritten columns are not folded into the mean.

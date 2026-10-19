@@ -9,6 +9,8 @@
 
 #pragma once
 
+#include "kvmem/kvmem_layout.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -25,9 +27,8 @@ struct MeanKeyQueryView {
     std::uint32_t kv_heads    = 0;
 };
 
-// One score per block: the cosine between the query and the block's mean raw K, aggregated with
-// the reference's GQA-max rule. Blocks whose tokens or query sums are empty score zero ("no
-// evidence"), so an uninstalled or zero capture reproduces the unranked selection.
+// One score per block: best query-to-subblock cosine (16 tokens per centroid),
+// aggregated by GQA-max and averaged over active layers and KV heads.
 inline std::vector<float> mean_key_scores(std::uint32_t blocks, const float* mean_k,
                                           const std::uint32_t* block_tokens,
                                           const MeanKeyQueryView& query) {
@@ -40,7 +41,8 @@ inline std::vector<float> mean_key_scores(std::uint32_t blocks, const float* mea
     const std::uint32_t group = query.query_heads / query.kv_heads;
     const std::size_t q_layer_stride =
         static_cast<std::size_t>(query.query_heads) * query.head_dim;
-    const std::size_t k_layer_stride = static_cast<std::size_t>(query.kv_heads) * query.head_dim;
+    const std::size_t k_layer_stride =
+        static_cast<std::size_t>(query.kv_heads) * kMeanKeySubblocks * query.head_dim;
     const std::size_t k_block_stride = static_cast<std::size_t>(query.layers) * k_layer_stride;
 
     // Norm of each query head's sum. The token count cancels between the numerator and the
@@ -80,30 +82,35 @@ inline std::vector<float> mean_key_scores(std::uint32_t blocks, const float* mea
                 block_k + static_cast<std::size_t>(layer) * k_layer_stride;
             float layer_score = 0.0f;
             for (std::uint32_t kv_head = 0; kv_head < query.kv_heads; ++kv_head) {
-                const float* key =
-                    layer_k + static_cast<std::size_t>(kv_head) * query.head_dim;
-                float key_norm2 = 0.0f;
-                for (std::uint32_t d = 0; d < query.head_dim; ++d) {
-                    key_norm2 = std::fma(key[d], key[d], key_norm2);
-                }
-                const float key_norm = std::sqrt(key_norm2);
-                if (!(key_norm > 0.0f)) { continue; }
                 float best = -1.0e30f;
-                for (std::uint32_t g = 0; g < group; ++g) {
-                    const std::uint32_t q_head = kv_head * group + g;
-                    const float q_norm =
-                        query_norms[static_cast<std::size_t>(layer) * query.query_heads + q_head];
-                    if (!(q_norm > 0.0f)) { continue; }
-                    const float* q_sums =
-                        query.sums +
-                        (static_cast<std::size_t>(layer) * query.query_heads + q_head) *
+                for (std::uint32_t sub = 0;
+                     sub < kMeanKeySubblocks && sub * kMeanKeyTokensPerSubblock < tokens;
+                     ++sub) {
+                    const float* key =
+                        layer_k +
+                        (static_cast<std::size_t>(kv_head) * kMeanKeySubblocks + sub) *
                             query.head_dim;
-                    float dot = 0.0f;
+                    float key_norm2 = 0.0f;
                     for (std::uint32_t d = 0; d < query.head_dim; ++d) {
-                        dot = std::fma(q_sums[d], key[d], dot);
+                        key_norm2 = std::fma(key[d], key[d], key_norm2);
                     }
-                    const float cosine = dot / (q_norm * key_norm + 1.0e-6f);
-                    best = std::max(best, cosine);
+                    const float key_norm = std::sqrt(key_norm2);
+                    if (!(key_norm > 0.0f)) { continue; }
+                    for (std::uint32_t g = 0; g < group; ++g) {
+                        const std::uint32_t q_head = kv_head * group + g;
+                        const float q_norm = query_norms[
+                            static_cast<std::size_t>(layer) * query.query_heads + q_head];
+                        if (!(q_norm > 0.0f)) { continue; }
+                        const float* q_sums =
+                            query.sums +
+                            (static_cast<std::size_t>(layer) * query.query_heads + q_head) *
+                                query.head_dim;
+                        float dot = 0.0f;
+                        for (std::uint32_t d = 0; d < query.head_dim; ++d) {
+                            dot = std::fma(q_sums[d], key[d], dot);
+                        }
+                        best = std::max(best, dot / (q_norm * key_norm + 1.0e-6f));
+                    }
                 }
                 if (best > -1.0e29f) { layer_score += best; }
             }

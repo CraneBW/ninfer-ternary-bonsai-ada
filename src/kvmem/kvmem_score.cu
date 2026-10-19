@@ -15,6 +15,7 @@
 // blocks written at other positions is only meaningful once RoPE is undone.
 
 #include "kvmem/kvmem_bridge.h"
+#include "kvmem/kvmem_layout.h"
 
 #include "core/arena.h"
 #include "core/paged_kv_cache.h"
@@ -94,7 +95,9 @@ __global__ void kvmem_export_mean_k_kernel(const std::int8_t* const* __restrict_
     const int head = warp % KVHeads;
     const int slot = warp / KVHeads;
 
-    __shared__ float mean_k[KVHeads][kDim];
+    static_assert(kPagedKVPageSize ==
+                  kMeanKeySubblocks * kMeanKeyTokensPerSubblock);
+    __shared__ float mean_k[KVHeads][kMeanKeySubblocks][kDim];
 
     const std::int32_t page  = pages[blockIdx.x];
     const std::int32_t baked = baked_positions[blockIdx.x];
@@ -108,15 +111,21 @@ __global__ void kvmem_export_mean_k_kernel(const std::int8_t* const* __restrict_
                                static_cast<std::int64_t>(page) * kKVCacheInt8Groups *
                                    kPagedKVPageSize * KVHeads;
         __syncthreads();
-        for (int unit = static_cast<int>(threadIdx.x); unit < KVHeads * kDim;
+        for (int unit = static_cast<int>(threadIdx.x);
+             unit < KVHeads * static_cast<int>(kMeanKeySubblocks) * kDim;
              unit += kScoreThreads) {
-            mean_k[unit / kDim][unit % kDim] = 0.0f;
+            const int head = unit / (static_cast<int>(kMeanKeySubblocks) * kDim);
+            const int sub = (unit / kDim) % static_cast<int>(kMeanKeySubblocks);
+            mean_k[head][sub][unit % kDim] = 0.0f;
         }
         __syncthreads();
 
-        float acc[8];
+        float acc[kMeanKeySubblocks][8];
 #pragma unroll
-        for (int r = 0; r < 8; ++r) { acc[r] = 0.0f; }
+        for (int sub = 0; sub < static_cast<int>(kMeanKeySubblocks); ++sub) {
+#pragma unroll
+            for (int r = 0; r < 8; ++r) { acc[sub][r] = 0.0f; }
+        }
         for (int j = 0; j < kTokensPerWarp; ++j) {
             const std::uint32_t token =
                 static_cast<std::uint32_t>(slot + j * kWarpsPerHead);
@@ -145,22 +154,32 @@ __global__ void kvmem_export_mean_k_kernel(const std::int8_t* const* __restrict_
             const float cosi = cosf(phi);
             const float raw0 = row[0] * cosi + row[1] * sine;
             const float raw1 = row[1] * cosi - row[0] * sine;
-            acc[0] += raw0;
-            acc[1] += raw1;
+            const std::uint32_t sub = token / kMeanKeyTokensPerSubblock;
+            acc[sub][0] += raw0;
+            acc[sub][1] += raw1;
 #pragma unroll
-            for (int r = 2; r < 8; ++r) { acc[r] += row[r]; }
+            for (int r = 2; r < 8; ++r) { acc[sub][r] += row[r]; }
         }
 #pragma unroll
-        for (int r = 0; r < 8; ++r) {
-            atomicAdd(&mean_k[head][lane + 32 * r], acc[r]);
+        for (int sub = 0; sub < static_cast<int>(kMeanKeySubblocks); ++sub) {
+#pragma unroll
+            for (int r = 0; r < 8; ++r) {
+                if (acc[sub][r] != 0.0f) {
+                    atomicAdd(&mean_k[head][sub][lane + 32 * r], acc[sub][r]);
+                }
+            }
         }
         __syncthreads();
 
         float* layer_out =
-            out + (static_cast<std::int64_t>(blockIdx.x) * layers + layer) * KVHeads * kDim;
-        for (int unit = static_cast<int>(threadIdx.x); unit < KVHeads * kDim;
+            out + (static_cast<std::int64_t>(blockIdx.x) * layers + layer) *
+                      KVHeads * kMeanKeySubblocks * kDim;
+        for (int unit = static_cast<int>(threadIdx.x);
+             unit < KVHeads * static_cast<int>(kMeanKeySubblocks) * kDim;
              unit += kScoreThreads) {
-            layer_out[unit] = mean_k[unit / kDim][unit % kDim];
+            const int head = unit / (static_cast<int>(kMeanKeySubblocks) * kDim);
+            const int sub = (unit / kDim) % static_cast<int>(kMeanKeySubblocks);
+            layer_out[unit] = mean_k[head][sub][unit % kDim];
         }
         __syncthreads();
     }
@@ -201,7 +220,8 @@ void kvmem_export_mean_k(DeviceKVPagePool& pool, const std::int32_t* page_indice
     const std::uint32_t layers = static_cast<std::uint32_t>(geometry.planes.size() / 4);
     const std::uint32_t kv_heads = geometry.planes.front().head_extent;
     const std::uint32_t dim = kKVCacheInt8HeadDim;
-    const std::size_t stride = static_cast<std::size_t>(layers) * kv_heads * dim;
+    const std::size_t stride =
+        static_cast<std::size_t>(layers) * kv_heads * kMeanKeySubblocks * dim;
 
     for (std::uint32_t i = 0; i < n_blocks; ++i) {
         if (page_indices[i] < 0) {

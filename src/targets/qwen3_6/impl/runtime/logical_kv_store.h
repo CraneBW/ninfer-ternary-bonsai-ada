@@ -2786,7 +2786,8 @@ public:
         kvmem_query_ = ninfer::kvmem::KvmemQueryCapture{
             kvmem_query_buffer_.p, layers, q_heads, head_dim, kv_heads, 0, 0};
         kvmem_mean_k_stride_ =
-            static_cast<std::size_t>(layers) * kv_heads * head_dim;
+            static_cast<std::size_t>(layers) * kv_heads *
+            ninfer::kvmem::kMeanKeySubblocks * head_dim;
         kvmem_query_host_.assign(static_cast<std::size_t>(layers) * q_heads * head_dim, 0.0f);
     }
 
