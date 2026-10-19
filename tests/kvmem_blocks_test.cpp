@@ -222,6 +222,44 @@ static void test_action_lrfu() {
           "old action range was not demoted");
     CHECK(repo.blocks()[20].stratum == BlockStratum::ActionProtected,
           "new action range was not protected");
+
+    // Closed thinking is deprioritized only when a complete 64-token page
+    // belongs to the reasoning span; the current action always wins overlap.
+    const std::vector<std::pair<std::uint32_t, std::uint32_t>> thinking{
+        {4U * 64U, 9U * 64U + 20U}, {20U * 64U, 24U * 64U}};
+    repo.set_closed_thinking_spans(thinking);
+    CHECK(repo.blocks()[4].stratum == BlockStratum::EphemeralThinking &&
+          repo.blocks()[8].stratum == BlockStratum::EphemeralThinking,
+          "complete thinking blocks did not get the cold tier");
+    CHECK(repo.blocks()[9].stratum == BlockStratum::StandardContext,
+          "partially covered thinking page must retain normal tier");
+    CHECK(repo.blocks()[20].stratum == BlockStratum::ActionProtected,
+          "reasoning tier incorrectly overrode the latest action");
+    // Even an opposed (negative cosine) thinking score should not improve
+    // its rank merely because a demotion rule was applied.
+    KvBlockRepository cold = make_chain(32);
+    for (std::uint32_t id = 0; id < 32; ++id) {
+        cold.add_scores(id, -0.8, 0.0);
+    }
+    cold.add_scores(5, -0.4, 0.0);
+    cold.add_scores(6, -0.2, 0.0);
+    cold.set_stratum(6, BlockStratum::EphemeralThinking);
+    KvSelectConfig one_middle;
+    one_middle.budget_tokens = 3 * 64;
+    one_middle.sink_tokens = 64;
+    one_middle.recent_tokens = 64;
+    one_middle.retrieval_blocks = 1;
+    one_middle.action_lrfu = true;
+    const auto cold_selection = cold.preview_select(one_middle, {});
+    CHECK(std::find(cold_selection.block_ids.begin(), cold_selection.block_ids.end(), 5U) !=
+              cold_selection.block_ids.end(),
+          "ordinary negative-score context should win retrieval quota");
+    CHECK(std::find(cold_selection.block_ids.begin(), cold_selection.block_ids.end(), 6U) ==
+              cold_selection.block_ids.end(),
+          "negative thinking score incorrectly outranks ordinary content");
+    repo.set_closed_thinking_spans({});
+    CHECK(repo.blocks()[4].stratum == BlockStratum::StandardContext,
+          "revised conversation did not clear previous thinking demotion");
 }
 
 int main() {

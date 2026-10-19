@@ -155,6 +155,12 @@ struct PreparedPromptData {
     // prompt with a trailing question is dominated by unrelated document text.
     std::uint32_t query_begin = 0;
     std::uint32_t query_end   = 0;
+    // Complete historical assistant reasoning spans, in prompt-token coordinates.
+    // Only reasoning that the serializer actually retains is indexed.
+    std::vector<std::pair<std::uint32_t, std::uint32_t>> closed_thinking_spans;
+    // The last tool-call/action span, or the current query when no tool result exists.
+    std::uint32_t action_begin = 0;
+    std::uint32_t action_end = 0;
     bool starts_in_reasoning = false;
     PrepareStats prepare;
 

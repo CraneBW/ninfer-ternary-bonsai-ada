@@ -390,6 +390,60 @@ void assign_query_span(PreparedPromptData& prompt,
     prompt.query_end   = end;
 }
 
+// Message boundaries are already resolved through the exact tokenizer (and
+// expansion of any media) in both the cached and non-cached frontend. Only
+// assistant messages may contribute reasoning to this index: a user's literal
+// '<think>' content must not become a cold-cache eviction hint.
+void assign_retention_spans(
+    PreparedPromptData& prompt, const fi::Tokenizer& tokenizer,
+    std::span<const ChatRole> roles, std::span<const std::uint8_t> assistant_tool_calls,
+    std::span<const std::optional<std::uint32_t>> boundaries) {
+    prompt.action_begin = prompt.query_begin;
+    prompt.action_end = prompt.query_end;
+    if (boundaries.size() != roles.size() + 1U) { return; }
+
+    const auto open = tokenizer.encode("<think>");
+    const auto close = tokenizer.encode("</think>");
+    if (!open.empty() && !close.empty()) {
+        for (std::size_t i = 0; i < roles.size(); ++i) {
+            if (roles[i] != ChatRole::Assistant || !boundaries[i] ||
+                !boundaries[i + 1U] || *boundaries[i] >= *boundaries[i + 1U]) {
+                continue;
+            }
+            const auto start = prompt.token_ids.begin() + *boundaries[i];
+            const auto finish = prompt.token_ids.begin() + *boundaries[i + 1U];
+            // The template emits an assistant marker and its thinking opener
+            // before reasoning. Bound this search to the prefix to prevent
+            // user-supplied text in an assistant body from fabricating a tier.
+            const auto prefix_end =
+                start + std::min<std::ptrdiff_t>(24, finish - start);
+            const auto opening = std::search(start, prefix_end, open.begin(), open.end());
+            if (opening == prefix_end) { continue; }
+            const auto closing = std::search(opening + open.size(), finish,
+                                             close.begin(), close.end());
+            if (closing == finish) { continue; }
+            prompt.closed_thinking_spans.emplace_back(
+                static_cast<std::uint32_t>(opening - prompt.token_ids.begin()),
+                static_cast<std::uint32_t>(closing - prompt.token_ids.begin() + close.size()));
+        }
+    }
+    // A tool result is actionable together with the immediately preceding
+    // assistant call. Preserve the last call/result group; the system/tool
+    // definitions are preserved separately by the existing sink band.
+    for (std::size_t i = roles.size(); i > 0; --i) {
+        if (roles[i - 1U] != ChatRole::Tool || !boundaries[i]) { continue; }
+        std::size_t begin = i - 1U;
+        while (begin > 0 && roles[begin - 1U] == ChatRole::Tool) { --begin; }
+        if (begin > 0 && roles[begin - 1U] == ChatRole::Assistant &&
+            assistant_tool_calls[begin - 1U] != 0) { --begin; }
+        if (boundaries[begin] && *boundaries[begin] < *boundaries[i]) {
+            prompt.action_begin = *boundaries[begin];
+            prompt.action_end = *boundaries[i];
+        }
+        break;
+    }
+}
+
 VisionItem convert_vision_item(fi::VisionItem item) {
     VisionItem result;
     result.modality =
@@ -1446,8 +1500,13 @@ PreparedPrompt Frontend::prepare(PromptInput input, const PreparationControl& co
         throw std::invalid_argument("PromptInput supports at most four explicit cache markers");
     }
     std::vector<ChatRole> message_roles;
+    std::vector<std::uint8_t> assistant_tool_calls;
     message_roles.reserve(input.messages.size());
-    for (const ChatMessage& message : input.messages) { message_roles.push_back(message.role); }
+    assistant_tool_calls.reserve(input.messages.size());
+    for (const ChatMessage& message : input.messages) {
+        message_roles.push_back(message.role);
+        assistant_tool_calls.push_back(!message.tool_calls.empty());
+    }
     const auto tool_call_output =
         fi::build_tool_call_output_contract(options.tool_jsons, !options.tool_jsons.empty());
     const std::optional<std::uint32_t> leading_boundary =
@@ -1555,6 +1614,8 @@ PreparedPrompt Frontend::prepare(PromptInput input, const PreparationControl& co
     }
     (void)checked_token_count(result.token_ids.size());
     assign_query_span(result, message_boundaries, query_message);
+    assign_retention_spans(result, *impl_->tokenizer, message_roles,
+                           assistant_tool_calls, message_boundaries);
     result.identity.reusable = true;
     result.context_cache     = prepare_context_cache(
         std::move(cache_hints), message_count, message_boundaries, rendered_markers,

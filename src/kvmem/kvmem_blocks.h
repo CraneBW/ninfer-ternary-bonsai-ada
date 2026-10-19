@@ -210,7 +210,7 @@ struct KvWindowPlan {
                 const double score = score_fn(blocks[i]);
                 return cfg.action_lrfu &&
                                blocks[i].stratum == BlockStratum::EphemeralThinking
-                           ? score * 0.25
+                           ? score - 0.5
                            : score;
             };
             const double sa = priority(a);
@@ -337,6 +337,30 @@ public:
                 block.token_begin + block.n_tokens > begin &&
                 block.stratum == BlockStratum::StandardContext) {
                 block.stratum = BlockStratum::ActionProtected;
+            }
+        }
+    }
+
+    // Rebuild thinking tiers from the full prepared prompt at each request.
+    // Only a whole KV page that belongs to a closed assistant <think> block
+    // is demoted; crossing a message boundary keeps the normal priority.
+    void set_closed_thinking_spans(
+        std::span<const std::pair<std::uint32_t, std::uint32_t>> spans) {
+        for (KvBlockMeta& block : blocks_) {
+            if (block.stratum == BlockStratum::EphemeralThinking) {
+                block.stratum = BlockStratum::StandardContext;
+            }
+        }
+        std::size_t cursor = 0;
+        for (KvBlockMeta& block : blocks_) {
+            while (cursor < spans.size() && spans[cursor].second <= block.token_begin) {
+                ++cursor;
+            }
+            if (cursor >= spans.size()) { break; }
+            const std::uint64_t end = block.token_begin + block.n_tokens;
+            if (spans[cursor].first <= block.token_begin && end <= spans[cursor].second &&
+                block.stratum == BlockStratum::StandardContext) {
+                block.stratum = BlockStratum::EphemeralThinking;
             }
         }
     }

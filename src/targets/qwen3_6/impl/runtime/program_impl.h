@@ -12015,7 +12015,10 @@ ProgramImplCore::advance_prefill(SequenceState& sequence, RequestControl& reques
         if (staged.cursor < staged.prompt_tokens) {
             if (!staged.query_captured) {
                 text_kv_addresses->reset_kvmem_query(staged.prompt.query_begin,
-                                                     staged.prompt.query_end);
+                                                     staged.prompt.query_end,
+                                                     staged.prompt.action_begin,
+                                                     staged.prompt.action_end,
+                                                     staged.prompt.closed_thinking_spans);
                 staged.query_captured = true;
             }
             const std::uint32_t nominal =

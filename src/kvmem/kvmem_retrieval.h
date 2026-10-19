@@ -25,6 +25,7 @@ struct MeanKeyQueryView {
     std::uint32_t head_dim    = 0;
     std::uint32_t query_heads = 0;
     std::uint32_t kv_heads    = 0;
+    bool position_prior       = false;
 };
 
 // One score per block: best query-to-subblock cosine (16 tokens per centroid),
@@ -75,12 +76,18 @@ inline std::vector<float> mean_key_scores(std::uint32_t blocks, const float* mea
         const std::uint32_t tokens = block_tokens[block];
         if (tokens == 0) { return; }
         const float* block_k = mean_k + static_cast<std::size_t>(block) * k_block_stride;
+        const float distance = blocks > 1
+                                   ? static_cast<float>(blocks - 1 - block) /
+                                         static_cast<float>(blocks - 1)
+                                   : 0.0f;
+        const float recency_prior = std::exp(-4.0f * distance);
         float total = 0.0f;
         for (std::uint32_t layer = 0; layer < query.layers; ++layer) {
             if (active_layer[layer] == 0) { continue; }
             const float* layer_k =
                 block_k + static_cast<std::size_t>(layer) * k_layer_stride;
             float layer_score = 0.0f;
+            bool has_key_evidence = false;
             for (std::uint32_t kv_head = 0; kv_head < query.kv_heads; ++kv_head) {
                 float best = -1.0e30f;
                 for (std::uint32_t sub = 0;
@@ -112,9 +119,25 @@ inline std::vector<float> mean_key_scores(std::uint32_t blocks, const float* mea
                         best = std::max(best, dot / (q_norm * key_norm + 1.0e-6f));
                     }
                 }
-                if (best > -1.0e29f) { layer_score += best; }
+                if (best > -1.0e29f) {
+                    layer_score += best;
+                    has_key_evidence = true;
+                }
             }
-            total += layer_score / static_cast<float>(query.kv_heads);
+            const float content = layer_score / static_cast<float>(query.kv_heads);
+            if (!query.position_prior || !has_key_evidence) {
+                total += content;
+            } else {
+                // Locality dominates early attention, whereas deeper layers
+                // contribute more content-based matches. This host-only prior
+                // uses logical block distance, without changing CUDA kernels.
+                const float depth = query.layers > 1
+                                        ? static_cast<float>(layer) / (query.layers - 1)
+                                        : 1.0f;
+                const float content_weight = 0.25f + 0.70f * depth;
+                total += content_weight * content +
+                         (1.0f - content_weight) * recency_prior;
+            }
         }
         scores[block] = total / static_cast<float>(active_layers);
     };

@@ -1134,6 +1134,34 @@ int test_text_and_image_prepare(const Frontend& frontend) {
     // assistant generation prefix follows it.
     failures += check(text_data.query_begin == 0 && text_data.query_end == 5,
                       "text frontend did not publish the last user query span");
+    failures += check(text_data.action_begin == text_data.query_begin &&
+                          text_data.action_end == text_data.query_end &&
+                          text_data.closed_thinking_spans.empty(),
+                      "user-only prompt incorrectly has previous action or thinking history");
+
+    ninfer::PromptInput reasoning_history;
+    reasoning_history.options.preserve_thinking = true;
+    ninfer::ChatMessage earlier_user;
+    earlier_user.role = ninfer::ChatRole::User;
+    earlier_user.parts.push_back({.kind = ninfer::MessagePartKind::Text, .text = "step one"});
+    ninfer::ChatMessage earlier_assistant;
+    earlier_assistant.role = ninfer::ChatRole::Assistant;
+    earlier_assistant.reasoning_content = std::string(200, 'r');
+    earlier_assistant.parts.push_back({.kind = ninfer::MessagePartKind::Text, .text = "done"});
+    ninfer::ChatMessage new_user;
+    new_user.role = ninfer::ChatRole::User;
+    new_user.parts.push_back({.kind = ninfer::MessagePartKind::Text, .text = "step two"});
+    reasoning_history.messages.push_back(std::move(earlier_user));
+    reasoning_history.messages.push_back(std::move(earlier_assistant));
+    reasoning_history.messages.push_back(std::move(new_user));
+    const auto thinking_prepared = frontend.prepare(std::move(reasoning_history));
+    const auto& thinking_data = FrontendFactory::inspect(thinking_prepared);
+    failures += check(thinking_data.closed_thinking_spans.size() == 1 &&
+                          thinking_data.closed_thinking_spans.front().first <
+                              thinking_data.closed_thinking_spans.front().second &&
+                          thinking_data.closed_thinking_spans.front().second <=
+                              thinking_data.query_begin,
+                      "closed historical assistant reasoning was not indexed");
 
     ninfer::ChatMessage preserved_message;
     preserved_message.role = ninfer::ChatRole::User;

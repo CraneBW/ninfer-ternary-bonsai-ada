@@ -572,6 +572,10 @@ int expect_match_cold(const Frontend& frontend, const CachedCall& call,
                       (label + ": frontier differs from cold prepare").c_str());
     failures += check(got.starts_in_reasoning == cold_data.starts_in_reasoning,
                       (label + ": starts_in_reasoning differs").c_str());
+    failures += check(got.closed_thinking_spans == cold_data.closed_thinking_spans &&
+                          got.action_begin == cold_data.action_begin &&
+                          got.action_end == cold_data.action_end,
+                      (label + ": KVMem retention spans differ from cold prepare").c_str());
     return failures;
 }
 

@@ -939,8 +939,12 @@ With `--kvmem-action-lrfu`, the latest captured query span has priority over the
 and positive retrieval hits accumulate with exponential decay across compactions.
 These options can also be set with `NINFER_KVMEM_ACTION_LRFU=1`,
 `NINFER_KVMEM_LRFU_LAMBDA`, and `NINFER_KVMEM_LRFU_TOP_FRAC`. The retrieval index
-remains host-resident for evicted pages. Closed historical thinking blocks are not
-currently identified by the runtime, so thinking-tier demotion is not automatic.
+remains host-resident for evicted pages. With Action-LRFU, the frontend marks complete
+historical assistant `<think>...</think>` spans based on the rendered prompt's actual
+token positions. Pages fully inside those spans are ranked below standard context;
+mixed pages retain the standard tier, and a current action span always takes priority.
+Retrieval scores combine recency for shallow attention layers with content similarity
+for deeper layers.
 
 `--kvmem` sizes its own pool when neither `--kv-capacity` nor `--kv-device-tokens` is given: the
 automatic resolution is pinned to the working set the runtime asks for -- one window per lane,

@@ -60,6 +60,14 @@ int main() {
     require(close_to(scores[1], 0.0F), "opposed block scores zero");
     require(close_to(scores[2], 0.0F), "block without mean-K scores zero");
 
+    auto with_prior = view;
+    with_prior.position_prior = true;
+    const std::vector<float> adjusted =
+        ninfer::kvmem::mean_key_scores(kBlocks, mean_k.data(), tokens.data(), with_prior);
+    require(adjusted[0] > adjusted[1] && adjusted[1] > 0.0F,
+            "shallow layer recency should affect blocks with mean-K evidence");
+    require(adjusted[2] == 0.0F, "recency prior must not promote an empty page");
+
     std::puts("kvmem retrieval tests passed");
     return 0;
 }
