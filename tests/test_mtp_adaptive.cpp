@@ -120,6 +120,24 @@ int main() {
                 "the round does not return to the full window after the contraction");
     }
 
+    // A perfect run of rounds lands on the widest admissible graph at once: the landing is a
+    // decision about where the round should run, not a width to climb one draft at a time. The
+    // controller still spends the first rounds at the floor, because that is where the evidence
+    // comes from and where a wrong landing would be caught.
+    {
+        MtpAdaptiveSignal signal;
+        MtpAdaptiveBatchController controller;
+        controller.reset(7);
+        for (int round = 0; round < 3; ++round) {
+            const std::uint32_t window = select_once(controller, signal, 7, 4096, 5);
+            require(window < 7, "the landing waits for its evidence");
+            controller.observe_execution(1, window, 0.010);
+            signal.observe(window, window);
+        }
+        require(select_once(controller, signal, 7, 4096, 5) == 7,
+                "three perfect rounds land on the widest verification width");
+    }
+
     // Rows without enough room cap the selectable width: a one-token budget cannot verify drafts.
     {
         MtpAdaptiveSignal signal;

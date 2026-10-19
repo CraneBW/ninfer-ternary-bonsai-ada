@@ -85,21 +85,30 @@ public:
                success_streak_[window - 1U] >= kWideningSuccessStreak;
     }
 
+    // Every draft near the anchor survived the last rounds: the wide positions have not been
+    // measured, but a run this clean prices the widest admissible round as the one that carries the
+    // most tokens per unit of cost, so a request bounded by such content should land on it at once
+    // rather than climb one draft at a time. The streak (not the EMAs alone) is what keeps a
+    // momentarily lucky narrow prefix out of the widest graph.
     [[nodiscard]] bool strong_wide_prefix() const noexcept {
         constexpr std::array<float, 3> thresholds{0.75F, 0.60F, 0.45F};
         for (std::size_t position = 0; position < thresholds.size(); ++position) {
-            if (observations_[position] < 4 ||
+            if (observations_[position] < kStrongPrefixStreak ||
                 0.75F * fast_[position] + 0.25F * slow_[position] < thresholds[position]) {
                 return false;
             }
         }
-        return success_streak_[thresholds.size() - 1U] >= kWideningSuccessStreak;
+        return success_streak_[thresholds.size() - 1U] >= kStrongPrefixStreak;
     }
 
 private:
     static constexpr float kFastAlpha                    = 0.375F;
     static constexpr float kSlowAlpha                    = 0.125F;
     static constexpr std::uint8_t kWideningSuccessStreak = 6;
+    // A shorter run of perfect rounds is enough to land on the widest admissible width: the landing
+    // is reversible within a few rounds, while every round spent climbing costs the content it
+    // already predicts.
+    static constexpr std::uint8_t kStrongPrefixStreak = 3;
     static constexpr std::array<float, kAdaptiveMtpMaximumDrafts> kPriorSurvival{
         0.54F,      0.16F,       0.08F,        0.04F,         0.02F,
         0.01F,      0.005F,      0.0025F,      0.00125F,      0.000625F,
@@ -243,7 +252,9 @@ public:
         // When every draft near the anchor survives, the round pays for its columns anyway: the
         // widest admissible window then carries the most tokens per unit of round cost, so it is
         // the right landing width. The gradual upward limit below would otherwise spend the first
-        // half of a structured response climbing one draft at a time.
+        // half of a structured response climbing one draft at a time, so this landing takes the
+        // round as soon as the streak is there instead of waiting out the usual candidate window.
+        bool strong_landing = false;
         if (maximum_window_ >= 6 && best_window < maximum_window_) {
             bool all_prefixes_strong = true;
             for (const MtpAdaptiveSignal* signal : signals) {
@@ -252,8 +263,9 @@ public:
             const std::uint32_t strong_window =
                 widest_admissible_width(maximum_window_, best_window, signals.size());
             if (all_prefixes_strong && strong_window != 0) {
-                best_window = strong_window;
-                best_score  = score(best_window, signals, available, room);
+                best_window    = strong_window;
+                best_score     = score(best_window, signals, available, room);
+                strong_landing = true;
             }
         }
 
@@ -300,11 +312,15 @@ public:
             const bool maximum_width_probation =
                 selected_window_ == maximum_window_ &&
                 execution_samples_[batch][selected_window_ - 1U] <= 2;
-            const std::uint8_t minimum_residency         = confident_probe           ? 2
-                                                           : maximum_width_probation ? 2
-                                                           : high_width_contraction  ? 12
-                                                                                     : 3;
-            const std::uint8_t required_candidate_rounds = confident_probe           ? 2
+            const std::uint8_t minimum_residency = confident_probe           ? 2
+                                                   : maximum_width_probation ? 2
+                                                   : high_width_contraction  ? 12
+                                                                             : 3;
+            // A strong landing is already corroborated by several perfect rounds; a wrong landing is
+            // still caught by the maximum-width probation below, so it does not need to win a
+            // candidate window of its own.
+            const std::uint8_t required_candidate_rounds = strong_landing            ? 1
+                                                           : confident_probe         ? 2
                                                            : maximum_width_probation ? 2
                                                                                      : 4;
             if (candidate_rounds_ >= required_candidate_rounds &&

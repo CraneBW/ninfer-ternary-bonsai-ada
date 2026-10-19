@@ -199,8 +199,14 @@ stays at the ceiling, and only the verified and proposed prefix narrows. Because
 verified against the target model, the committed greedy output is identical to a fixed window. The
 width starts at three, grows when wider rounds earn their cost, and contracts when the drafts stop
 surviving, so one configuration serves chat text (where late draft positions rarely survive and a
-narrow round is cheaper) and highly regular output such as generated JSON (where they do). It
-requires `--spec mtp` and a ceiling of at least three.
+narrow round is cheaper) and highly regular output such as generated JSON (where they do). Three
+rounds in a row that committed every draft up to the fourth land the request on the widest
+admissible width at once instead of climbing one draft per window, because the same maximum-width
+probation that governs growth contracts a wrong landing within two rounds. Measured on one
+Qwen3.8-27B build, generated JSON at a 61,674-token prompt rose from 171.2 to 184.4 t/s and now
+matches a fixed seven-draft window (187.4 against 187.3 t/s), while long-form prose at a
+61,650-token prompt kept 78.5 against 66.9 t/s for that fixed window. It requires `--spec mtp` and
+a ceiling of at least three.
 
 `--lookup-ngram` gives an MTP round a second source of drafts: when the request's last eight
 tokens repeat a run that already appeared in its own context, the continuation of that earlier

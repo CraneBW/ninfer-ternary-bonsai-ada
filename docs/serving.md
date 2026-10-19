@@ -47,7 +47,12 @@ frozen by `--spec mtp|dflash|dflash2` and `--draft-tokens`; omitting `--spec` lo
 `--lm-head-draft` additionally loads the optimized proposal head. `--adaptive-mtp` keeps
 `--draft-tokens` as the ceiling and lets each MTP round verify a narrower draft prefix when the
 measured survival of the drafts it proposed, weighted against the round's measured cost, favors one;
-the committed greedy output is unchanged. `--lookup-ngram` adds a second draft source to MTP: when
+the committed greedy output is unchanged. Three rounds in a row that committed every draft up to the
+fourth land the request on the widest admissible width at once rather than climbing one draft per
+window, and the maximum-width probation still contracts a wrong landing within two rounds. On one
+Qwen3.8-27B build, generated JSON at a 61,674-token prompt measured 184.4 t/s against 171.2 t/s for
+the climb and 187.4 against 187.3 t/s for a fixed seven-draft window; long-form prose at a
+61,650-token prompt measured 78.5 against 66.9 t/s for that fixed window. `--lookup-ngram` adds a second draft source to MTP: when
 the request's last eight tokens repeat a run that already occurred in its own context and the two
 occurrences continued identically, the continuation of the earlier one is proposed for the round
 (copied passages, repeated JSON lines, echoed tool arguments); those drafts are verified like any
