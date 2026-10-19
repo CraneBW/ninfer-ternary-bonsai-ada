@@ -37,7 +37,6 @@ constexpr int kLayers   = 2;
 constexpr int kTokens   = kPagedKVPageSize;
 constexpr int kDim      = kKVCacheInt8HeadDim;
 constexpr int kGroups   = kKVCacheInt8Groups;
-constexpr int kRotary   = 64;  // Text MRoPE rotary dims
 
 int failures = 0;
 #define CHECK(cond, ...)                                    \
@@ -252,8 +251,8 @@ int main() {
                   "upload query tensor");
             CHECK(cudaMemset(d_query_sums, 0, sums_bytes) == cudaSuccess, "zero query sums");
             for (int layer = 0; layer < kLayers; ++layer) {
-                kvmem_accumulate_query(d_q_tensor, kQHeads, kDim, kTokens, 0, 0, 1, d_query_sums,
-                                       static_cast<std::uint32_t>(layer), nullptr);
+                kvmem_accumulate_query(d_q_tensor, kQHeads, kDim, kTokens, 0, column, column + 1,
+                                       d_query_sums, static_cast<std::uint32_t>(layer), nullptr);
             }
             cudaDeviceSynchronize();
 

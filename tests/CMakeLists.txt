@@ -216,6 +216,17 @@ ninfer_add_test(ninfer_serve_metrics_test
   LIBRARIES ninfer_serve)
 ninfer_add_test(ninfer_kvmem_retrieval_test
   SOURCES test_kvmem_retrieval.cpp)
+ninfer_add_op_test(ninfer_kvmem_rerope_test
+  SOURCES kvmem_rerope_test.cu
+          ${PROJECT_SOURCE_DIR}/src/ops/launcher/rope.cu
+  LIBRARIES ninfer_core)
+set_target_properties(ninfer_kvmem_rerope_test PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+ninfer_add_op_test(ninfer_kvmem_compact_test
+  SOURCES kvmem_compact_test.cu
+  LIBRARIES ninfer_ops ninfer_core)
+ninfer_add_op_test(ninfer_kvmem_score_test
+  SOURCES kvmem_score_test.cu
+  LIBRARIES ninfer_ops ninfer_core)
 ninfer_add_test(ninfer_mtp_adaptive_test
   SOURCES test_mtp_adaptive.cpp)
 ninfer_add_test(ninfer_ngram_lookup_test

@@ -1599,7 +1599,7 @@ public:
                 m.n_tokens       = static_cast<std::uint32_t>(kPagedKVPageSize);
                 m.baked_pos      = static_cast<std::int64_t>(id) * kPagedKVPageSize;
                 m.in_working_set = true;
-                repo.append(m);
+                (void)repo.append(m);
                 repo.set_tier(id, ninfer::kvmem::KvTier::Gpu);
                 if (kvmem_block_pages_.size() > static_cast<std::size_t>(address_index)) {
                     auto& block_pages = kvmem_block_pages_[static_cast<std::size_t>(address_index)];
@@ -1622,7 +1622,7 @@ public:
                 // laamaafung's register_append.
                 m.baked_pos = static_cast<std::int64_t>(begin + added_i) * kPagedKVPageSize;
                 m.in_working_set = true;
-                repo.append(m);
+                (void)repo.append(m);
                 repo.set_tier(m.id, ninfer::kvmem::KvTier::Gpu);
                 if (kvmem_block_pages_.size() > static_cast<std::size_t>(address_index)) {
                     auto& block_pages = kvmem_block_pages_[static_cast<std::size_t>(address_index)];
@@ -2142,7 +2142,7 @@ private:
             m.n_tokens       = kPagedKVPageSize;
             m.baked_pos      = m.token_begin;
             m.in_working_set = true;
-            repo.append(m);
+            (void)repo.append(m);
             repo.set_tier(id, ninfer::kvmem::KvTier::Gpu);
             if (block_pages.size() <= id) { block_pages.resize(id + 1); }
             block_pages[id] = membership(address, id);
@@ -2629,11 +2629,12 @@ public:
 
         // ---- 3) re-phase every moved block from its baked slot to the new one ----
         if (!plan.remaps.empty()) {
-            std::int32_t *d_src = nullptr, *d_dst = nullptr;
-            const std::size_t pos_bytes = 3 * kPagedKVPageSize * sizeof(std::int32_t);
-            KVMEM_CUDA_CHECK(cudaMalloc(&d_src, pos_bytes));
-            KVMEM_CUDA_CHECK(cudaMalloc(&d_dst, pos_bytes));
-            std::vector<std::int32_t> src(3 * kPagedKVPageSize), dst(3 * kPagedKVPageSize);
+            std::vector<std::int32_t> rerope_pages;
+            std::vector<std::int32_t> rerope_from;
+            std::vector<std::int32_t> rerope_to;
+            rerope_pages.reserve(plan.remaps.size());
+            rerope_from.reserve(plan.remaps.size());
+            rerope_to.reserve(plan.remaps.size());
             for (const ninfer::kvmem::KvRemap& rm : plan.remaps) {
                 if (rm.skip) { continue; }
                 if (rm.raw_refresh) {
@@ -2643,26 +2644,17 @@ public:
                     // raw-K mirror that makes this a true rebuild is K2-full.
                     repo.reset_drift(rm.block_id);
                 }
-                for (int a = 0; a < 3; ++a) {
-                    for (std::uint32_t t = 0; t < kPagedKVPageSize; ++t) {
-                        src[static_cast<std::size_t>(a) * kPagedKVPageSize + t] =
-                            static_cast<std::int32_t>(rm.from_base) + static_cast<std::int32_t>(t);
-                        dst[static_cast<std::size_t>(a) * kPagedKVPageSize + t] =
-                            static_cast<std::int32_t>(rm.to_base) + static_cast<std::int32_t>(t);
-                    }
-                }
-                KVMEM_CUDA_CHECK(cudaMemcpyAsync(d_src, src.data(), pos_bytes,
-                                                 cudaMemcpyHostToDevice, stream));
-                KVMEM_CUDA_CHECK(cudaMemcpyAsync(d_dst, dst.data(), pos_bytes,
-                                                 cudaMemcpyHostToDevice, stream));
                 if (block_pages.size() <= rm.block_id) { block_pages.resize(rm.block_id + 1); }
-                ninfer::kvmem::kvmem_rerope_page(pool,
-                                  pool.physical_index_of(pages_->physical(block_pages[rm.block_id])),
-                                  d_src, d_dst, stream);
+                rerope_pages.push_back(
+                    pool.physical_index_of(pages_->physical(block_pages[rm.block_id])));
+                rerope_from.push_back(static_cast<std::int32_t>(rm.from_base));
+                rerope_to.push_back(static_cast<std::int32_t>(rm.to_base));
             }
-            KVMEM_CUDA_CHECK(cudaStreamSynchronize(stream));
-            KVMEM_CUDA_CHECK(cudaFree(d_src));
-            KVMEM_CUDA_CHECK(cudaFree(d_dst));
+            if (!rerope_pages.empty()) {
+                ninfer::kvmem::kvmem_rerope_pages(
+                    pool, rerope_pages.data(), rerope_from.data(), rerope_to.data(),
+                    static_cast<std::uint32_t>(rerope_pages.size()), stream);
+            }
         }
 
         // ---- 4) rewire the window and shrink the address ----
