@@ -2279,6 +2279,7 @@ private:
             return;
         }
         if (kvmem_action_lrfu_) {
+            repo.protect_system_prefix(kvmem_system_prefix_end_);
             repo.protect_action_span(kvmem_action_begin_, kvmem_action_end_);
             repo.set_closed_thinking_spans(kvmem_closed_thinking_spans_);
             repo.record_lrfu_scores(scores, kvmem_lrfu_lambda_, kvmem_lrfu_top_fraction_);
@@ -2811,6 +2812,7 @@ public:
     void reset_kvmem_query(
         std::uint32_t query_begin, std::uint32_t query_end,
         std::uint32_t action_begin, std::uint32_t action_end,
+        std::uint32_t system_prefix_end,
         std::span<const std::pair<std::uint32_t, std::uint32_t>> closed_thinking_spans) {
         if (!kvmem_query_.valid()) { return; }
         kvmem_query_buffer_.fill(0);
@@ -2818,6 +2820,7 @@ public:
         kvmem_query_.query_end   = query_end;
         kvmem_action_begin_ = action_begin;
         kvmem_action_end_ = action_end;
+        kvmem_system_prefix_end_ = system_prefix_end;
         kvmem_closed_thinking_spans_.assign(closed_thinking_spans.begin(),
                                             closed_thinking_spans.end());
     }
@@ -2875,6 +2878,7 @@ private:
     std::vector<float> kvmem_query_host_;
     std::uint32_t kvmem_action_begin_ = 0;
     std::uint32_t kvmem_action_end_ = 0;
+    std::uint32_t kvmem_system_prefix_end_ = 0;
     std::vector<std::pair<std::uint32_t, std::uint32_t>> kvmem_closed_thinking_spans_;
     std::uint64_t kvmem_plans_             = 0;
     std::uint64_t kvmem_compactions_       = 0;

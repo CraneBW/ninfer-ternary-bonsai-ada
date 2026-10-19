@@ -1136,8 +1136,24 @@ int test_text_and_image_prepare(const Frontend& frontend) {
                       "text frontend did not publish the last user query span");
     failures += check(text_data.action_begin == text_data.query_begin &&
                           text_data.action_end == text_data.query_end &&
-                          text_data.closed_thinking_spans.empty(),
+                          text_data.closed_thinking_spans.empty() &&
+                          text_data.system_prefix_end == 0,
                       "user-only prompt incorrectly has previous action or thinking history");
+
+    ninfer::PromptInput instruction_input;
+    ninfer::ChatMessage instruction;
+    instruction.role = ninfer::ChatRole::System;
+    instruction.parts.push_back({.kind = ninfer::MessagePartKind::Text, .text = "tool instructions"});
+    ninfer::ChatMessage instruction_user;
+    instruction_user.role = ninfer::ChatRole::User;
+    instruction_user.parts.push_back({.kind = ninfer::MessagePartKind::Text, .text = "hello"});
+    instruction_input.messages.push_back(std::move(instruction));
+    instruction_input.messages.push_back(std::move(instruction_user));
+    const auto instruction_prompt = frontend.prepare(std::move(instruction_input));
+    const auto& instruction_data = FrontendFactory::inspect(instruction_prompt);
+    failures += check(instruction_data.system_prefix_end > 0 &&
+                          instruction_data.system_prefix_end <= instruction_data.query_begin,
+                      "system prefix was not isolated before the current user action");
 
     ninfer::PromptInput reasoning_history;
     reasoning_history.options.preserve_thinking = true;

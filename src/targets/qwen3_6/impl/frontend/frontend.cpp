@@ -401,6 +401,15 @@ void assign_retention_spans(
     prompt.action_begin = prompt.query_begin;
     prompt.action_end = prompt.query_end;
     if (boundaries.size() != roles.size() + 1U) { return; }
+    std::size_t first_message = 0;
+    while (first_message < roles.size() &&
+           (roles[first_message] == ChatRole::System ||
+            roles[first_message] == ChatRole::Developer)) {
+        ++first_message;
+    }
+    if (boundaries[first_message]) {
+        prompt.system_prefix_end = *boundaries[first_message];
+    }
 
     const auto open = tokenizer.encode("<think>");
     const auto close = tokenizer.encode("</think>");

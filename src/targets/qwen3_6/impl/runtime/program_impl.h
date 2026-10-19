@@ -12018,6 +12018,7 @@ ProgramImplCore::advance_prefill(SequenceState& sequence, RequestControl& reques
                                                      staged.prompt.query_end,
                                                      staged.prompt.action_begin,
                                                      staged.prompt.action_end,
+                                                     staged.prompt.system_prefix_end,
                                                      staged.prompt.closed_thinking_spans);
                 staged.query_captured = true;
             }

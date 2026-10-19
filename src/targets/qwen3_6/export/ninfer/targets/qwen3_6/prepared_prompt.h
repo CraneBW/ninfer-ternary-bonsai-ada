@@ -161,6 +161,9 @@ struct PreparedPromptData {
     // The last tool-call/action span, or the current query when no tool result exists.
     std::uint32_t action_begin = 0;
     std::uint32_t action_end = 0;
+    // System instructions and tool declarations are pinned from the initial
+    // prompt prefix through this exact token frontier.
+    std::uint32_t system_prefix_end = 0;
     bool starts_in_reasoning = false;
     PrepareStats prepare;
 

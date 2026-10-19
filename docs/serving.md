@@ -943,6 +943,8 @@ remains host-resident for evicted pages. With Action-LRFU, the frontend marks co
 historical assistant `<think>...</think>` spans based on the rendered prompt's actual
 token positions. Pages fully inside those spans are ranked below standard context;
 mixed pages retain the standard tier, and a current action span always takes priority.
+The serialized system and tool-definition prefix remains pinned even when it exceeds
+the automatic sink size. A window too small to retain it reports a capacity error.
 Retrieval scores combine recency for shallow attention layers with content similarity
 for deeper layers.
 

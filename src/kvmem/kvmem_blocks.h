@@ -160,6 +160,19 @@ struct KvWindowPlan {
         }
     };
 
+    if (cfg.action_lrfu) {
+        // System instructions and the tool-schema preamble may exceed the
+        // default sink band; each page touching that prefix is mandatory.
+        for (std::uint32_t i = 0; i < n; ++i) {
+            if (blocks[i].stratum == BlockStratum::PinnedSink) {
+                if (kept_count == budget) {
+                    throw std::invalid_argument(
+                        "kvmem: window cannot hold protected system/tool prefix");
+                }
+                keep(i);
+            }
+        }
+    }
     for (std::uint32_t i = 0; i < sink_blocks && kept_count < budget; ++i) { keep(i); }
 
     // Mandatory: newest first so a huge query suffix cannot evict the tail; the
@@ -337,6 +350,17 @@ public:
                 block.token_begin + block.n_tokens > begin &&
                 block.stratum == BlockStratum::StandardContext) {
                 block.stratum = BlockStratum::ActionProtected;
+            }
+        }
+    }
+
+    void protect_system_prefix(std::uint64_t prefix_end) {
+        for (KvBlockMeta& block : blocks_) {
+            if (block.stratum == BlockStratum::PinnedSink) {
+                block.stratum = BlockStratum::StandardContext;
+            }
+            if (prefix_end != 0 && block.token_begin < prefix_end) {
+                block.stratum = BlockStratum::PinnedSink;
             }
         }
     }

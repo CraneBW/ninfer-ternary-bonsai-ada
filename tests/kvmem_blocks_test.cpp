@@ -260,6 +260,23 @@ static void test_action_lrfu() {
     repo.set_closed_thinking_spans({});
     CHECK(repo.blocks()[4].stratum == BlockStratum::StandardContext,
           "revised conversation did not clear previous thinking demotion");
+    repo.protect_system_prefix(3 * 64 + 1);
+    const auto protected_selection = repo.preview_select(cfg, {});
+    for (std::uint32_t id = 0; id <= 3; ++id) {
+        CHECK(repo.blocks()[id].stratum == BlockStratum::PinnedSink,
+              "system/tool declaration page %u lost its tier", id);
+        CHECK(std::find(protected_selection.block_ids.begin(),
+                        protected_selection.block_ids.end(), id) !=
+                  protected_selection.block_ids.end(),
+              "system/tool declaration page %u was evicted", id);
+    }
+    KvSelectConfig too_small = cfg;
+    too_small.budget_tokens = 3 * 64;
+    bool refused = false;
+    try {
+        (void)repo.preview_select(too_small, {});
+    } catch (const std::invalid_argument&) { refused = true; }
+    CHECK(refused, "budget below protected system prefix must be rejected");
 }
 
 int main() {
