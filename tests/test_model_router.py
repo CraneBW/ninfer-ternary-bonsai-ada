@@ -38,7 +38,13 @@ class ModelRouterTest(unittest.TestCase):
                 self.assertEqual(main([str(path), "--dry-run"]), 0)
                 if index in (1, 2):
                     self.assertEqual(
-                        choose_backend(found, ["--spec", "mtp"]), "companion"
+                        choose_backend(found, ["--spec", "mtp"]), "native"
+                    )
+                    self.assertEqual(
+                        choose_backend(found, ["--spec", "dflash2", "--vision"]), "native"
+                    )
+                    self.assertEqual(
+                        choose_backend(found, ["--spec", "dflash"]), "companion"
                     )
 
 

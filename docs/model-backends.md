@@ -15,7 +15,8 @@ Supported routing:
 | v2 Qwen3.6/Qwen3.8 | fork | Existing artifact interface |
 | v3 Qwen3.6 27B, groupwise-int/NVFP4 | fork | Uses per-tensor format descriptors |
 | v3 Qwen3.8 GSQ-RCO IQ3_S 27B | fork | Native GGUF CUDA GEMV/MMQ |
-| v3 Qwen3.8 with `--spec` or `--vision` | NInfer-all | Companion's complete multimodal/speculation paths |
+| v3 Qwen3.6/Qwen3.8 27B with `--vision`, `--spec mtp` or `--spec dflash2` | fork | Native semantic binding and execution paths; real GSQ full-model feature validation is still pending |
+| v3 Qwen3.8 with `--spec dflash` | NInfer-all | DFlash v1 is companion-only |
 | v3 Ternary Bonsai 2 (2B/4B/9B/27B) | NInfer-all | Dynamic configuration and T2/GGUF weights |
 | v3 Gemma 4 (26B-A4B) | NInfer-all | Gemma 4 native architecture |
 | v3 Qwen3.8-Flash-Next 125B | NInfer-all | Hybrid MoE/expert streaming and n-gram |

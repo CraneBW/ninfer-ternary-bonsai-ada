@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Dispatch NInfer v2 and v3 artifacts to their registered native engines.
 
-The Ada fork implements the v2 fixed-size models and a native Qwen3.8 v3
-text route. The optional NInfer-all companion implements the wider v3 family:
-Ternary Bonsai 2, Gemma 4, Flash-Next, hybrid MoE, vision and draft variants.
+The Ada fork implements the v2 fixed-size models and the v3 Qwen 27B
+text, vision, MTP and DFlash2 routes. The optional NInfer-all companion
+implements the wider v3 family: Ternary Bonsai 2, Gemma 4, Flash-Next,
+hybrid MoE and other model-specific variants.
 Every backend is an independently built NInfer binary; no weights are copied.
 """
 from __future__ import annotations
@@ -52,13 +53,14 @@ def choose_backend(info: tuple[int, str, str], arguments: list[str]) -> str:
     version, model, model_type = info
     if version == 2:
         return "native"
+    # DFlash (v1) is provided only by the companion; native Qwen 27B
+    # implements MTP and DFlash2, including their optimized proposal head.
+    speculative = [arguments[i + 1] for i, value in enumerate(arguments[:-1])
+                   if value == "--spec"]
     if (
         model in {"qwen3.8-27b", "qwen3.6-27b"}
         and model_type == "qwen3_5_text"
-        and not any(
-            flag == "--vision" or flag in {"--spec", "--adaptive-mtp", "--lookup-ngram"}
-            for flag in arguments
-        )
+        and "dflash" not in speculative
     ):
         return "native"
     return "companion"
