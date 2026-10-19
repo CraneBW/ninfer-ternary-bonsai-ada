@@ -201,11 +201,30 @@ __launch_bounds__(256) __global__
 
     const std::int64_t src0 = kv_cache_int8_quant_src_index<Geometry>(kv_head, d0, token);
     const std::int64_t src1 = kv_cache_int8_quant_src_index<Geometry>(kv_head, d1, token);
-    float k0                = __bfloat162float(k[src0]);
-    float k1                = __bfloat162float(k[src1]);
-    float v0                = __bfloat162float(v[src0]);
-    float v1                = __bfloat162float(v[src1]);
-    if constexpr (RotateK) { kv_cache_hadamard64(k0, k1, FullMask); }
+    // INT8-G64 persists K in the normalized D256 basis that the attention kernels rotate Q into;
+    // the packed int4 modes keep their per-group H64 rotation. A native-int8 warp still owns one
+    // 64-d group, so it materializes the whole row to take the shared transform.
+    constexpr bool NativeInt8 = !PackedV && !PackedK && !E8Lattice && !E8Root;
+    float k0                  = 0.0f;
+    float k1                  = 0.0f;
+    if constexpr (NativeInt8) {
+        float row[8];
+#pragma unroll
+        for (int r = 0; r < 8; ++r) {
+            const int d = lane + 32 * r;
+            row[r]      = __bfloat162float(
+                k[kv_cache_int8_quant_src_index<Geometry>(kv_head, d, token)]);
+        }
+        normalized_hadamard_d256_inplace(row, lane);
+        k0 = row[2 * group];
+        k1 = row[2 * group + 1];
+    } else {
+        k0 = __bfloat162float(k[src0]);
+        k1 = __bfloat162float(k[src1]);
+        if constexpr (RotateK) { kv_cache_hadamard64(k0, k1, FullMask); }
+    }
+    float v0 = __bfloat162float(v[src0]);
+    float v1 = __bfloat162float(v[src1]);
     if constexpr (RotateV) { kv_cache_hadamard64(v0, v1, FullMask); }
 
     float k_abs = fmaxf(fabsf(k0), fabsf(k1));
@@ -336,15 +355,31 @@ __launch_bounds__(256) __global__ void kv_cache_append_full_i8_page_kernel(
     const bool valid = token < token_end;
     const int d0     = group * kKVCacheInt8Group + lane;
     const int d1     = d0 + 32;
+    // Same contract as the small-append kernel: native INT8-G64 persists K in the normalized
+    // D256 basis, so each group warp materializes the whole row before it quantizes its group.
+    constexpr bool NativeInt8 = !PackedV && !PackedK && !E8Lattice && !E8Root;
     float k0 = 0.0f, k1 = 0.0f, v0 = 0.0f, v1 = 0.0f;
     if (valid) {
         const std::int64_t src0 = kv_cache_int8_quant_src_index<Geometry>(kv_head, d0, token);
         const std::int64_t src1 = kv_cache_int8_quant_src_index<Geometry>(kv_head, d1, token);
-        k0                      = __bfloat162float(k[src0]);
-        k1                      = __bfloat162float(k[src1]);
-        v0                      = __bfloat162float(v[src0]);
-        v1                      = __bfloat162float(v[src1]);
-        if constexpr (RotateK) { kv_cache_hadamard64(k0, k1, FullMask); }
+        if constexpr (NativeInt8) {
+            float row[8];
+#pragma unroll
+            for (int r = 0; r < 8; ++r) {
+                const int d = lane + 32 * r;
+                row[r]      = __bfloat162float(
+                    k[kv_cache_int8_quant_src_index<Geometry>(kv_head, d, token)]);
+            }
+            normalized_hadamard_d256_inplace(row, lane);
+            k0 = row[2 * group];
+            k1 = row[2 * group + 1];
+        } else {
+            k0 = __bfloat162float(k[src0]);
+            k1 = __bfloat162float(k[src1]);
+            if constexpr (RotateK) { kv_cache_hadamard64(k0, k1, FullMask); }
+        }
+        v0 = __bfloat162float(v[src0]);
+        v1 = __bfloat162float(v[src1]);
         if constexpr (RotateV) { kv_cache_hadamard64(v0, v1, FullMask); }
     }
     const float k_abs = warp_max(fmaxf(fabsf(k0), fabsf(k1)), FullMask);

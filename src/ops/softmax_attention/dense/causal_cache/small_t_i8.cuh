@@ -209,6 +209,65 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
 
     if constexpr (CacheInput::writes_cache) {
         // The owning split quantizes each current row before its cache tile is consumed.
+        constexpr bool NativeInt8 = !PackedV && !PackedK && !E8Lattice && !E8Root;
+        auto* cache_v_i8_all     = reinterpret_cast<std::int8_t*>(cache_v_codes);
+        if constexpr (NativeInt8) {
+            // Native INT8-G64 persists K in the normalized D256 basis and leaves V unrotated:
+            // one warp materializes a whole key row, transforms it, and quantizes every group.
+            for (int token = warp; token < valid_tokens; token += Wc) {
+                const int position = pos[token];
+                if (position < split_start || position >= split_end) { continue; }
+                int physical_page = lane == 0 ? paged_kv_physical_page(block_table, position) : 0;
+                physical_page     = __shfl_sync(FullMask, physical_page, 0);
+                const int page_offset = position & kPagedKVPageMask;
+                float krow[8];
+#pragma unroll
+                for (int r = 0; r < 8; ++r) {
+                    const int d = lane + 32 * r;
+                    krow[r] =
+                        __bfloat162float(input.k[kv_cache_int8_new_index<Geometry>(kv_head, d, token)]);
+                }
+                normalized_hadamard_d256_inplace(krow, lane);
+#pragma unroll
+                for (int grp = 0; grp < Groups; ++grp) {
+                    const int d0 = grp * kKVCacheInt8Group + lane;
+                    const int d1 = d0 + 32;
+                    float vv0 =
+                        __bfloat162float(input.v[kv_cache_int8_new_index<Geometry>(kv_head, d0, token)]);
+                    float vv1 =
+                        __bfloat162float(input.v[kv_cache_int8_new_index<Geometry>(kv_head, d1, token)]);
+                    if constexpr (RotateV) { kv_cache_hadamard64(vv0, vv1, FullMask); }
+                    const float k0  = krow[2 * grp];
+                    const float k1  = krow[2 * grp + 1];
+                    const float kamax = warp_max(fmaxf(fabsf(k0), fabsf(k1)), FullMask);
+                    const float vamax = warp_max(fmaxf(fabsf(vv0), fabsf(vv1)), FullMask);
+                    const __half ksh  = __float2half_rn(kamax > 0.0f ? kamax / 127.0f : 0.0f);
+                    const __half vsh  = __float2half_rn(vamax > 0.0f ? vamax / 127.0f : 0.0f);
+                    const float ks    = __half2float(ksh);
+                    const float vs    = __half2float(vsh);
+                    const float k_inv = ks > 0.0f ? 1.0f / ks : 0.0f;
+                    const float v_inv = vs > 0.0f ? 1.0f / vs : 0.0f;
+                    cache_k_i8[kv_cache_int8_quant_code_index<Geometry>(physical_page, kv_head, d0,
+                                                                        page_offset)] =
+                        kv_cache_int8_quant_code(k0, k_inv);
+                    cache_k_i8[kv_cache_int8_quant_code_index<Geometry>(physical_page, kv_head, d1,
+                                                                        page_offset)] =
+                        kv_cache_int8_quant_code(k1, k_inv);
+                    cache_v_i8_all[kv_cache_int8_quant_code_index<Geometry>(physical_page, kv_head, d0,
+                                                                            page_offset)] =
+                        kv_cache_int8_quant_code(vv0, v_inv);
+                    cache_v_i8_all[kv_cache_int8_quant_code_index<Geometry>(physical_page, kv_head, d1,
+                                                                            page_offset)] =
+                        kv_cache_int8_quant_code(vv1, v_inv);
+                    if (lane == 0) {
+                        const std::int64_t so = kv_cache_int8_quant_scale_index<Geometry>(
+                            physical_page, kv_head, grp, page_offset);
+                        cache_k_scale[so] = ksh;
+                        cache_v_scale[so] = vsh;
+                    }
+                }
+            }
+        } else {
         for (int pair = warp; pair < valid_tokens * Groups; pair += Wc) {
             const int token    = pair / Groups;
             const int grp      = pair - token * Groups;
@@ -335,6 +394,7 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
                 cache_v_scale[so] = vsh;
             }
         }
+        }
         __syncthreads();
     }
 
@@ -342,6 +402,37 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
     for (int i = tid; i < RowCount * Groups; i += Threads) { q_scale_tmp[i] = 0.0f; }
     __syncthreads();
 
+    // Mirrors the K side: native INT8-G64 rotates Q in the same normalized D256 basis, so one
+    // warp owns a whole row (lane l carries dimensions l + 32r). The packed int4 modes keep the
+    // per-group H64 rotation.
+    constexpr bool NativeInt8Q = !PackedV && !PackedK && !E8Root;
+    if constexpr (NativeInt8Q) {
+        for (int row = warp; row < RowCount; row += Wc) {
+            int q_head = 0;
+            int token  = 0;
+            causal_small_t_tc_row_to_qt<Geometry>(row, TokenTile, kv_head, q_head, token);
+            float x[8];
+#pragma unroll
+            for (int r = 0; r < 8; ++r) {
+                const int d = lane + 32 * r;
+                x[r]        = __bfloat162float(q[causal_q_index<Geometry>(q_head, d, token)]);
+            }
+            normalized_hadamard_d256_inplace(x, lane);
+#pragma unroll
+            for (int grp = 0; grp < Groups; ++grp) {
+                const float x0  = x[2 * grp];
+                const float x1  = x[2 * grp + 1];
+                float amax      = warp_max(fmaxf(fabsf(x0), fabsf(x1)), FullMask);
+                const float qs  = amax > 0.0f ? amax / 127.0f : 0.0f;
+                const float inv = qs > 0.0f ? 1.0f / qs : 0.0f;
+                causal_small_t_i8_store_swz(q_i8, row, grp * kKVCacheInt8Group + lane, DB16,
+                                           kv_cache_int8_quant_code(x0, inv));
+                causal_small_t_i8_store_swz(q_i8, row, grp * kKVCacheInt8Group + lane + 32, DB16,
+                                           kv_cache_int8_quant_code(x1, inv));
+                if (lane == 0) { q_scale_tmp[row * Groups + grp] = qs; }
+            }
+        }
+    } else {
     for (int unit = warp; unit < RowCount * Groups; unit += Wc) {
         const int row = unit / Groups;
         const int grp = unit - row * Groups;
@@ -362,6 +453,7 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
         causal_small_t_i8_store_swz(q_i8, row, d0, DB16, kv_cache_int8_quant_code(x0, inv));
         causal_small_t_i8_store_swz(q_i8, row, d1, DB16, kv_cache_int8_quant_code(x1, inv));
         if (lane == 0) { q_scale_tmp[row * Groups + grp] = qs; }
+    }
     }
     __syncthreads();
 
