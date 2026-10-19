@@ -101,12 +101,13 @@ void verify_real_mixed_formats(const char* artifact_path) {
         const char* name;
         ninfer::QType qtype;
     };
-    constexpr std::array<FormatSample, 5> samples{{
+    constexpr std::array<FormatSample, 6> samples{{
         {"gguf_iq4_xs", ninfer::QType::GGUF_IQ4_XS},
         {"gguf_iq3_s", ninfer::QType::GGUF_IQ3_S},
         {"gguf_iq3_xxs", ninfer::QType::GGUF_IQ3_XXS},
         {"gguf_iq2_xs", ninfer::QType::GGUF_IQ2_XS},
         {"gguf_q2_k", ninfer::QType::GGUF_Q2_K},
+        {"gguf_q4_k", ninfer::QType::GGUF_Q4_K},
     }};
     for (const auto& sample : samples) {
     const nlohmann::json* object = nullptr;

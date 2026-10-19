@@ -22,7 +22,7 @@ namespace ninfer::ops {
 
 /**
  * True when the full-vocabulary entry point below accepts a head of this format and geometry --
- * i.e. when the registered profile is W8Full or Fp8Full rather than the optimized Q4 head. The
+ * i.e. when the registered profile is W8Full, Fp8Full, or native GGUF.
  * format list lives in one place (`resolve_profile` in linear_topk.cpp); this is that question
  * asked without the weights, so a caller that must decide before anything is materialised can
  * ask it instead of restating the list and drifting from it.
@@ -38,7 +38,8 @@ namespace ninfer::ops {
  * the stable top sixteen scores and global token ids per column.
  *
  * @details For any positive column count `U`, `hidden` is contiguous BF16 `[5120,U]`, `head` is
- * either W8G32_F16S or FP8_E4M3FN_ROW_BF16S `[248320,5120]`, and `valid_rows` is 248077. For every
+ * W8G32_F16S, FP8_E4M3FN_ROW_BF16S, or a GGUF block format
+ * `[248320,5120]`, and `valid_rows` is 248077. For every
  * `t in [0,U)` and valid vocabulary row `v`, the ideal score is
  *
  * @f[

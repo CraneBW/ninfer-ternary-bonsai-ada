@@ -80,13 +80,15 @@ std::size_t gguf_linear_workspace_capacity_bytes(
     return workspace_bytes(qtype, rows, k, max_tokens);
 }
 
-void gguf_linear_dispatch(const Tensor& x, const Weight& w, Tensor& out,
-                          WorkspaceArena& workspace, cudaStream_t stream) {
+void gguf_linear_dispatch_impl(const Tensor& x, const Weight& w, Tensor& out,
+                               WorkspaceArena& workspace, cudaStream_t stream,
+                               bool fp32_out) {
     require_weight(w);
-    if (!x.data || !out.data || x.dtype != DType::BF16 || out.dtype != DType::BF16 ||
+    if (!x.data || !out.data || x.dtype != DType::BF16 ||
+        out.dtype != (fp32_out ? DType::FP32 : DType::BF16) ||
         !x.is_contiguous() || !out.is_contiguous() || x.ne[0] != w.k ||
         out.ne[0] != w.n || x.ne[1] != out.ne[1] || x.ne[1] <= 0) {
-        throw std::invalid_argument("GGUF product: expected BF16 [K,T] -> [N,T]");
+        throw std::invalid_argument("GGUF product: invalid activation or output geometry");
     }
 
     const auto type = gguf_type(w.qtype);
@@ -94,7 +96,6 @@ void gguf_linear_dispatch(const Tensor& x, const Weight& w, Tensor& out,
     const std::int64_t row_bytes =
         static_cast<std::int64_t>(w.k / block.elements) * block.bytes;
     const auto* input = static_cast<const __nv_bfloat16*>(x.data);
-    auto* output = static_cast<__nv_bfloat16*>(out.data);
     const bool wide_kernel =
         gguf::has_matrix_kernel(type) && w.k % 256 == 0 && w.n % 128 == 0;
 
@@ -111,15 +112,24 @@ void gguf_linear_dispatch(const Tensor& x, const Weight& w, Tensor& out,
             gguf::quantize_vector_activation(input + static_cast<std::int64_t>(first) * w.k,
                                              w.k, count, w.input_columns, codes, stream);
             gguf::VectorOutput target;
-            target.bf16 = output + static_cast<std::int64_t>(first) * w.n;
+            if (fp32_out) {
+                target.f32 = static_cast<float*>(out.data) +
+                             static_cast<std::int64_t>(first) * w.n;
+            } else {
+                target.bf16 = static_cast<__nv_bfloat16*>(out.data) +
+                              static_cast<std::int64_t>(first) * w.n;
+            }
             target.column_stride = w.n;
             gguf::vector_product(type, w.qdata, row_bytes, w.n, w.k, codes,
                                  count, target, stream);
         } else {
             void* codes = workspace.alloc_bytes(
                 gguf::matrix_activation_bytes(w.k, count)).data;
-            auto* plane = static_cast<float*>(
-                workspace.alloc_bytes(static_cast<std::size_t>(w.n) * count * sizeof(float)).data);
+            auto* plane = fp32_out
+                              ? static_cast<float*>(out.data) +
+                                    static_cast<std::int64_t>(first) * w.n
+                              : static_cast<float*>(workspace.alloc_bytes(
+                                    static_cast<std::size_t>(w.n) * count * sizeof(float)).data);
             const std::size_t fixup_bytes =
                 gguf::matrix_fixup_bytes(type, w.n, count);
             void* fixup = fixup_bytes ? workspace.alloc_bytes(fixup_bytes).data : nullptr;
@@ -128,13 +138,26 @@ void gguf_linear_dispatch(const Tensor& x, const Weight& w, Tensor& out,
                 w.input_columns, codes, stream);
             gguf::matrix_product(type, w.qdata, row_bytes, w.n, w.k, codes, count,
                                  plane, w.n, fixup, stream);
-            gguf::VectorOutput target;
-            target.bf16 = output + static_cast<std::int64_t>(first) * w.n;
-            target.column_stride = w.n;
-            gguf::store_plane(plane, w.n, w.n, count, target, stream);
+            if (!fp32_out) {
+                gguf::VectorOutput target;
+                target.bf16 = static_cast<__nv_bfloat16*>(out.data) +
+                              static_cast<std::int64_t>(first) * w.n;
+                target.column_stride = w.n;
+                gguf::store_plane(plane, w.n, w.n, count, target, stream);
+            }
         }
         first += count;
     }
+}
+
+void gguf_linear_dispatch(const Tensor& x, const Weight& w, Tensor& out,
+                          WorkspaceArena& workspace, cudaStream_t stream) {
+    gguf_linear_dispatch_impl(x, w, out, workspace, stream, false);
+}
+
+void gguf_linear_dispatch_f32(const Tensor& x, const Weight& w, Tensor& out,
+                              WorkspaceArena& workspace, cudaStream_t stream) {
+    gguf_linear_dispatch_impl(x, w, out, workspace, stream, true);
 }
 
 } // namespace ninfer::ops::detail

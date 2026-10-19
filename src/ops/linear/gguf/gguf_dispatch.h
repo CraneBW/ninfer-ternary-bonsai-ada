@@ -22,4 +22,9 @@ namespace ninfer::ops::detail {
 void gguf_linear_dispatch(const Tensor& x, const Weight& weight, Tensor& out,
                           WorkspaceArena& workspace, cudaStream_t stream);
 
+// Exact FP32 accumulation output for vocabulary ranking. Unlike BF16 logits,
+// it preserves close winners and deterministic score/id ties for TopK.
+void gguf_linear_dispatch_f32(const Tensor& x, const Weight& weight, Tensor& out,
+                              WorkspaceArena& workspace, cudaStream_t stream);
+
 } // namespace ninfer::ops::detail
