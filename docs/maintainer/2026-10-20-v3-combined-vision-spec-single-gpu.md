@@ -46,7 +46,7 @@ Both servers were terminated normally after their one request.
 
 ## Remaining limits
 
-- Full-length image responses, multi-image and video validation.
+- Full-length image responses, broader multi-image/video accuracy and scale.
 - Combined speculative decoding across extended contexts and KV compaction.
 - Groupwise/NVFP4 alternate weights with all feature combinations.
 - Actual native TP2/NCCL numeric execution, intentionally not attempted.

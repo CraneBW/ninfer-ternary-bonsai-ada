@@ -17,6 +17,7 @@ size of a preallocated `.ranges.part` as completion.
 | GSQ v3 DFlash2 | 66 physical-parent device/source plane oracle, production ModelView; real speculative HTTP200, accepted 2/2 | `8c4f409`, GSQ report |
 | GSQ v3 Vision | 333 real physical parents device oracle; one real 64×64 PNG with correct gradient text response, truncated at 24 tokens | `989457c`, `629dbdd` |
 | GSQ v3 Vision+MTP and Vision+DFlash2 | Two separate **real single-GPU** combined Vision/speculative PNG Chat Completions HTTP200; MTP accepted 12/20 draft tokens and DFlash2 accepted 11/23. The DFlash2 startup left only 53.8 MiB VRAM free; not a long-context or multi-image acceptance | `docs/maintainer/2026-10-20-v3-combined-vision-spec-single-gpu.md` |
+| GSQ v3 multi-image and short MP4 input | One 2-image PNG Chat Completions HTTP200, accurate gradient/blue comparison; one 2-second H.264 `video_url` HTTP200 confirmed video-to-text pipeline, but response included an unsupported timer detail, so video understanding accuracy is NOT proven | `docs/maintainer/2026-10-20-v3-vision-multi-image-video-single-gpu.md` |
 | Companion Bonsai2B v3 | 512-point Hadamard explicit per-model routing, 512/1024 GPU CPU oracle; BF16/INT8 sensible real requests including multi-turn, formally linked serve binary HTTP200 | `tools/companion/BONSAI2B_EXPERIMENTAL.md`, `d62128d`, `21cb76e` |
 | Qwen3.6 27B v3 NVFP4 | 16.0 GiB, warmup PASS, native HTTP200 outputs `hello` and `2`; independent NVFP4/BF16 CUDA numerical tests | `docs/maintainer/2026-10-20-v3-qwen36-nvfp4-live-validation.md`, `4862f3a`, `dad6059` |
 | Qwen3.6 27B v3 Groupwise | 15.3 GiB, warmup PASS, native HTTP200 outputs `hello` and `2`; Q4 v3 row-slice CUDA CPU oracle PASS | `docs/maintainer/2026-10-20-v3-qwen36-groupwise-live-validation.md`, `84576dd`, `071e539` |
@@ -55,7 +56,8 @@ size of a preallocated `.ranges.part` as completion.
    codecs/geometry and targeted oracle first, then trusted downloads and real
    inference when ready. **Do not commit/push** the Companion work tree;
    refresh tested/experimental patches in the main `tools/companion/`.
-3. **Broader acceptance.** Vision video/multi-image, Groupwise/NVFP4 native
+3. **Broader acceptance.** Beyond the initial multi-image and short MP4
+   smoke tests, high-resolution/long video semantics, Groupwise/NVFP4 native
    MTP/DFlash2/vision combinations, long-context semantic accuracy and
    multi-turn cold-tier LRFU across compactions have not been completely
    validated by the narrow successful smoke tests above.
