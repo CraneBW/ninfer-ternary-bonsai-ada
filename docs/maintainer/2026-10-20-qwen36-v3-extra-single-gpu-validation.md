@@ -74,6 +74,32 @@ tmp-nvcc/qwen36-v3-nvfp4-vision-20261020.log
 tmp-nvcc/qwen36-v3-nvfp4-vision-response.json
 ```
 
-Remaining: extended contexts, realistic image evaluation,
-Vision+MTP for Qwen3.6, and high-concurrency deployment. Near-zero
+## Groupwise and NVFP4 Vision + MTP — both PASS
+
+Two additional actual Vision/MTP combination tests used the same 64x64 PNG
+gradient and a user prompt `Is this a gradient? Answer briefly.` A single
+native service process on one RTX 4070 Ti SUPER used managed weights, int8
+KV, 256-token context, `--vision --spec mtp --draft-tokens 2`, with small
+state and media caches and `--no-cuda-graph`.
+
+| Quantization | Weights | Result | Draft acceptance | Request duration |
+|---|---:|---|---:|---:|
+| Qwen3.6 Groupwise | 15.9 GiB | HTTP 200; `Yes.`; normal stop | 2/2 | 4.4 s |
+| Qwen3.6 NVFP4 | 16.7 GiB | HTTP 200; `Yes, it is a gradient.`; normal stop | 4/6 | 10.6 s |
+
+Both were real requests with an actual image (`media 1`) and correct short
+yes/no statements. Groupwise used 86 prompt and 3 output tokens; NVFP4 used
+86 prompt and 8 output tokens. These narrow results validate simultaneous
+Vision and MTP execution, **not** comprehensive image recognition, quality,
+long-context scheduling or production latency. Both servers were terminated.
+
+```text
+tmp-nvcc/qwen36-v3-groupwise-vision-mtp-20261020.log
+tmp-nvcc/qwen36-v3-groupwise-vision-mtp-response.json
+tmp-nvcc/qwen36-v3-nvfp4-vision-mtp-20261020.log
+tmp-nvcc/qwen36-v3-nvfp4-vision-mtp-response.json
+```
+
+Remaining: extended contexts, realistic image evaluation and high-concurrency
+deployment. Near-zero
 remaining VRAM explains why those tests were not repeated on this host.
