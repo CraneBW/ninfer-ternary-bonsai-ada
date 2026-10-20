@@ -56,6 +56,24 @@ absent model weights, not a CUDA bug. Do not remove the guard or claim that
 these files provide real DFlash2 weights. The Qwen3.8 GSQ artifact does
 contain DFlash2 and has independent/combined real request evidence.
 
-Remaining: extended contexts, realistic image evaluation, NVFP4+Vision,
+## NVFP4 + native Vision — PASS, narrow and memory-constrained
+
+The verified `qwen3_6_27b_nvfp4.ninfer` was separately served with `--vision`
+and CUDA managed weights on the same single GPU. It loaded ~16.3 GiB,
+completed warmup (13.7 s) and accepted the same RGB gradient PNG in the
+native Chat Completions `image_url` format. Response HTTP 200, 90 input and
+24 output tokens, truncated by the 24-token output cap, described a smooth
+green-to-magenta gradient. The request required **32.3 seconds** due to
+device memory pressure, with only **34.2 MiB** free after startup. This
+is functional evidence, not acceptable throughput or a stability benchmark.
+
+Evidence (untracked):
+
+```text
+tmp-nvcc/qwen36-v3-nvfp4-vision-20261020.log
+tmp-nvcc/qwen36-v3-nvfp4-vision-response.json
+```
+
+Remaining: extended contexts, realistic image evaluation,
 Vision+MTP for Qwen3.6, and high-concurrency deployment. Near-zero
 remaining VRAM explains why those tests were not repeated on this host.
