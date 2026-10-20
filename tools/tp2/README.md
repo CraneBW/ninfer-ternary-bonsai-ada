@@ -134,6 +134,12 @@ metadata directories, without copying large rank payloads. Single-GPU base
 target compilation also passed after adding optional TP output-head and MTP
 residual callbacks. This does **not** constitute a registered TP2 executor.
 
+`src/runtime/tp2/v3_rank_materialization.{h,cpp}` supplies a separate native
+Binder/materialization contract for exactly these physical rank parents and
+the GDN input-column auxiliary. The source compiles on the current Ada host,
+but CUDA source-to-device oracle for full rank payloads and TP2 ModelView
+registration are not yet established.
+
 For the remaining native TP2 implementation, consult the corresponding
 `src/targets/qwen3_6_27b_tp2` and `runtime/engine/tp_lockstep` code in the
 upstream reference. The original script handles v2 row-split/NVFP4/FP8
