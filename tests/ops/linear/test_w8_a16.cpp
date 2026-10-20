@@ -1,6 +1,7 @@
 #include "ops/linear/linear_test_common.h"
 
 #include <array>
+#include <string_view>
 #include <exception>
 #include <iostream>
 #include <vector>
@@ -159,16 +160,25 @@ int w8_a16_conformance() {
     return failures;
 }
 
+int v3_mtp_individual() {
+    constexpr std::array calls{a16(1), a16(3), a16(9), a16(17)};
+    return run_shape("W8_A16_v3_mtp_individual", ActivationCompute::A16,
+                     make_w8g32_f16s_weight,
+                     {17408, 5120, 2411U, Comparison::Sampled, false, calls});
+}
+
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
     if (!ninfer::test::linear::cuda_available()) {
         std::cout << "SKIP: no usable CUDA device\n";
         return 77;
     }
 
     try {
-        const int failures = w8_a16_conformance();
+        const int failures = argc == 2 && std::string_view(argv[1]) == "--v3-mtp-individual"
+                                 ? v3_mtp_individual()
+                                 : w8_a16_conformance();
         std::cout << (failures == 0 ? "OK" : "FAIL") << " W8_A16 Linear\n";
         return failures == 0 ? 0 : 1;
     } catch (const std::exception& error) {

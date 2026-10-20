@@ -30,6 +30,13 @@ W8Launch select_w8_a16_launch(std::int32_t n, std::int32_t k, std::int32_t t) {
         case 14336:
             if (t <= 48) { return launch_w8_small_t; }
             return launch_w8_mma_r64_c128;
+        case 17408:
+            // Qwen3.6 v3 MTP stores gate/up as two independent W8 parents,
+            // not the older fused [34816,5120] projection. The exact small-T
+            // launchers below are shape-specialized for the fused parent, so
+            // use the actual shape-generic SIMT/MMA kernels instead.
+            if (t <= 16) { return launch_w8_simt_r8_c4; }
+            return launch_w8_mma_r32_c128;
         case 34816:
             if (t <= 40) { return launch_w8_small_t; }
             if (t <= 48) { return launch_w8_mma_r64x16_c48_k128_a1; }
