@@ -438,6 +438,11 @@ add_library(ninfer_engine STATIC
 ninfer_internal_includes(ninfer_engine)
 target_include_directories(ninfer_engine PUBLIC ${PROJECT_SOURCE_DIR}/include)
 
+# Native TP2 data-plane support is compiled separately so a missing NCCL
+# installation never changes existing single-GPU targets or their link path.
+add_subdirectory(runtime/tp2)
+target_link_libraries(ninfer_engine PRIVATE ninfer_tp2_collectives)
+
 add_subdirectory(targets/qwen3_6)
 add_subdirectory(targets/qwen3_6_27b)
 add_subdirectory(targets/qwen3_6_35b_a3b)

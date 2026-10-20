@@ -68,6 +68,23 @@ ninfer_add_test(ninfer_pretty_logging_test
   SOURCES test_pretty_logging.cpp
   LIBRARIES ninfer_product_logging)
 ninfer_add_test(ninfer_device_test       SOURCES test_device.cpp)
+ninfer_add_test(ninfer_tp2_nccl_test
+  SOURCES runtime/test_tp2_nccl.cpp
+  LIBRARIES ninfer_tp2_collectives)
+# Compile the actual production NCCL branch against a strict fake ABI on hosts
+# without NCCL or two GPUs; this is NOT a substitute for a two-device oracle.
+ninfer_add_test(ninfer_tp2_nccl_mock_test
+  SOURCES runtime/test_tp2_nccl_mock.cpp
+          ${PROJECT_SOURCE_DIR}/src/runtime/tp2/nccl_collectives.cpp
+  LIBRARIES CUDA::cudart)
+target_include_directories(ninfer_tp2_nccl_mock_test BEFORE PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/runtime/mock_nccl)
+target_compile_definitions(ninfer_tp2_nccl_mock_test PRIVATE NINFER_HAVE_NCCL=1)
+if(UNIX AND NOT APPLE)
+  ninfer_add_test(ninfer_tp_lockstep_test
+    SOURCES runtime/test_tp_lockstep.cpp
+    LIBRARIES Threads::Threads)
+endif()
 ninfer_add_test(ninfer_decode_graph_test SOURCES test_decode_graph.cpp)
 ninfer_add_test(ninfer_tensor_test       SOURCES test_tensor.cpp)
 ninfer_add_test(ninfer_arena_test        SOURCES test_arena.cpp)

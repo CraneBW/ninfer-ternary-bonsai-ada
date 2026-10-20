@@ -9,6 +9,7 @@
 #include "runtime/engine/request_record.h"
 #include "runtime/engine/resource_manager.h"
 #include "runtime/engine/scheduler.h"
+#include "runtime/engine/tp_lockstep.h"
 #include "runtime/generation/generation_budget.h"
 
 #include <algorithm>
@@ -905,12 +906,38 @@ private:
         }
     }
 
+    [[nodiscard]] std::array<bool, kMaximumConcurrency>
+    tp_agree_cancellations(tp::Lockstep& lockstep, tp::UnitKind kind, std::uint64_t count,
+                           std::uint64_t hash, std::uint64_t position) const {
+        const auto local  = snapshot_cancellations_raw();
+        std::uint64_t mask = 0;
+        for (std::uint32_t lane = 0; lane < max_concurrency_; ++lane) {
+            if (local[lane]) { mask |= std::uint64_t{1} << lane; }
+        }
+        const std::uint64_t pending_n = pending_count();
+        const std::uint64_t agreed = lockstep.exchange(kind, mask, count, hash, position, pending_n);
+        // Both ranks may admit only what both of them already hold (see worker_loop).
+        admission_budget_ = std::min(pending_n, lockstep.peer_pending());
+        std::array<bool, kMaximumConcurrency> cancelled{};
+        for (std::uint32_t lane = 0; lane < max_concurrency_; ++lane) {
+            cancelled[lane] = slots_[lane] != nullptr && ((agreed >> lane) & 1U) != 0;
+        }
+        return cancelled;
+    }
+
     void remove_completed_slot(std::uint32_t lane) {
         slots_[lane].reset();
         request_admission_check();
     }
 
+    // Under TP lockstep a rank must not act on its own cancellation view: both ranks agree on it
+    // once per GPU unit (tp_agree_cancellations) so they abort at the same unit.
     [[nodiscard]] std::array<bool, kMaximumConcurrency> snapshot_cancellations() const noexcept {
+        if (tp::Lockstep::instance() != nullptr) { return {}; }
+        return snapshot_cancellations_raw();
+    }
+
+    [[nodiscard]] std::array<bool, kMaximumConcurrency> snapshot_cancellations_raw() const noexcept {
         std::array<bool, kMaximumConcurrency> cancelled{};
         // An already-issued active unit may finish while another row owns the global resource
         // transaction.  Its cancellation cannot release topology until that transaction reaches
@@ -1003,7 +1030,8 @@ private:
             std::lock_guard lock(queue_mutex_);
             const auto now = Clock::now();
             for (auto it = pending_.begin(); it != pending_.end();) {
-                if ((*it)->cancelled.load(std::memory_order_acquire)) {
+                if ((*it)->cancelled.load(std::memory_order_acquire) &&
+                    tp::Lockstep::instance() == nullptr) {
                     cancelled.push_back(*it);
                     it = pending_.erase(it);
                 } else if (now >= (*it)->deadline) {
@@ -1396,6 +1424,32 @@ private:
         auto progress =
             instance_.program->advance_prefill(*request->sequence, &program_call.failed_timing());
         program_call.finish(progress.timing);
+        if (auto* lockstep = tp::Lockstep::instance()) {
+            std::uint64_t hash = 1469598103934665603ULL;
+            if (progress.pending) {
+                const auto& first = *progress.pending;
+                const std::int32_t n = first.row_counts().empty() ? 1 : first.row_counts()[0];
+                if (n > 0 && static_cast<std::size_t>(n) <= first.tokens().size()) {
+                    hash = tp::Lockstep::hash_tokens(
+                        first.tokens().subspan(0, static_cast<std::size_t>(n)), hash);
+                }
+            }
+            const std::uint64_t count = (static_cast<std::uint64_t>(progress.processed_prompt_tokens)
+                                         << 2) |
+                                        (progress.complete ? 1U : 0U) |
+                                        (progress.capture ? 2U : 0U);
+            const auto agreed = tp_agree_cancellations(*lockstep, tp::UnitKind::Prefill, count,
+                                                       hash, request->computed_prompt_tokens);
+            resolve_prefill_progress(request, std::move(progress), agreed);
+            if (agreed[lane] && slots_[lane] == request) {
+                // Both ranks abort the partially prefilled request after the same chunk.
+                HostPhaseMeasurement boundary = begin_host_phase();
+                cancel_active_requests(agreed, boundary);
+                finish_engine_phase(boundary, EngineHostPhase::Boundary);
+            }
+            publish_runtime_stats();
+            return;
+        }
         resolve_prefill_progress(request, std::move(progress), cancelled_at_unit_start);
         publish_runtime_stats();
     }
@@ -1408,6 +1462,19 @@ private:
     [[nodiscard]] bool has_pending_requests() const {
         std::lock_guard lock(queue_mutex_);
         return !pending_.empty();
+    }
+
+    [[nodiscard]] std::uint64_t pending_count() const {
+        std::lock_guard lock(queue_mutex_);
+        return static_cast<std::uint64_t>(pending_.size());
+    }
+
+    [[nodiscard]] bool lanes_active() const noexcept {
+        bool active = materializing_.has_value();
+        for (std::uint32_t lane = 0; lane < max_concurrency_; ++lane) {
+            active = active || slots_[lane] != nullptr;
+        }
+        return active;
     }
 
     [[nodiscard]] bool erase_pending(const std::shared_ptr<Request>& request) {
@@ -1660,7 +1727,9 @@ private:
             }
             const std::shared_ptr<Request>& head = queued.head();
             scheduler_.observe_fifo_head(head->id);
-            if (head->cancelled.load(std::memory_order_acquire)) {
+            // Under TP lockstep a queued request is never dropped on one rank's own cancellation
+            // view: it is admitted like on the peer and cancelled by the agreed per-unit mask.
+            if (head->cancelled.load(std::memory_order_acquire) && tp::Lockstep::instance() == nullptr) {
                 if (erase_pending(head)) {
                     on_waiting_removed(head);
                     complete_detached_cancelled(head);
@@ -1799,6 +1868,27 @@ private:
         auto pending = instance_.program->decode(
             membership.sequence_span(), membership.budget_span(), &program_call.failed_timing());
         program_call.finish(pending.execution_timing());
+        if (auto* lockstep = tp::Lockstep::instance()) {
+            std::uint64_t hash = 1469598103934665603ULL;
+            std::uint64_t count = 0;
+            std::uint64_t position = 0;
+            const auto lanes = membership.lane_span();
+            for (std::size_t row = 0; row < lanes.size(); ++row) {
+                const std::int32_t n = pending.row_counts().empty() ? 1 : pending.row_counts()[row];
+                const auto begin = row * pending.row_stride();
+                if (n > 0 && begin + static_cast<std::size_t>(n) <= pending.tokens().size()) {
+                    hash = tp::Lockstep::hash_tokens(
+                        pending.tokens().subspan(begin, static_cast<std::size_t>(n)), hash);
+                }
+                count    = count * 64 + static_cast<std::uint64_t>(n);
+                position += slots_[lanes[row]] != nullptr ? slots_[lanes[row]]->generated.size() : 0;
+            }
+            const auto agreed =
+                tp_agree_cancellations(*lockstep, tp::UnitKind::Decode, count, hash, position);
+            commit_pending(std::move(pending), lanes, true, agreed);
+            publish_runtime_stats();
+            return;
+        }
         commit_pending(std::move(pending), membership.lane_span(), true, cancelled_at_unit_start);
         publish_runtime_stats();
     }
@@ -1960,10 +2050,35 @@ private:
                     scheduler_.build_round_membership(slots_, max_concurrency_);
                 const bool admission_check_pending =
                     admission_check_pending_.load(std::memory_order_acquire);
-                if (scheduler_.should_attempt_admission(
-                        have_pending, admission_check_pending, !membership.empty(),
-                        previous_unit_was_decode, instance_.program->has_context_transaction()) &&
-                    consume_admission_check()) {
+                if (auto* lockstep = tp::Lockstep::instance()) {
+                    // Under TP lockstep both ranks must admit the same requests at the same
+                    // boundary, but a request reaches the two processes at slightly different
+                    // times, so no rank may act on its own FIFO length or arrival flags. The
+                    // admission budget is the smaller of the two FIFO lengths, agreed at every
+                    // unit exchange (tp_agree_cancellations); while no unit is flowing and the
+                    // budget is spent, an explicit admission exchange refreshes it. Every request
+                    // removed from the FIFO head (admitted or rejected) spends one unit of budget,
+                    // identically on both ranks.
+                    if (have_pending && admission_budget_ == 0 && !lanes_active()) {
+                        admission_budget_ = lockstep->agree_admissions(pending_count());
+                    }
+                    if (admission_budget_ > 0 &&
+                        scheduler_.should_attempt_admission(
+                            true, true, !membership.empty(), previous_unit_was_decode,
+                            instance_.program->has_context_transaction())) {
+                        (void)consume_admission_check();
+                        const std::uint64_t before = pending_count();
+                        (void)try_admit_one();
+                        const std::uint64_t after = pending_count();
+                        const std::uint64_t spent = before > after ? before - after : 0;
+                        admission_budget_ -= std::min(admission_budget_, spent);
+                        membership = scheduler_.build_round_membership(slots_, max_concurrency_);
+                    }
+                } else if (scheduler_.should_attempt_admission(
+                               have_pending, admission_check_pending, !membership.empty(),
+                               previous_unit_was_decode,
+                               instance_.program->has_context_transaction()) &&
+                           consume_admission_check()) {
                     (void)try_admit_one();
                     membership = scheduler_.build_round_membership(slots_, max_concurrency_);
                 }
@@ -2038,6 +2153,7 @@ private:
     mutable std::mutex stats_mutex_;
     std::condition_variable queue_cv_;
     std::deque<std::shared_ptr<Request>> pending_;
+    mutable std::uint64_t admission_budget_ = 0;   // TP lockstep: requests both ranks may admit
     std::size_t outstanding_              = 0;
     std::uint64_t next_request_id_        = 1;
     std::uint64_t next_publication_order_ = 1;

@@ -110,7 +110,24 @@ preflight fails explicitly; it does not attempt to simulate TP2 by running two
 non-communicating copies on that GPU. The proxy is a supervisor, **not** the
 still-missing native v3/NCCL TP2 model executor in this repository.
 
-For a native TP2 implementation, consult the corresponding
+The main tree now includes `src/runtime/tp2/nccl_collectives.{h,cpp}` as an
+optional NCCL BF16 all-reduce/all-gather data plane and
+`src/runtime/engine/tp_lockstep.h` with admission, prefill and decode host
+lockstep. CMake auto-detects NCCL; specify `-DNINFER_NCCL_ROOT=/path/to/nccl`
+when the headers and library live outside standard locations. Without NCCL the
+existing engine still builds, but attempting `NcclCollectives::initialize()`
+fails explicitly. Focused build/tests:
+
+```bash
+cmake --build build --target ninfer_tp2_nccl_test ninfer_tp2_nccl_mock_test ninfer_tp_lockstep_test -j2
+ctest --test-dir build -R '^ninfer_(tp2_nccl(_mock)?|tp_lockstep)_test$' --output-on-failure
+```
+
+The mocked NCCL test checks production-call argument wiring, **not** transport
+numerics. The native v3 rank-local target executor and two-GPU acceptance are
+still missing; do not route TP2 shards into the ordinary single-rank backend.
+
+For the remaining native TP2 implementation, consult the corresponding
 `src/targets/qwen3_6_27b_tp2` and `runtime/engine/tp_lockstep` code in the
 upstream reference. The original script handles v2 row-split/NVFP4/FP8
 weights; the separate v3 script handles mixed GGUF metadata and physical

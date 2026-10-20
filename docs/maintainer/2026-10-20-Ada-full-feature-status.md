@@ -21,11 +21,20 @@ size of a preallocated `.ranges.part` as completion.
 | Qwen3.6 27B v3 Groupwise | 15.3 GiB, warmup PASS, native HTTP200 outputs `hello` and `2`; Q4 v3 row-slice CUDA CPU oracle PASS | `docs/maintainer/2026-10-20-v3-qwen36-groupwise-live-validation.md`, `84576dd`, `071e539` |
 | Strata × ActKV | Existing `BlockStratum` and Action-LRFU wiring confirmed. Standalone protection/decay/retrieval/cold tests PASS, plus real 1,898-token GSQ request, 512-token selected window and output `4`, HTTP200 | `docs/maintainer/2026-10-20-kvmem-actkv-live-validation.md`, `e495e19` |
 | TP2 shards & proxy guards | V3 byte-exact sharder has tests; proxy now refuses a single physical GPU, mismatched ranks, bad ports, header-only v3 files; six preflight tests PASS | `tools/tp2/README.md`, `c2123ba` |
+| Native TP2 communication/lockstep groundwork | Compiled optional NCCL BF16 sum/all-gather transport and two-rank engine admission/prefill/decode lockstep; three focused tests pass (including a mocked NCCL ABI and cross-process divergence detection). Neither native v3 rank execution nor real NCCL/two-GPU correctness has been verified | `src/runtime/tp2/`, `src/runtime/engine/tp_lockstep.h`, `tests/runtime/` |
 
 ## Still missing: do **not** declare full implementation complete
 
-1. **Actual native v3 TP2 tensor-parallel GPU executor and NCCL collectives.**
-   Current proxy/sharder/preflight alone do not perform collectives. The
+1. **Actual native v3 TP2 tensor-parallel GPU executor.**
+   The new optional NCCL data-plane implementation issues real NCCL BF16
+   all-reduce/all-gather calls when built with NCCL, and the host runtime now
+   has two-process lockstep synchronization. On this host the NCCL development
+   library is missing, so only the failure path and mocked NCCL call ABI were
+   compiled/tested; no live NCCL operation was issued. The remaining central
+   work is rank-local v3 mixed-GGUF physical ModelView binding, the TP2
+   projection/reduction/head execution order, native target registration and
+   graph capture interoperability. The proxy/sharder/preflight alone do not
+   perform those steps. The
    reference `/home/ran/ninfer-work/ecosystem/ninfer-v100-tpx` has a v2
    `src/targets/qwen3_6_27b_tp2` implementation with `tp2_comm.cpp`,
    `tp2_mailbox.cu`, and `runtime/engine/tp_lockstep.h`. Porting must map the
