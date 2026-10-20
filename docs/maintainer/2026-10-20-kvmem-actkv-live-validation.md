@@ -103,3 +103,46 @@ The targeted `ninfer_kvmem_cold_store_test` passed (0 failures) after adding
 release of 2048 slots, reuse with generation invalidation, and bounded active
 page accounting. This is a CPU/NVMe-backing data-structure and I/O check,
 not a 256K GPU inference or throughput claim.
+
+## Two-turn historical detail recall: 512-token KVMem missed a fact
+
+A separate single-GPU native Qwen3.8 GSQ v3 test used an artificial archive
+of 171 notes. The fact in the **middle** of the first user turn said:
+`The Indigo Archive display label is cobalt-orchid-73.` The first Chat
+Completions request contained 2,940 prompt tokens and returned `ACK` (HTTP
+200). A second request supplied that history plus assistant `ACK` and a
+question asking for the exact display label (2,968 prompt tokens).
+
+With `--max-context 3072 --kv-device-tokens 1024 --kvmem
+--kvmem-budget 512 --host-kv-mib 128 --kvmem-action-lrfu
+--kvmem-lrfu-lambda 0.5 --kvmem-lrfu-top-frac 0.3`, the second request
+returned **`Indigo Archive` (incorrect)**, despite HTTP 200 and 2,933
+cached prompt tokens (98.8%). The final selection trace showed eight
+64-token pages with ids `0,40,41,42,43,44,45,46`; it excluded the page
+containing the earlier exact label. No Cold spill was observed (0 cold bytes,
+0 Host→Cold spills; 13 compactions total). This specifically demonstrates
+a retrieval/retention miss, not NVMe data loss.
+
+An independent no-KVMem control served the **same second request** with
+`--kv-device-tokens 3072`; HTTP 200 returned the exact
+`cobalt-orchid-73`. The models used the same verified full GSQ weights,
+single RTX 4070 Ti SUPER, greedy decoding and no thinking. Both servers
+were stopped afterwards. Evidence:
+
+```text
+tmp-nvcc/kvmem-multiturn-first-request.json
+tmp-nvcc/kvmem-multiturn-first-response.json
+tmp-nvcc/kvmem-multiturn-second-request.json
+tmp-nvcc/kvmem-multiturn-second-response.json
+tmp-nvcc/kvmem-multiturn-fullkv-control-response.json
+tmp-nvcc/gsq-v3-kvmem-multiturn-20261020.log
+tmp-nvcc/gsq-v3-fullkv-control-20261020.log
+```
+
+**Outstanding quality gap:** query-conditioned page ranking and device-window
+retention do not guarantee exact recall of an arbitrary fact far back in the
+history. This single artificial example does not estimate recall rates, and
+changing global ranking weights without a broader oracle could regress other
+tasks. Do not mark 256K/multi-turn semantic accuracy as accepted. This test
+also does not exercise a Host→Cold spill; Cold byte accounting and restoration
+were established separately.

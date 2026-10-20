@@ -27,7 +27,7 @@ size of a preallocated `.ranges.part` as completion.
 | Qwen3.6 27B v3 Groupwise + MTP | Fixed previously unsupported independent W8 [17408,5120] gate/up v3 MTP shape with existing generic SIMT/MMA launchers; focused CUDA T=1,3,9,17 oracle PASS; full 15.7 GiB startup, MTP 2/2 accepted and answer `2`, HTTP200 | `docs/maintainer/2026-10-20-qwen36-groupwise-mtp-live-validation.md` |
 | Qwen3.6 27B Groupwise + Vision | Native gradient PNG HTTP200 after correcting request model identity; accurate broad gradient description truncated at 24 tokens; 30.0 s request due to low free VRAM. Qwen3.6 Groupwise and NVFP4 artifacts do not contain DFlash2 physical component; DFlash2 startup correctly rejects them | `docs/maintainer/2026-10-20-qwen36-v3-extra-single-gpu-validation.md` |
 | Qwen3.6 27B Vision + MTP combinations | Native image+speculative combined generation HTTP200 on both Groupwise and NVFP4; respective MTP acceptance 2/2 and 4/6, correct short gradient yes/no answers; memory pressure remains severe | `docs/maintainer/2026-10-20-qwen36-v3-extra-single-gpu-validation.md` |
-| Strata × ActKV | Existing `BlockStratum` and Action-LRFU wiring confirmed. Standalone protection/decay/retrieval/cold tests PASS, plus real 1,898-token GSQ request, 512-token selected window and output `4`, HTTP200 | `docs/maintainer/2026-10-20-kvmem-actkv-live-validation.md`, `e495e19` |
+| Strata × ActKV | Existing `BlockStratum` and Action-LRFU wiring confirmed. Standalone protection/decay/retrieval/cold tests PASS, plus real 1,898-token GSQ request, 512-token selected window and output `4`, HTTP200. **A new two-turn 2,968-token historical-label recall test failed under a 512-token KVMem window, while an uncompressed 3,072-token KV control answered exactly; no cold spill occurred** | `docs/maintainer/2026-10-20-kvmem-actkv-live-validation.md`, `e495e19` |
 | 256K-class host Action-LRFU and cold extent growth | Corrected exact top-fraction selection under tied retrieval scores; 4096-page CPU unit checks cover deterministic top-410, 256-page device working set, two action/query passes and temporal decay. ColdKVStore free-list now grows geometrically; 4096-page cold allocation/reuse checks pass. No full 256K model inference claim | `src/kvmem/kvmem_blocks.h`, `src/kvmem/kvmem_cold_store.h`, `tests/kvmem_blocks_test.cpp`, `tests/kvmem_cold_store_test.cpp` |
 | TP2 shards & proxy guards | V3 byte-exact sharder has tests; proxy now refuses a single physical GPU, mismatched ranks, bad ports, header-only v3 files; six preflight tests PASS | `tools/tp2/README.md`, `c2123ba` |
 | Native TP2 communication/lockstep groundwork | Compiled optional NCCL BF16 sum/all-gather transport and two-rank engine admission/prefill/decode lockstep; three focused tests pass (including a mocked NCCL ABI and cross-process divergence detection). Neither native v3 rank execution nor real NCCL/two-GPU correctness has been verified | `src/runtime/tp2/`, `src/runtime/engine/tp_lockstep.h`, `tests/runtime/` |
@@ -66,7 +66,11 @@ size of a preallocated `.ranges.part` as completion.
    smoke tests, high-resolution/long video semantics, Groupwise/NVFP4 native
    MTP/DFlash2/vision combinations, long-context semantic accuracy and
    multi-turn cold-tier LRFU across compactions have not been completely
-   validated by the narrow successful smoke tests above.
+   validated by the narrow successful smoke tests above. In particular, a
+   paired compressed-vs-uncompressed real GSQ multi-turn test now confirms
+   that the 512-token Action-LRFU window can drop a distant exact historical
+   fact that the uncompressed model correctly retrieves. This remains an
+   **open quality gap**, not a completed acceptance.
 
 ## Current protected state and next safe steps
 
