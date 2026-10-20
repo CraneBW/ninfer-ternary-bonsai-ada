@@ -445,6 +445,7 @@ target_link_libraries(ninfer_engine PRIVATE ninfer_tp2_collectives)
 
 add_subdirectory(targets/qwen3_6)
 add_subdirectory(targets/qwen3_6_27b)
+add_subdirectory(targets/qwen3_6_27b_tp2)
 add_subdirectory(targets/qwen3_6_35b_a3b)
 
 target_link_libraries(ninfer_engine

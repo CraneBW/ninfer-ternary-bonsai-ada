@@ -22,21 +22,22 @@ size of a preallocated `.ranges.part` as completion.
 | Strata × ActKV | Existing `BlockStratum` and Action-LRFU wiring confirmed. Standalone protection/decay/retrieval/cold tests PASS, plus real 1,898-token GSQ request, 512-token selected window and output `4`, HTTP200 | `docs/maintainer/2026-10-20-kvmem-actkv-live-validation.md`, `e495e19` |
 | TP2 shards & proxy guards | V3 byte-exact sharder has tests; proxy now refuses a single physical GPU, mismatched ranks, bad ports, header-only v3 files; six preflight tests PASS | `tools/tp2/README.md`, `c2123ba` |
 | Native TP2 communication/lockstep groundwork | Compiled optional NCCL BF16 sum/all-gather transport and two-rank engine admission/prefill/decode lockstep; three focused tests pass (including a mocked NCCL ABI and cross-process divergence detection). Neither native v3 rank execution nor real NCCL/two-GPU correctness has been verified | `src/runtime/tp2/`, `src/runtime/engine/tp_lockstep.h`, `tests/runtime/` |
-| V3 TP2 rank-local metadata | The exact Qwen3.8 27B GSQ sharder produced rank0/rank1 directories directly from the verified source header. C++ manifest resolution verified 656 core projection bindings on each rank, including fused-parent logical row spans; no 15 GiB file copy or dual-GPU run. Optional TP Variant MTP partial-reduction/output-head callback sites were added; single-GPU engine still compiles. No rank-local executable is registered | `src/runtime/tp2/v3_rank_manifest.cpp`, `src/targets/qwen3_6/impl/runtime/text_context_impl.h` |
+| V3 TP2 rank-local metadata | The exact Qwen3.8 27B GSQ sharder produced rank0/rank1 directories directly from the verified source header. Native C++ manifest verified 656 core projection bindings and rank-specific Qwen3.8 ModelView inspector verified 963 text semantic tensors on each rank. No full shard copy or dual-GPU run | `src/runtime/tp2/v3_rank_manifest.cpp`, `src/targets/qwen3_6_27b_tp2/impl/load/bindings.cpp` |
 | V3 rank physical materialization interface | Compiles a rank-local Binder/MaterializationPlan selecting 656 core logical weights' physical parents only once, plus GDN input-column mapping. Exposes CUDA logical matrix row views with real GGUF block-byte offsets and BF16 shape bounds. This stage is compile-verified only; no full shard upload or rank-local live inference has been demonstrated | `src/runtime/tp2/v3_rank_materialization.{h,cpp}` |
+| Native TP2 registered text execution source | Added a distinct Qwen3.8 v3 rank target with rank-local compile-time head/intermediate geometry, v3 semantic ModelView and materialization, NCCL communicator warmup, attention/GDN/MLP partial-residual AllReduce, and EngineCore lockstep. `ninfer_engine` and `ninfer-serve` build/link on Ada without NCCL; rank metadata validation passes for both shards. Runtime deliberately rejects startup without a real NCCL build, and Vision/MTP/DFlash2 TP combinations are not yet connected. No native TP2 inference or collective numerical correctness has been run | `src/targets/qwen3_6_27b_tp2/`, `src/targets/registry.*`, `src/runtime/engine/engine.cpp` |
 
 ## Still missing: do **not** declare full implementation complete
 
-1. **Actual native v3 TP2 tensor-parallel GPU executor.**
-   The new optional NCCL data-plane implementation issues real NCCL BF16
-   all-reduce/all-gather calls when built with NCCL, and the host runtime now
-   has two-process lockstep synchronization. On this host the NCCL development
-   library is missing, so only the failure path and mocked NCCL call ABI were
-   compiled/tested; no live NCCL operation was issued. The remaining central
-   work is rank-local v3 mixed-GGUF physical ModelView binding, the TP2
-   projection/reduction/head execution order, native target registration and
-   graph capture interoperability. The proxy/sharder/preflight alone do not
-   perform those steps. The
+1. **Native TP2 runtime acceptance, remaining feature combinations.**
+   The rank-local target and direct NCCL collective execution source now
+   compile and link into the service, using genuine v3 semantic bindings and
+   half-width text operators. On this host the NCCL development library is
+   missing and the available GPU count is one. No live NCCL collective,
+   full shard CUDA upload, graph-capture interoperability, numeric comparison,
+   or full TP2 request has been demonstrated. The code guards unavailable
+   NCCL instead of falling back to two non-communicating single-GPU servers.
+   Vision/MTP/DFlash2 combined TP2 backends remain deliberately unsupported
+   until their rank-local semantics are implemented. The
    reference `/home/ran/ninfer-work/ecosystem/ninfer-v100-tpx` has a v2
    `src/targets/qwen3_6_27b_tp2` implementation with `tp2_comm.cpp`,
    `tp2_mailbox.cu`, and `runtime/engine/tp_lockstep.h`. Porting must map the

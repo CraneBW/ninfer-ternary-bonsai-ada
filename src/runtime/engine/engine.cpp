@@ -243,9 +243,11 @@ class Engine::Impl {
 public:
     using Core27      = runtime::EngineCore<targets::Qwen3_6_27BInstance>;
     using Core35      = runtime::EngineCore<targets::Qwen3_6_35BA3BInstance>;
+    using CoreTp2     = runtime::EngineCore<targets::Qwen3_6_27BTp2Instance>;
     using ScoreCore27 = runtime::CausalScoreCore<targets::Qwen3_6_27BInstance>;
     using ScoreCore35 = runtime::CausalScoreCore<targets::Qwen3_6_35BA3BInstance>;
     using Core = std::variant<std::monostate, std::unique_ptr<Core27>, std::unique_ptr<Core35>,
+                              std::unique_ptr<CoreTp2>,
                               std::unique_ptr<ScoreCore27>, std::unique_ptr<ScoreCore35>>;
 
     explicit Impl(EngineOptions engine_options)
@@ -267,6 +269,12 @@ public:
                     }
                     return std::make_unique<Core27>(*target_ptr, device, options,
                                                     std::move(constructed.context_cost));
+                } else if constexpr (std::is_same_v<Instance, targets::Qwen3_6_27BTp2Instance>) {
+                    if (options.purpose != EnginePurpose::Generation) {
+                        throw std::invalid_argument("TP2 target supports generation only");
+                    }
+                    return std::make_unique<CoreTp2>(*target_ptr, device, options,
+                                                     std::move(constructed.context_cost));
                 } else {
                     if (options.purpose == EnginePurpose::CausalScoring) {
                         return std::make_unique<ScoreCore35>(*target_ptr, device);

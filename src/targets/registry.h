@@ -3,6 +3,7 @@
 #include "ninfer/types.h"
 #include "runtime/engine/context_cost.h"
 #include <ninfer/targets/qwen3_6_27b/package.h>
+#include <ninfer/targets/qwen3_6_27b_tp2/package.h>
 #include <ninfer/targets/qwen3_6_35b_a3b/package.h>
 
 #include <memory>
@@ -15,6 +16,7 @@ struct DeviceContext;
 namespace targets {
 
 using Qwen3_6_27B    = qwen3_6_27b::Package;
+using Qwen3_6_27BTp2 = qwen3_6_27b_tp2::Package;
 using Qwen3_6_35BA3B = qwen3_6_35b_a3b::Package;
 
 struct LoadedQwen3_6_27B {
@@ -45,6 +47,36 @@ struct Qwen3_6_27BInstance {
 
     Qwen3_6_27BInstance(const Qwen3_6_27BInstance&)            = delete;
     Qwen3_6_27BInstance& operator=(const Qwen3_6_27BInstance&) = delete;
+};
+
+struct LoadedQwen3_6_27BTp2 {
+    std::unique_ptr<Qwen3_6_27BTp2::LoadedModel> model;
+    Qwen3_6_27BTp2::Frontend frontend;
+
+    LoadedQwen3_6_27BTp2(std::unique_ptr<Qwen3_6_27BTp2::LoadedModel> stable_model,
+                         const EngineOptions& options);
+    ~LoadedQwen3_6_27BTp2();
+
+    LoadedQwen3_6_27BTp2(const LoadedQwen3_6_27BTp2&) = delete;
+    LoadedQwen3_6_27BTp2& operator=(const LoadedQwen3_6_27BTp2&) = delete;
+};
+
+struct Qwen3_6_27BTp2Instance {
+    using Package = Qwen3_6_27BTp2;
+
+    std::unique_ptr<LoadedQwen3_6_27BTp2> loaded;
+    runtime::KvCapacityResolution kv_capacity_resolution;
+    const std::uint32_t capacity;
+    std::unique_ptr<Qwen3_6_27BTp2::Program> program;
+
+    Qwen3_6_27BTp2Instance(std::unique_ptr<LoadedQwen3_6_27BTp2> stable_loaded,
+                           runtime::KvCapacityResolution resolution,
+                           Qwen3_6_27BTp2::SequencePlan sequence_plan, DeviceContext& device,
+                           const StartupObserver& startup_observer);
+    ~Qwen3_6_27BTp2Instance();
+
+    Qwen3_6_27BTp2Instance(const Qwen3_6_27BTp2Instance&) = delete;
+    Qwen3_6_27BTp2Instance& operator=(const Qwen3_6_27BTp2Instance&) = delete;
 };
 
 struct LoadedQwen3_6_35BA3B {
@@ -78,7 +110,8 @@ struct Qwen3_6_35BA3BInstance {
 };
 
 using ActiveTarget =
-    std::variant<std::unique_ptr<Qwen3_6_27BInstance>, std::unique_ptr<Qwen3_6_35BA3BInstance>>;
+    std::variant<std::unique_ptr<Qwen3_6_27BInstance>, std::unique_ptr<Qwen3_6_27BTp2Instance>,
+                 std::unique_ptr<Qwen3_6_35BA3BInstance>>;
 
 struct ConstructedTarget {
     ActiveTarget active;

@@ -73,7 +73,10 @@ ninfer_add_test(ninfer_tp2_nccl_test
   LIBRARIES ninfer_tp2_collectives)
 add_executable(ninfer_tp2_v3_manifest_test runtime/test_tp2_v3_manifest.cpp)
 ninfer_internal_includes(ninfer_tp2_v3_manifest_test)
-target_link_libraries(ninfer_tp2_v3_manifest_test PRIVATE ninfer_tp2_collectives)
+target_include_directories(ninfer_tp2_v3_manifest_test PRIVATE
+  ${PROJECT_SOURCE_DIR}/src/targets/qwen3_6/export
+  ${PROJECT_SOURCE_DIR}/src/targets/qwen3_6_27b_tp2/export)
+target_link_libraries(ninfer_tp2_v3_manifest_test PRIVATE ninfer_engine CUDA::nvtx3 CUDA::cudart)
 # Compile the actual production NCCL branch against a strict fake ABI on hosts
 # without NCCL or two GPUs; this is NOT a substitute for a two-device oracle.
 ninfer_add_test(ninfer_tp2_nccl_mock_test

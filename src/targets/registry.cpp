@@ -227,10 +227,14 @@ artifact::ArtifactIdentity registered_identity(const artifact::Reader& reader) {
         const auto& config = components.at("text").at("config");
         const auto& metadata = directory->at("metadata");
         const std::string name = metadata.value("name", "");
-        if ((name == "qwen3.8-27b" || name == "qwen3.6-27b") &&
+        if ((name == "qwen3.8-27b" || name == "qwen3.6-27b" ||
+             name == "qwen3.8-27b-tp2-rank0" || name == "qwen3.8-27b-tp2-rank1") &&
             config.value("model_type", "") == "qwen3_5_text" &&
             config.value("hidden_size", 0) == 5120 &&
             config.value("num_hidden_layers", 0) == 64) {
+            if (name == "qwen3.8-27b-tp2-rank0" || name == "qwen3.8-27b-tp2-rank1") {
+                return {name, "groupwise-int"};
+            }
             // v3 stores the physical codec on each tensor. For Qwen3.6 the
             // presence of any NVFP4 weights also selects the existing
             // NVFP4-family capacity policy; plain Q4/Q5 stays groupwise.
@@ -272,6 +276,23 @@ Qwen3_6_27BInstance::Qwen3_6_27BInstance(std::unique_ptr<LoadedQwen3_6_27B> stab
 
 Qwen3_6_27BInstance::~Qwen3_6_27BInstance() = default;
 
+LoadedQwen3_6_27BTp2::LoadedQwen3_6_27BTp2(
+    std::unique_ptr<Qwen3_6_27BTp2::LoadedModel> stable_model, const EngineOptions& options)
+    : model(std::move(stable_model)), frontend(Qwen3_6_27BTp2::make_frontend(*model, options)) {}
+
+LoadedQwen3_6_27BTp2::~LoadedQwen3_6_27BTp2() = default;
+
+Qwen3_6_27BTp2Instance::Qwen3_6_27BTp2Instance(
+    std::unique_ptr<LoadedQwen3_6_27BTp2> stable_loaded,
+    runtime::KvCapacityResolution resolution, Qwen3_6_27BTp2::SequencePlan sequence_plan,
+    DeviceContext& device, const StartupObserver& startup_observer)
+    : loaded(std::move(stable_loaded)), kv_capacity_resolution(resolution),
+      capacity(sequence_plan.capacity()),
+      program(Qwen3_6_27BTp2::create_program(*loaded->model, std::move(sequence_plan), device,
+                                             startup_observer)) {}
+
+Qwen3_6_27BTp2Instance::~Qwen3_6_27BTp2Instance() = default;
+
 LoadedQwen3_6_35BA3B::LoadedQwen3_6_35BA3B(
     std::unique_ptr<Qwen3_6_35BA3B::LoadedModel> stable_model, const EngineOptions& options)
     : model(std::move(stable_model)), frontend(Qwen3_6_35BA3B::make_frontend(*model, options)) {}
@@ -305,6 +326,12 @@ ConstructedTarget construct_target(const EngineOptions& options, DeviceContext& 
     if (identity.model_id == Qwen3_6_27B::qwen3_8_model_id) {
         return construct_registered<Qwen3_6_27B, LoadedQwen3_6_27B, Qwen3_6_27BInstance>(
             options, device, reader, identity, load_start, Qwen3_6_27B::qwen3_8_target_key);
+    }
+    if (identity.model_id == Qwen3_6_27BTp2::model_id ||
+        identity.model_id == Qwen3_6_27BTp2::qwen3_8_model_id) {
+        return construct_registered<Qwen3_6_27BTp2, LoadedQwen3_6_27BTp2,
+                                    Qwen3_6_27BTp2Instance>(
+            options, device, reader, identity, load_start, Qwen3_6_27BTp2::target_key);
     }
     if (identity.model_id == Qwen3_6_35BA3B::model_id) {
         return construct_registered<Qwen3_6_35BA3B, LoadedQwen3_6_35BA3B, Qwen3_6_35BA3BInstance>(

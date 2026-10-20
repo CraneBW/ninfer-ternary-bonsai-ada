@@ -124,21 +124,32 @@ ctest --test-dir build -R '^ninfer_(tp2_nccl(_mock)?|tp_lockstep)_test$' --outpu
 ```
 
 The mocked NCCL test checks production-call argument wiring, **not** transport
-numerics. The native v3 rank-local target executor and two-GPU acceptance are
-still missing; do not route TP2 shards into the ordinary single-rank backend.
+numerics. A rank-local native text target is now registered in
+`src/targets/qwen3_6_27b_tp2`; without NCCL it refuses startup before model
+upload. Two-GPU numerical acceptance remains unverified, and the user has
+explicitly requested single-GPU-only validation.
 
 `src/runtime/tp2/v3_rank_manifest.{h,cpp}` resolves core 64-layer Qwen3.8
 mixed-GGUF rank tensors to physical parents and logical row spans. The C++
 validator accepted 656 projections in each of the two generated v3 rank
 metadata directories, without copying large rank payloads. Single-GPU base
 target compilation also passed after adding optional TP output-head and MTP
-residual callbacks. This does **not** constitute a registered TP2 executor.
+residual callbacks. The new native rank target builds and links into
+`ninfer-serve` but has not passed real collective/inference verification.
 
 `src/runtime/tp2/v3_rank_materialization.{h,cpp}` supplies a separate native
 Binder/materialization contract for exactly these physical rank parents and
 the GDN input-column auxiliary. The source compiles on the current Ada host,
-but CUDA source-to-device oracle for full rank payloads and TP2 ModelView
-registration are not yet established.
+but CUDA source-to-device oracle for full rank payloads has not been run.
+
+Native source registration resolves `qwen3.8-27b-tp2-rank0/1` and validates
+`NINFER_TP_RANK`, metadata rank/world size, exact v3 semantic row slices and
+rank-local compile-time geometry. Each rank uses NCCL BF16 AllReduce for
+attention, GDN output and MLP residual branches; rank 0 contributes the
+incoming residual exactly once. The ordinary replicated output head is used
+by both ranks. NCCL initialization and warmup precede CUDA graph construction.
+With the present one-GPU host and no NCCL development library, this remains
+**compiled source, not verified two-device execution**.
 
 For the remaining native TP2 implementation, consult the corresponding
 `src/targets/qwen3_6_27b_tp2` and `runtime/engine/tp_lockstep` code in the
