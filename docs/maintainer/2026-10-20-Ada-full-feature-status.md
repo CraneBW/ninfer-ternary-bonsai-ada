@@ -22,6 +22,7 @@ size of a preallocated `.ranges.part` as completion.
 | Strata × ActKV | Existing `BlockStratum` and Action-LRFU wiring confirmed. Standalone protection/decay/retrieval/cold tests PASS, plus real 1,898-token GSQ request, 512-token selected window and output `4`, HTTP200 | `docs/maintainer/2026-10-20-kvmem-actkv-live-validation.md`, `e495e19` |
 | TP2 shards & proxy guards | V3 byte-exact sharder has tests; proxy now refuses a single physical GPU, mismatched ranks, bad ports, header-only v3 files; six preflight tests PASS | `tools/tp2/README.md`, `c2123ba` |
 | Native TP2 communication/lockstep groundwork | Compiled optional NCCL BF16 sum/all-gather transport and two-rank engine admission/prefill/decode lockstep; three focused tests pass (including a mocked NCCL ABI and cross-process divergence detection). Neither native v3 rank execution nor real NCCL/two-GPU correctness has been verified | `src/runtime/tp2/`, `src/runtime/engine/tp_lockstep.h`, `tests/runtime/` |
+| V3 TP2 rank-local metadata | The exact Qwen3.8 27B GSQ sharder produced rank0/rank1 directories directly from the verified source header. C++ manifest resolution verified 656 core projection bindings on each rank, including fused-parent logical row spans; no 15 GiB file copy or dual-GPU run. Optional TP Variant MTP partial-reduction/output-head callback sites were added; single-GPU engine still compiles. No rank-local executable is registered | `src/runtime/tp2/v3_rank_manifest.cpp`, `src/targets/qwen3_6/impl/runtime/text_context_impl.h` |
 
 ## Still missing: do **not** declare full implementation complete
 
@@ -69,9 +70,9 @@ size of a preallocated `.ranges.part` as completion.
   before `cmake --build build --target <specific-target> -j2`.
 - Preserve all other local modifications and `/home/ran/zatfung` unrelated
   files. Do not change GitHub issues #7/#4 or look for private HF credentials.
-- Use a real two-GPU runner for the eventual TP2 collective acceptance, not
-  an emulated proxy. Real absence of the second GPU is a verification blocker,
-  not permission to claim success.
+- User-directed verification scope is **single GPU only**. Do not schedule
+  actual two-GPU inference tests or emulate two GPUs on the one available card;
+  native two-rank numerical behavior therefore remains unverified.
 
 The full user objective remains open. This record is an implementation
 checkpoint rather than a `session_finish` signal.

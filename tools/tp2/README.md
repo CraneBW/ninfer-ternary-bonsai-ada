@@ -127,6 +127,13 @@ The mocked NCCL test checks production-call argument wiring, **not** transport
 numerics. The native v3 rank-local target executor and two-GPU acceptance are
 still missing; do not route TP2 shards into the ordinary single-rank backend.
 
+`src/runtime/tp2/v3_rank_manifest.{h,cpp}` resolves core 64-layer Qwen3.8
+mixed-GGUF rank tensors to physical parents and logical row spans. The C++
+validator accepted 656 projections in each of the two generated v3 rank
+metadata directories, without copying large rank payloads. Single-GPU base
+target compilation also passed after adding optional TP output-head and MTP
+residual callbacks. This does **not** constitute a registered TP2 executor.
+
 For the remaining native TP2 implementation, consult the corresponding
 `src/targets/qwen3_6_27b_tp2` and `runtime/engine/tp_lockstep` code in the
 upstream reference. The original script handles v2 row-split/NVFP4/FP8

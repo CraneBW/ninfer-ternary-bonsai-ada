@@ -71,6 +71,9 @@ ninfer_add_test(ninfer_device_test       SOURCES test_device.cpp)
 ninfer_add_test(ninfer_tp2_nccl_test
   SOURCES runtime/test_tp2_nccl.cpp
   LIBRARIES ninfer_tp2_collectives)
+add_executable(ninfer_tp2_v3_manifest_test runtime/test_tp2_v3_manifest.cpp)
+ninfer_internal_includes(ninfer_tp2_v3_manifest_test)
+target_link_libraries(ninfer_tp2_v3_manifest_test PRIVATE ninfer_tp2_collectives)
 # Compile the actual production NCCL branch against a strict fake ABI on hosts
 # without NCCL or two GPUs; this is NOT a substitute for a two-device oracle.
 ninfer_add_test(ninfer_tp2_nccl_mock_test

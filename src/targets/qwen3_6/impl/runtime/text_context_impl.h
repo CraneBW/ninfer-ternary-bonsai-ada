@@ -48,6 +48,27 @@
 #include <vector>
 
 namespace ninfer::targets::qwen3_6::detail::NINFER_QWEN36_RUNTIME_NS::schedule {
+
+// A TP Variant supplies a true per-rank output-head collective. Ordinary
+// single-GPU variants keep the established A16 implementation unchanged.
+template <class V>
+void rank_aware_output_head(const Tensor& hidden, const Weight& head, Tensor& output,
+                            WorkspaceArena& work, cudaStream_t stream) {
+    if constexpr (requires { V::tp_head_linear(hidden, head, output, stream); }) {
+        if (V::tp_head_linear(hidden, head, output, stream)) { return; }
+    }
+    ops::linear(hidden, head, output, ops::LinearPolicy::A16Only, work, stream);
+}
+
+template <class V>
+void rank_aware_mtp_residual(const Tensor& partial, Tensor& residual, cudaStream_t stream) {
+    if constexpr (requires { V::tp_combine_partial(partial, residual, stream); }) {
+        V::tp_combine_partial(partial, residual, stream);
+    } else {
+        ops::residual_add(partial, residual, stream);
+    }
+}
+
 namespace {
 
 void copy_i32(const std::int32_t* source, Tensor& destination, cudaStream_t stream) {
@@ -418,7 +439,7 @@ void TextContext::mtp_forward_tail(Tensor& x, const Tensor& ah, const Tensor& po
     Tensor o        = post.output;
     ops::linear(a.view({kCfg.q_size, T}), *mtp_.o_proj, o,
                 ops::LinearPolicy::A16Only, work_, s);
-    ops::residual_add(o, x, s);
+    rank_aware_mtp_residual<Variant>(o, x, s);
 
     Tensor mh = post.post_mixer_hidden;
     ops::rmsnorm(x, *mtp_.post_attn_norm, kCfg.rms_eps, true, mh, s);
@@ -551,7 +572,7 @@ void TextContext::mtp_prefill_chunk(const Tensor& ids, const Tensor& hidden,
         Tensor o = work_.alloc(DType::BF16, {kCfg.hidden, 1});
         ops::linear(a.view({kCfg.q_size, 1}), *mtp_.o_proj, o,
                     ops::LinearPolicy::A16Only, work_, s);
-        ops::residual_add(o, x_last, s);
+        rank_aware_mtp_residual<Variant>(o, x_last, s);
 
         Tensor mh = work_.alloc(DType::BF16, {kCfg.hidden, 1});
         ops::rmsnorm(x_last, *mtp_.post_attn_norm, kCfg.rms_eps, true, mh, s);
@@ -573,15 +594,13 @@ void TextContext::proposal_argmax(const Tensor& hidden, Tensor& logits, Tensor& 
                                      static_cast<std::uint64_t>(T));
     if (proposal_head_ != nullptr) {
         Tensor proposal_logits = work_.alloc(DType::BF16, {proposal_head_n_, T});
-        ops::linear(hidden, *proposal_head_, proposal_logits,
-                    ops::LinearPolicy::A16Only, work_, ctx_.stream);
+        rank_aware_output_head<Variant>(hidden, *proposal_head_, proposal_logits, work_, ctx_.stream);
         ops::argmax(proposal_logits, proposal_tokens, proposal_head_n_, ctx_.stream);
         ops::proposal_remap_token_ids(proposal_tokens, proposal_head_ids_, proposal_head_n_,
                                       ctx_.stream);
     } else {
         Tensor output_logits = matrix_window(logits, T);
-        ops::linear(hidden, *lm_head_, output_logits, ops::LinearPolicy::A16Only, work_,
-                    ctx_.stream);
+        rank_aware_output_head<Variant>(hidden, *lm_head_, output_logits, work_, ctx_.stream);
         ops::argmax(output_logits, proposal_tokens, kCfg.token_domain, ctx_.stream);
     }
 }
@@ -694,7 +713,7 @@ void TextContext::ordinary_decode_batch(const Tensor& ids, const Tensor& cache_p
         NullTap tap;
         run_layers(x, Phase::Verify, tap);
         ops::rmsnorm(x, *final_norm_, kCfg.rms_eps, true, hidden, stream);
-        ops::linear(hidden, *lm_head_, logits, ops::LinearPolicy::A16Only, work_, stream);
+        rank_aware_output_head<Variant>(hidden, *lm_head_, logits, work_, stream);
     }
     work_.reset();
 }
@@ -754,7 +773,7 @@ void TextContext::target_verify_batch_impl(const Tensor& ids, const Tensor& cach
         Tensor flat_logits = logits.view({kCfg.vocab, columns});
         Tensor flat_tokens = target_tokens.view({columns});
         ops::rmsnorm(x, *final_norm_, kCfg.rms_eps, true, flat_hidden, stream);
-        ops::linear(flat_hidden, *lm_head_, flat_logits, ops::LinearPolicy::A16Only, work_, stream);
+        rank_aware_output_head<Variant>(flat_hidden, *lm_head_, flat_logits, work_, stream);
         ops::argmax(flat_logits, flat_tokens, kCfg.token_domain, stream);
     }
     work_.reset();
@@ -1241,7 +1260,7 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
             if (is_last) {
                 Tensor last_xf = xf.slice(1, len - 1, 1);
                 Tensor logits  = matrix_window(io_.logits, 1);
-                ops::linear(last_xf, *lm_head_, logits, ops::LinearPolicy::A16Only, work_, s);
+                rank_aware_output_head<Variant>(last_xf, *lm_head_, logits, work_, s);
                 // Set io_.pos to the bonus token's absolute position (base + T) before picking so
                 // the sampler RNG is keyed by it (prefill purpose keeps it distinct from the first
                 // decode step, which reuses the same io_.pos).

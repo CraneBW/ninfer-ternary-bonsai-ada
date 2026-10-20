@@ -1,4 +1,4 @@
-add_library(ninfer_tp2_collectives STATIC nccl_collectives.cpp)
+add_library(ninfer_tp2_collectives STATIC nccl_collectives.cpp v3_rank_manifest.cpp)
 ninfer_internal_includes(ninfer_tp2_collectives)
 target_link_libraries(ninfer_tp2_collectives PUBLIC CUDA::cudart)
 
