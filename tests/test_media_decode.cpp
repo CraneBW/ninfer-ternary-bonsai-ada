@@ -3,7 +3,10 @@
 #include <array>
 #include <cctype>
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <iterator>
 #include <stdexcept>
 #include <string_view>
 #include <vector>
@@ -136,11 +139,32 @@ void test_issue_20_unaligned_jpeg() {
     }
 }
 
+void test_vfr_without_container_frame_count() {
+    // Generated from testsrc2 64x64 at 15 fps by retaining every fifth source
+    // frame in Matroska with -fps_mode vfr. ffprobe reports nb_frames=N/A,
+    // avg_frame_rate=15/1 and exactly six decoded frames. Duration*fps would
+    // incorrectly plan ~26 frames and miss requested samples.
+    const auto path = std::filesystem::path(__FILE__).parent_path() /
+                      "fixtures/media/vfr_sparse_6frames.mkv";
+    std::ifstream source(path, std::ios::binary);
+    if (!source) { throw std::runtime_error("missing VFR media fixture"); }
+    const std::vector<std::uint8_t> bytes((std::istreambuf_iterator<char>(source)), {});
+    const auto info = ninfer::media::decode::inspect_video(bytes, {}, 100.0, 1, 128);
+    const auto video = ninfer::media::decode::decode_video(bytes, {}, 100.0, 1, 128);
+    if (info.total_frames != 6 || info.sampled_frames != 6 || video.total_frames != 6 ||
+        video.frames.size() != 6 || info.indices != video.indices ||
+        info.indices != std::vector<int>({0, 1, 2, 3, 4, 5}) ||
+        video.width != 64 || video.height != 64) {
+        throw std::runtime_error("VFR video frame count or sample indices mismatch");
+    }
+}
+
 } // namespace
 
 int main() {
     try {
         test_issue_20_unaligned_jpeg();
+        test_vfr_without_container_frame_count();
         std::cout << "ok\n";
         return 0;
     } catch (const std::exception& error) {

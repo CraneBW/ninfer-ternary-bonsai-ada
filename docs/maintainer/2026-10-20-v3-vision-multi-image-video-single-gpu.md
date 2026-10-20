@@ -65,3 +65,22 @@ frame counts agreed exactly at **4/4** and **40/40** frames respectively.
 These probes do not intentionally force FFmpeg's `EAGAIN` return, nor do they
 demonstrate any model-level semantic-quality change. The timer hallucination
 observed in the earlier inference result remains a known limitation.
+
+## Variable-frame-rate container without `nb_frames` — regression fixed
+
+An independently generated 64x64 Matroska testsrc2 clip retains every fifth
+frame from a nominal 15-fps input. `ffprobe -count_frames` reports **six**
+decoded frames, but the container has `nb_frames=N/A`, a nominal stream rate
+of 15 fps and a duration of about 1.734 s. Previously the media planner
+estimated about 26 frames via `duration * fps`, requested nonexistent sample
+indices and disagreed with the actual decoded frame sequence.
+
+If container `nb_frames` is unavailable, `make_video_plan` now counts real
+decoded frames under the existing source-frame and cancellation limits instead
+of estimating. The deterministic 9-KiB fixture
+`tests/fixtures/media/vfr_sparse_6frames.mkv` is checked by
+`ninfer_media_decode_test`: `inspect_video` and `decode_video` both produce
+6/6 samples at indices `[0,1,2,3,4,5]`, with 64x64 RGB frames. The existing
+4-frame MP4 and 40-frame `temporal_events.mp4` also still decoded at 4/4 and
+40/40 in targeted host checks. No whole-model run was repeated; VFR video
+understanding quality is therefore not established.
