@@ -110,11 +110,13 @@ Package::LoadPlan Package::plan_load(artifact::Binder& binder, const EngineOptio
     if (!runtime::tp2::NcclCollectives::compiled_with_nccl()) {
         throw artifact::ArtifactError("TP2 native execution requires NCCL; rebuild with NCCL");
     }
+    // The v3 rank sharder retains the complete Vision and DFlash2 parents on
+    // both ranks, and independently shards MTP attention/MLP roles. The v3
+    // feature binder validates their physical formats, row-span boundaries,
+    // and native ModelView layout before selecting CUDA allocations. MTP's
+    // partial attention/MLP outputs use Variant::tp_combine_partial and the
+    // rank-sharded MLP down-path's AllReduce; the output head is replicated.
     const auto startup = qwen3_6::startup_features(options);
-    if (startup.mtp() || startup.dflash2() || startup.vision) {
-        throw artifact::ArtifactError(
-            "TP2 text executor does not yet support Vision/MTP/DFlash2 combinations");
-    }
     return LoadPlan(std::make_unique<LoadPlan::Impl>(
         weights_profile, detail::bind_v3_text_artifact(binder, *v3, startup)));
 }

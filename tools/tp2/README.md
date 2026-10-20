@@ -77,11 +77,11 @@ end of the real 15 GB source, so a partial download can be planned but not
 sharded.
 
 Rank outputs set `metadata.name` to `qwen3.8-27b-tp2-rank0` or `rank1` and
-include `metadata.tensor_parallel.rank/world_size`. The current native
-**single-rank** model registry admits only `qwen3.8-27b` and `qwen3.6-27b`;
-therefore it rejects these rank artifacts before loading. A future TP2-aware
-loader must consume the rank metadata and provide actual collective execution.
-These tools alone provide **no two-GPU inference or performance evidence**.
+include `metadata.tensor_parallel.rank/world_size`. The ordinary single-rank
+registry rejects these shards; the dedicated `qwen3_6_27b_tp2` target now
+handles the rank metadata and compiles CUDA/NCCL collective execution source.
+On this host native rank startup rejects absent NCCL dependencies. No live
+collective correctness or two-GPU inference/performance is established.
 
 `tp2_proxy.py` provides the HTTP supervisor and mirrored request dispatch
 for a **TP2-enabled** pair of NInfer server processes. The native ranks must
@@ -107,8 +107,8 @@ The file-length check is **not** a payload digest. Produce rank files from a
 SHA-256 verified full source (the sharder supports `--sha256`) and use an
 actual two-rank collective-capable executable. On a host with one GPU, the
 preflight fails explicitly; it does not attempt to simulate TP2 by running two
-non-communicating copies on that GPU. The proxy is a supervisor, **not** the
-still-missing native v3/NCCL TP2 model executor in this repository.
+non-communicating copies on that GPU. The proxy only supervises the native
+rank target; it does not implement CUDA/NCCL collective computation itself.
 
 The main tree now includes `src/runtime/tp2/nccl_collectives.{h,cpp}` as an
 optional NCCL BF16 all-reduce/all-gather data plane and
@@ -150,6 +150,14 @@ incoming residual exactly once. The ordinary replicated output head is used
 by both ranks. NCCL initialization and warmup precede CUDA graph construction.
 With the present one-GPU host and no NCCL development library, this remains
 **compiled source, not verified two-device execution**.
+
+The rank-specific native inspector also accepted MTP (16 semantic tensors),
+Vision (441), DFlash2 (91), Vision+MTP, and Vision+DFlash2 metadata on both
+rank directories. DFlash2's complete replicated FFN uses the original width
+of 17408, independently of the half-width main TP2 MLP. The feature startup
+routes are connected to the existing native materialization and runtime
+interfaces, but **no TP2 speculative, Vision or combined GPU inference was
+executed**. Only the single-GPU build and metadata/shape checks were run.
 
 For the remaining native TP2 implementation, consult the corresponding
 `src/targets/qwen3_6_27b_tp2` and `runtime/engine/tp_lockstep` code in the

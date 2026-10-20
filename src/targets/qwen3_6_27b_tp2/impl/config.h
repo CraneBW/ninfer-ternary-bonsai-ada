@@ -152,7 +152,9 @@ struct DFlashConfig {
     static constexpr int feature_layers         = 5;
     static constexpr int feature_rows           = feature_layers * TextConfig::hidden;
     static constexpr int hidden                 = TextConfig::hidden;
-    static constexpr int intermediate           = TextConfig::intermediate;
+    // DFlash2 is copied verbatim into both rank artifacts, unlike the
+    // row-sharded main-model MLP, so its FFN keeps the full original width.
+    static constexpr int intermediate           = kUnshardedModelShape.intermediate;
     static constexpr int query_heads            = 32;
     static constexpr int kv_heads               = 8;
     static constexpr int head_dim               = 128;

@@ -24,7 +24,7 @@ size of a preallocated `.ranges.part` as completion.
 | Native TP2 communication/lockstep groundwork | Compiled optional NCCL BF16 sum/all-gather transport and two-rank engine admission/prefill/decode lockstep; three focused tests pass (including a mocked NCCL ABI and cross-process divergence detection). Neither native v3 rank execution nor real NCCL/two-GPU correctness has been verified | `src/runtime/tp2/`, `src/runtime/engine/tp_lockstep.h`, `tests/runtime/` |
 | V3 TP2 rank-local metadata | The exact Qwen3.8 27B GSQ sharder produced rank0/rank1 directories directly from the verified source header. Native C++ manifest verified 656 core projection bindings and rank-specific Qwen3.8 ModelView inspector verified 963 text semantic tensors on each rank. No full shard copy or dual-GPU run | `src/runtime/tp2/v3_rank_manifest.cpp`, `src/targets/qwen3_6_27b_tp2/impl/load/bindings.cpp` |
 | V3 rank physical materialization interface | Compiles a rank-local Binder/MaterializationPlan selecting 656 core logical weights' physical parents only once, plus GDN input-column mapping. Exposes CUDA logical matrix row views with real GGUF block-byte offsets and BF16 shape bounds. This stage is compile-verified only; no full shard upload or rank-local live inference has been demonstrated | `src/runtime/tp2/v3_rank_materialization.{h,cpp}` |
-| Native TP2 registered text execution source | Added a distinct Qwen3.8 v3 rank target with rank-local compile-time head/intermediate geometry, v3 semantic ModelView and materialization, NCCL communicator warmup, attention/GDN/MLP partial-residual AllReduce, and EngineCore lockstep. `ninfer_engine` and `ninfer-serve` build/link on Ada without NCCL; rank metadata validation passes for both shards. Runtime deliberately rejects startup without a real NCCL build, and Vision/MTP/DFlash2 TP combinations are not yet connected. No native TP2 inference or collective numerical correctness has been run | `src/targets/qwen3_6_27b_tp2/`, `src/targets/registry.*`, `src/runtime/engine/engine.cpp` |
+| Native TP2 registered model source | Distinct Qwen3.8 v3 rank target with half-width text geometries, v3 ModelView/materialization, NCCL warmup and rank partial-residual AllReduce; `ninfer-serve` compiles. MTP projections/sharded MLP, replicated Vision and DFlash2 feature paths now pass native v3 semantic inspection for both ranks (MTP 16, Vision 441, DFlash2 91, combined Vision+MTP and Vision+DFlash2); DFlash2 keeps its full unsharded FFN width. No live NCCL, GPU materialization of full shards, TP2 speculative/vision inference or combined correctness was demonstrated | `src/targets/qwen3_6_27b_tp2/`, `tests/runtime/test_tp2_v3_manifest.cpp` |
 
 ## Still missing: do **not** declare full implementation complete
 
@@ -36,14 +36,16 @@ size of a preallocated `.ranges.part` as completion.
    full shard CUDA upload, graph-capture interoperability, numeric comparison,
    or full TP2 request has been demonstrated. The code guards unavailable
    NCCL instead of falling back to two non-communicating single-GPU servers.
-   Vision/MTP/DFlash2 combined TP2 backends remain deliberately unsupported
-   until their rank-local semantics are implemented. The
+   Vision/MTP/DFlash2 rank feature semantics have been bound/shape-validated
+   and their startup selection is now wired, but still lack TP2 end-to-end
+   and combined numerical verification. The
    reference `/home/ran/ninfer-work/ecosystem/ninfer-v100-tpx` has a v2
    `src/targets/qwen3_6_27b_tp2` implementation with `tp2_comm.cpp`,
    `tp2_mailbox.cu`, and `runtime/engine/tp_lockstep.h`. Porting must map the
    true v3 mixed-GGUF rank parent ModelViews, output/reduction sequences and
-   graph capture. The user has only **one** CUDA GPU today, so any dual-rank
-   native E2E performance/correctness claim requires a second real GPU.
+   graph capture. The user explicitly requires **single-GPU-only testing**;
+   do not launch a dual-rank inference test, and do not claim dual-rank E2E
+   correctness or performance without such evidence.
 2. **Broader Companion model coverage.** The separate Companion fork has
    the tested Bonsai2B patch but Gemma4/Flash-Next/Bonsai2 4B/9B/27B whole
    model weights are not currently full SHA-256 verified local `.ninfer`
