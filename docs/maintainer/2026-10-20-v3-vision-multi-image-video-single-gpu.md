@@ -50,3 +50,18 @@ Both requests ran with `--managed-weights --vision --kv-dtype int8 --greedy
 concurrency and small media caches. Servers were shut down after the
 request. Neither case establishes long video, multi-video, high-resolution
 images, cross-turn replay or strict factual video summarization.
+
+## Decoder packet retention follow-up (host-only)
+
+The FFmpeg `Decoder::frames` loop was corrected to respect
+`avcodec_send_packet` returning `EAGAIN`: the packet is not consumed in that
+case and must be submitted again after receiving pending frames. Previously
+the code could unref that packet before retrying, risking dropped video frames
+with buffered decoders. The targeted `ninfer_media_decode_test` passed.
+
+A separate host-only decode probe used both the real 2-second testsrc2 MP4
+above and `examples/cli/media/temporal_events.mp4`; decoded and inspected
+frame counts agreed exactly at **4/4** and **40/40** frames respectively.
+These probes do not intentionally force FFmpeg's `EAGAIN` return, nor do they
+demonstrate any model-level semantic-quality change. The timer hallucination
+observed in the earlier inference result remains a known limitation.

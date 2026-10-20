@@ -257,10 +257,23 @@ public:
             if (rc == AVERROR_EOF) { break; }
             if (rc < 0) { throw_invalid_media("failed while reading media: " + av_error(rc)); }
             if (packet_->stream_index == stream_index_) {
-                const int send = avcodec_send_packet(codec_, packet_);
-                if (send < 0 && send != AVERROR(EAGAIN)) {
-                    av_packet_unref(packet_);
-                    throw_invalid_media("failed to submit media packet: " + av_error(send));
+                // EAGAIN means the decoder did NOT consume this packet. Drain
+                // pending frames and resend the same packet before unref; dropping
+                // it here silently loses video frames on buffered codecs.
+                while (true) {
+                    const int send = avcodec_send_packet(codec_, packet_);
+                    if (send == AVERROR(EAGAIN)) {
+                        if (!receive()) {
+                            av_packet_unref(packet_);
+                            return;
+                        }
+                        continue;
+                    }
+                    if (send < 0) {
+                        av_packet_unref(packet_);
+                        throw_invalid_media("failed to submit media packet: " + av_error(send));
+                    }
+                    break;
                 }
                 if (!receive()) {
                     av_packet_unref(packet_);
