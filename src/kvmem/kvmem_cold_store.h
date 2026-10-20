@@ -4,6 +4,7 @@
 // unlinked immediately on POSIX or delete-on-close on Windows. Choose a real
 // NVMe-mounted directory with NINFER_KVMEM_COLD_DIR to use actual SSD storage.
 
+#include <algorithm>
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
@@ -122,8 +123,16 @@ public:
             if (slots_.size() >= std::numeric_limits<std::uint32_t>::max()) {
                 throw std::overflow_error("KVMem cold slot count overflow");
             }
-            // Reserve the corresponding free-list space now so release is noexcept.
-            free_.reserve(slots_.size() + 1);
+            // Reserve free-list storage before adding the slot so release remains
+            // noexcept. Grow geometrically rather than reallocating on every new
+            // page in long-context cold tiers (thousands of 64-token pages).
+            const std::size_t needed = slots_.size() + 1;
+            if (needed > free_.capacity()) {
+                const std::size_t max = free_.max_size();
+                const std::size_t doubled = free_.capacity() > max / 2
+                                                ? max : free_.capacity() * 2;
+                free_.reserve(std::max(needed, doubled));
+            }
             slots_.push_back(Slot{});
         }
         try {

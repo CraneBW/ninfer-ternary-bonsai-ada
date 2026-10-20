@@ -88,3 +88,18 @@ retrieval, protection of the latest action, and demotion of closed thinking.
 The standalone C++ test builds and passes on CPU (`failures=0`). This verifies
 **host decision mathematics at 256K scale**, not actual 256K model inference
 or an end-to-end recall-quality benchmark.
+
+## 4096-page ColdKVStore metadata growth and reuse
+
+The on-disk `ColdKVStore` previously called `free_.reserve(slots_.size()+1)`
+for every first-time slot allocation, causing repeated free-list reallocations
+and potentially quadratic metadata-copy work as cold pages accumulate. New
+slots now reserve free-list capacity geometrically, still *before* publication
+so `release()` can remain `noexcept`.
+
+The targeted `ninfer_kvmem_cold_store_test` passed (0 failures) after adding
+4096 64-byte cold records, representing the page count of 256K tokens at
+64 tokens/page. It checked byte-exact samples across the allocation span,
+release of 2048 slots, reuse with generation invalidation, and bounded active
+page accounting. This is a CPU/NVMe-backing data-structure and I/O check,
+not a 256K GPU inference or throughput claim.

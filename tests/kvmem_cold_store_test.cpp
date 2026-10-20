@@ -67,6 +67,44 @@ void test_disk_roundtrip(const std::string& directory) {
           "cold slots are reclaimed on release");
 }
 
+void test_many_cold_pages(const std::string& directory) {
+    // A 256K-token context has 4096 64-token blocks. Exercise first-time
+    // allocation, bulk reclamation and slot reuse without a model/GPU.
+    constexpr std::size_t pages = 4096;
+    constexpr std::size_t page_bytes = 64;
+    ColdKVStore store(page_bytes, directory);
+    std::vector<ColdKVStore::Handle> handles;
+    handles.reserve(pages);
+    std::vector<std::byte> data(page_bytes);
+    std::vector<std::byte> output(page_bytes);
+    for (std::size_t page = 0; page < pages; ++page) {
+        std::fill(data.begin(), data.end(), static_cast<std::byte>(page % 251));
+        handles.push_back(store.store(data));
+    }
+    check(store.occupied_pages() == pages &&
+              store.occupied_bytes() == pages * page_bytes,
+          "all 4096 cold extents must be accounted");
+    for (std::size_t page : {std::size_t{0}, pages / 2, pages - 1}) {
+        store.load(handles[page], output);
+        check(std::all_of(output.begin(), output.end(), [&](std::byte value) {
+                  return value == static_cast<std::byte>(page % 251);
+              }), "cold extents survive 4096 allocations");
+    }
+    for (std::size_t page = 0; page < pages; page += 2) {
+        check(store.release(handles[page]), "bulk release succeeds");
+    }
+    check(store.occupied_pages() == pages / 2, "bulk release updates page count");
+    std::fill(data.begin(), data.end(), std::byte{0x7d});
+    for (std::size_t page = 0; page < pages / 2; ++page) {
+        const auto replacement = store.store(data);
+        check(!store.valid(handles[(pages / 2 - 1 - page) * 2]),
+              "old cold generation stays invalid after bulk reuse");
+        store.load(replacement, output);
+        check(output == data, "reused cold extent is byte-exact");
+    }
+    check(store.occupied_pages() == pages, "recycled cold extents remain bounded");
+}
+
 void test_cold_priority() {
     KvBlockMeta normal;
     normal.id = 1;
@@ -100,6 +138,7 @@ int main(int argc, char** argv) {
     const std::string directory = argc > 1 ? argv[1] : "./tmp-nvcc/kvmem-cold-test";
     std::filesystem::create_directories(directory);
     test_disk_roundtrip(directory);
+    test_many_cold_pages(directory);
     test_cold_priority();
     check(std::filesystem::is_empty(directory),
           "anonymous cold file is unlinked even while its store is alive");
