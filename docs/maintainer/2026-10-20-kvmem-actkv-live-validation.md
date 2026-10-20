@@ -69,3 +69,22 @@ multi-turn LRFU recall quality, correctness of all tool-span strata, 256K
 context, or actual NVMe spill in this run. Cold tier movement was separately
 verified in the earlier KVMem regression. TP2 multi-GPU native execution is
 unrelated and remains unverified on this one-GPU machine.
+
+## Later 256K-class CPU LRFU scheduling fix
+
+The prior `top_fraction` positive-score threshold retained every item tied at
+the cutoff. Equal cosine scores across a large set of pages could therefore
+admit significantly more than the intended fraction. `record_lrfu_scores`
+now selects an **exact** `ceil(top_fraction * positive_count)` top-k using
+deterministic new-page-first tie breaking, while preserving the existing
+time-decayed LRFU accumulation.
+
+The standalone `tests/kvmem_blocks_test.cpp` was extended to 4096 pages of
+64 tokens (262,144 tokens total), with 4096 identical positive scores and a
+10% selection rate. Exactly 410 scored pages survive, followed by a working
+set of 256 selected pages under a 16,384-token device budget. A subsequent
+query verifies decay, and two action/query passes exercise historical fact
+retrieval, protection of the latest action, and demotion of closed thinking.
+The standalone C++ test builds and passes on CPU (`failures=0`). This verifies
+**host decision mathematics at 256K scale**, not actual 256K model inference
+or an end-to-end recall-quality benchmark.

@@ -412,7 +412,10 @@ public:
     }
 
     // Retain retrieval evidence across scoring passes with time-decayed LRFU.
-    // Suppress the weakest (1 - top_fraction) positive hits before accumulation.
+    // Retain exactly ceil(top_fraction * positive_count) hits. An inclusive
+    // float threshold incorrectly retained *all* ties (common with near-zero
+    // or quantized query scores), defeating the requested sparsity at 256K.
+    // Prefer newer block ids for equal evidence, deterministically.
     void record_lrfu_scores(std::span<const float> current, double lambda,
                             double top_fraction) {
         if (current.size() != blocks_.size() ||
@@ -421,27 +424,34 @@ public:
             throw std::invalid_argument("kvmem: invalid LRFU scores or parameters");
         }
         ++scoring_step_;
-        std::vector<float> positive;
+        std::vector<std::uint32_t> positive;
         positive.reserve(current.size());
-        for (const float value : current) {
-            if (std::isfinite(value) && value > 0.0f) { positive.push_back(value); }
+        for (std::size_t i = 0; i < current.size(); ++i) {
+            if (std::isfinite(current[i]) && current[i] > 0.0f) {
+                positive.push_back(static_cast<std::uint32_t>(i));
+            }
         }
-        float threshold = 0.0f;
+        std::vector<std::uint8_t> retained(current.size(), 0);
         if (!positive.empty()) {
-            const std::size_t retained = std::max<std::size_t>(
+            const std::size_t retain_count = std::max<std::size_t>(
                 1, static_cast<std::size_t>(std::ceil(top_fraction * positive.size())));
-            const std::size_t cutoff = positive.size() - retained;
-            std::nth_element(positive.begin(), positive.begin() + cutoff, positive.end());
-            threshold = positive[cutoff];
+            const auto stronger = [&](std::uint32_t a, std::uint32_t b) {
+                if (current[a] != current[b]) { return current[a] > current[b]; }
+                return a > b;
+            };
+            if (retain_count < positive.size()) {
+                std::nth_element(positive.begin(), positive.begin() + retain_count,
+                                 positive.end(), stronger);
+            }
+            for (std::size_t i = 0; i < retain_count; ++i) {
+                retained[positive[i]] = 1;
+            }
         }
         for (std::size_t i = 0; i < blocks_.size(); ++i) {
             KvBlockMeta& block = blocks_[i];
             const double decay =
                 std::exp2(-lambda * static_cast<double>(scoring_step_ - block.last_scored_step));
-            const float value = current[i];
-            const double evidence = std::isfinite(value) && value > 0.0f &&
-                                            value >= threshold
-                                        ? value : 0.0;
+            const double evidence = retained[i] != 0 ? current[i] : 0.0;
             block.lrfu_score = decay * block.lrfu_score + evidence;
             block.last_scored_step = scoring_step_;
             block.retrieval_score = block.lrfu_score;

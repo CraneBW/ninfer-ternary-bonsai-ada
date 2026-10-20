@@ -279,6 +279,70 @@ static void test_action_lrfu() {
     CHECK(refused, "budget below protected system prefix must be rejected");
 }
 
+// 256K-class prompt (4096 pages): repeated cosine scores must not turn a
+// top-fraction gate into "retain every tied page". This is a pure host test;
+// no large model or GPU memory is required.
+static void test_action_lrfu_long_ties() {
+    constexpr std::uint32_t n = 262144 / 64;
+    KvBlockRepository repo = make_chain(n);
+    std::vector<float> scores(n, 0.25f);
+    repo.record_lrfu_scores(scores, 0.5, 0.1);
+    const auto blocks = repo.blocks();
+    constexpr std::size_t kept = 410;  // ceil(0.1 * 4096)
+    std::size_t hits = 0;
+    for (std::size_t i = 0; i < n; ++i) {
+        if (blocks[i].lrfu_score != 0.0) { ++hits; }
+        CHECK((blocks[i].lrfu_score != 0.0) == (i >= n - kept),
+              "LRFU tied score priority mismatch on 256K page %zu", i);
+    }
+    CHECK(hits == kept, "LRFU top-fraction retained %zu rather than %zu", hits, kept);
+    KvSelectConfig cfg;
+    cfg.action_lrfu = true;
+    cfg.budget_tokens = 16384;
+    const auto selection = repo.preview_select(cfg, {});
+    CHECK(selection.block_ids.size() == 256,
+          "256K-class selection retained %zu rather than 256 pages", selection.block_ids.size());
+    std::fill(scores.begin(), scores.end(), 0.0f);
+    repo.record_lrfu_scores(scores, 0.5, 0.1);
+    CHECK(std::abs(repo.blocks().back().lrfu_score - 0.25 * std::exp2(-0.5)) < 1e-6,
+          "256K-class LRFU previous hit did not decay");
+    CHECK(repo.blocks().front().lrfu_score == 0,
+          "256K-class LRFU suppressed evidence reappeared");
+
+    // Simulate consecutive query turns over a full 256K history. A fact far
+    // outside the recent band should remain retrievable after the active
+    // action span changes, while closed reasoning loses its special priority.
+    constexpr std::uint32_t fact = 701;
+    constexpr std::uint32_t old_action = 1700;
+    constexpr std::uint32_t new_action = 2900;
+    repo.protect_system_prefix(128);
+    repo.protect_action_span(old_action * 64ULL, (old_action + 2ULL) * 64ULL);
+    repo.set_closed_thinking_spans({});
+    std::fill(scores.begin(), scores.end(), 0.0f);
+    scores[fact] = 1.0f;
+    repo.record_lrfu_scores(scores, 0.5, 1.0);
+    auto first = repo.preview_select(cfg, {});
+    CHECK(std::find(first.block_ids.begin(), first.block_ids.end(), fact) != first.block_ids.end(),
+          "256K history fact missing from first query working set");
+    CHECK(std::find(first.block_ids.begin(), first.block_ids.end(), old_action) !=
+              first.block_ids.end(), "256K old active action missing");
+    repo.protect_action_span(new_action * 64ULL, (new_action + 2ULL) * 64ULL);
+    const std::array<std::pair<std::uint32_t, std::uint32_t>, 1> closed_thinking{{
+        {old_action * 64U, (old_action + 2U) * 64U}
+    }};
+    repo.set_closed_thinking_spans(closed_thinking);
+    repo.record_lrfu_scores(scores, 0.5, 1.0);
+    const auto second = repo.preview_select(cfg, {});
+    CHECK(std::find(second.block_ids.begin(), second.block_ids.end(), fact) != second.block_ids.end(),
+          "256K history fact lost after action turnover");
+    CHECK(std::find(second.block_ids.begin(), second.block_ids.end(), new_action) !=
+              second.block_ids.end(), "256K new active action missing");
+    CHECK(repo.blocks()[old_action].stratum == BlockStratum::EphemeralThinking,
+          "256K old action was not demoted after closing reasoning span");
+    CHECK(repo.blocks()[new_action].stratum == BlockStratum::ActionProtected,
+          "256K current action was not protected");
+}
+
 int main() {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     test_passthrough();
@@ -293,6 +357,8 @@ int main() {
     std::printf("retrieval ok\n");
     test_action_lrfu();
     std::printf("action_lrfu ok\n");
+    test_action_lrfu_long_ties();
+    std::printf("action_lrfu_256k_ties ok\n");
     std::printf("failures=%d  VERDICT: %s\n", failures, failures == 0 ? "PASS" : "FAIL");
     return failures == 0 ? 0 : 1;
 }
