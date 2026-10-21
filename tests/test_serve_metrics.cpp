@@ -79,16 +79,35 @@ int main() {
     stats.kvmem.host_capacity_bytes      = 8192;
     stats.kvmem.cold_bytes               = 16384;
     stats.kvmem.host_to_cold_spills      = 7;
+    stats.kvmem.host_cache_capacity_bytes = 16ULL << 30;
+    stats.kvmem.source_k_bytes = 4096;
+    stats.kvmem.source_k_file_capacity_bytes = 8192;
+    stats.kvmem.source_k_staging_bytes = 256;
+    stats.kvmem.source_k_captures = 5;
+    stats.kvmem.source_k_rebuilds = 7;
+    stats.kvmem.history_replay_tokens = 64;
+    stats.kvmem.query_replay_tokens = 4;
+    stats.kvmem.history_replay_rounds = 1;
     {
         ninfer::KvMemUsage second{};
         second.host_capacity_bytes = 1024;
         second.cold_bytes = 512;
         second.host_to_cold_spills = 2;
+        second.source_k_bytes = 1024;
+        second.source_k_file_capacity_bytes = 2048;
+        second.source_k_staging_bytes = 64;
+        second.source_k_captures = 1;
+        second.source_k_rebuilds = 2;
         auto aggregate = stats.kvmem;
         aggregate.merge(second);
         failures += check(aggregate.host_capacity_bytes == 9216 &&
                               aggregate.cold_bytes == 16896 &&
-                              aggregate.host_to_cold_spills == 9,
+                              aggregate.host_to_cold_spills == 9 &&
+                              aggregate.source_k_bytes == 5120 &&
+                              aggregate.source_k_file_capacity_bytes == 10240 &&
+                              aggregate.source_k_staging_bytes == 320 &&
+                              aggregate.source_k_captures == 6 && aggregate.source_k_rebuilds == 9 &&
+                              aggregate.history_replay_tokens == 64,
                           "merged KVMem cold gauges/counters are incomplete");
     }
     stats.capture_skips.note(ninfer::CaptureSkipReason::Terminal);
@@ -129,6 +148,14 @@ int main() {
                       "active disk cold KV is missing");
     failures += check(contains(text, "ninfer:kvmem_host_to_cold_spills_total 7"),
                       "Host-to-cold spill count is missing");
+    for (const auto expected : {
+             "ninfer:kvmem_source_k_bytes 4096", "ninfer:kvmem_source_k_file_capacity_bytes 8192",
+             "ninfer:kvmem_source_k_staging_bytes 256", "ninfer:kvmem_source_k_captures_total 5",
+             "ninfer:kvmem_source_k_rebuilds_total 7", "ninfer:kvmem_history_replay_tokens_total 64",
+             "ninfer:kvmem_query_replay_tokens_total 4", "ninfer:kvmem_history_replay_rounds_total 1",
+             "ninfer:physical_prefill_tokens_total 1302", "ninfer:host_kv_capacity_bytes 17179869184"}) {
+        failures += check(contains(text, expected), "source/replay/budget metric is missing");
+    }
     failures += check(contains(text, "ninfer:capture_skips_total 2"),
                       "capture skip total is wrong");
     failures += check(contains(text, "ninfer:capture_skips{reason=\"terminal\"} 1"),

@@ -30,11 +30,12 @@ tmp-nvcc/gsq-v3-multi-image-response.json
 - Used one `video_url` data-URL in the Chat Completions user message.
 - Actual native service reported `media 1`, 52 prompt and 50 generated tokens,
   `finish_reason=stop`, HTTP 200, total request 1.4 seconds.
-- The response describes colorful test patterns but also describes a digital
-  timer at the top of the video. The test video was not created with a timer,
-  so this is **not** reliable video semantic accuracy. The request confirms
-  accepted MP4 transport, frame preprocessing, Vision inference and text
-  generation only.
+- The response describes colorful test patterns and a digital timer at the top
+  counting from 00:00:00 to 00:00:01. The earlier version of this report called
+  the timer a hallucination. **Direct inspection of the original request pixels
+  disproves that annotation:** an embedded timer is visible in both the first
+  and last decoded frames. See the correction below. This remains a narrow
+  clip-level result, not broad video semantic acceptance.
 
 Local evidence:
 
@@ -64,7 +65,8 @@ above and `examples/cli/media/temporal_events.mp4`; decoded and inspected
 frame counts agreed exactly at **4/4** and **40/40** frames respectively.
 These probes do not intentionally force FFmpeg's `EAGAIN` return, nor do they
 demonstrate any model-level semantic-quality change. The timer hallucination
-observed in the earlier inference result remains a known limitation.
+annotation in the earlier inference report is superseded by the original-pixel
+audit below; decoder correctness alone still does not imply general model quality.
 
 ## Variable-frame-rate container without `nb_frames` — regression fixed
 
@@ -84,3 +86,50 @@ of estimating. The deterministic 9-KiB fixture
 4-frame MP4 and 40-frame `temporal_events.mp4` also still decoded at 4/4 and
 40/40 in targeted host checks. No whole-model run was repeated; VFR video
 understanding quality is therefore not established.
+
+## Original video pixel audit: timer concern retracted
+
+The follow-up decoded the data URL from the **original**
+`v3-vision-short-video-request.json`, rather than regenerating a different clip.
+Those bytes exactly equal `v3-vision-testsrc2-2s.mp4`, SHA-256
+`b2ee73ff600180506c44763e4bc8662bdcb3cca60d88c203642036fdb53152cc`.
+Frame 0 visibly contains the top-left `00:00:00` timer; frame 3 shows
+`00:00:01` with a fractional suffix. The model's timer observation therefore
+has visible evidence. The earlier assertion that this fixture had no timer was
+an annotation error, and is withdrawn. No additional model call was needed.
+
+Audit files are under `tmp-nvcc/resolve-20261020/`:
+`video-request-original.mp4`, `video-frame0.png`, `video-frame3.png` and
+`video-audit.json`. This correction does not establish high-resolution, long
+video, multi-video or unrestricted factual-caption reliability.
+
+## Bounded higher-resolution and 60-second temporal qualification
+
+The follow-up uses only the existing complete Qwen3.8 GSQ model on the same
+single Ada GPU. Six frozen calls completed with correct independently known
+color facts, not merely HTTP200. `tmp-nvcc/qualification-20261020/media/`
+contains source PNG/MP4 hashes, manifests, commands, request logs, SSE receipts,
+metrics and `analysis.json`.
+
+Configuration: managed weights, INT8, 4096 context/physical KV tokens,
+128-token prefill chunks, Vision scratch capacity 2048, no thinking/Graph,
+greedy, one active request. Media cache 64 MiB/live 128 MiB; async KVMem is not
+enabled for Vision. All three owned servers exited normally.
+
+| Case | Observed processing | Expected / actual fact |
+|---|---|---|
+| 1536×1024 three vertical panels | 6144 raw patches, 1536 vision tokens | left→right red, green, blue; correct |
+| two 256×256 solid images | 512 raw patches, 128 vision tokens total | first red, second blue; correct |
+| same images, follow-up question | two media cache hits, 1,572,864 patch bytes reused; 158 prompt tokens cached | second image blue; correct |
+| 60-second 128×128 H.264 clip, 2 fps | 120 source frames, native inspect/decode 120/120, 3840 raw patches, 960 vision tokens | red→green→blue across three 20-second sections; correct |
+| 1536×1024 + MTP3 | same 1536 vision tokens, accepted/drafted 6/6 | red, green, blue; correct |
+| 1536×1024 + DFlash2 K3 | same 1536 vision tokens, accepted/drafted 4/6 | red, green, blue; correct |
+
+The registered resize/sampling policy preserves these already aligned source
+dimensions; the clip's source rate equals the target 2 fps and is below the
+768-frame ceiling. This qualifies source-resolution panel colors, multi-image
+ordering/reuse and one minute of simple temporal color order under these
+budgets. It does not qualify high-detail OCR, arbitrary long-video reasoning,
+all resolutions, or async+Vision. No new weight download or full kernel suite
+was needed. Original smaller smoke results and annotation correction remain
+historical evidence rather than being overwritten.

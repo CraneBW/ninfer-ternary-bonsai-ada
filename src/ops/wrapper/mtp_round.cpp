@@ -52,13 +52,14 @@ void mtp_prepare_next_round(const Tensor& verify_ids, const Tensor& next_anchors
                             const Tensor& rope_deltas, Tensor& alignment_ids, Tensor& next_extents,
                             Tensor& ar_positions, Tensor& ar_rope_positions,
                             Tensor& ar_valid_columns, std::int32_t proposal_drafts,
-                            std::int32_t max_context, cudaStream_t stream) {
+                            std::int32_t max_context, cudaStream_t stream,
+                            const Tensor* updated_logical_frontiers) {
     constexpr const char* op = "mtp_prepare_next_round";
     const std::int32_t T     = verify_ids.ne[0];
     const std::int32_t batch = verify_ids.ne[1];
-    // 8 = one draft ceiling (7) plus the token the round starts from; see round_state.h.
-    if (T < 2 || T > 8) {
-        throw std::invalid_argument("mtp_prepare_next_round: T must be in [2,8]");
+    // 16 = fixed draft ceiling (15) plus the anchor; see round_state.h.
+    if (T < 2 || T > 16) {
+        throw std::invalid_argument("mtp_prepare_next_round: T must be in [2,16]");
     }
     // The verified width and the next proposal are independent: an adaptive MTP round verifies
     // fewer drafts than it proposes.
@@ -73,6 +74,10 @@ void mtp_prepare_next_round(const Tensor& verify_ids, const Tensor& next_anchors
     require_vector(next_anchors, DType::I32, batch, op, "next_anchors");
     require_vector(accepted, DType::I32, batch, op, "accepted");
     require_vector(updated_frontiers, DType::I32, batch, op, "updated_frontiers");
+    if (updated_logical_frontiers != nullptr) {
+        require_vector(*updated_logical_frontiers, DType::I32, batch, op,
+                        "updated_logical_frontiers");
+    }
     require_vector(remaining_budgets, DType::I32, batch, op, "remaining_budgets");
     require_vector(licensed_counts, DType::I32, batch, op, "licensed_counts");
     require_vector(rope_deltas, DType::I32, batch, op, "rope_deltas");
@@ -91,7 +96,7 @@ void mtp_prepare_next_round(const Tensor& verify_ids, const Tensor& next_anchors
                                           remaining_budgets, licensed_counts, rope_deltas,
                                           alignment_ids, next_extents, ar_positions,
                                           ar_rope_positions, ar_valid_columns, proposal_drafts,
-                                          max_context, stream);
+                                          max_context, stream, updated_logical_frontiers);
 }
 
 } // namespace ninfer::ops

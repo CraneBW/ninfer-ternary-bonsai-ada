@@ -153,7 +153,7 @@ void test_round_layout() {
     q36::RoundStateLayout round = q36::begin_round_state_layout(
         builder, q36::RoundStateSpec{.hidden       = 32,
                                      .output_rows  = 128,
-                                     .draft_window = 5,
+                                     .draft_window = 15,
                                      .backend      = ninfer::SpeculativeBackend::Mtp});
     const ninfer::TensorRegion exact_prefill =
         builder.add_tensor(ninfer::DType::BF16, {32, 16}, 256, "exact prefill hidden");
@@ -161,15 +161,15 @@ void test_round_layout() {
     (void)builder.finish(256);
     expect(round.complete, "round layout completes");
     expect(round.logits.shape[0] == 128 && round.logits.shape[1] == 1, "round logits shape");
-    expect(round.mtp.has_value() && round.mtp->draft_tokens.shape[0] == 5 &&
-               round.mtp->target_input_ids.shape[0] == 6,
+    expect(round.mtp.has_value() && round.mtp->draft_tokens.shape[0] == 15 &&
+               round.mtp->target_input_ids.shape[0] == 16,
            "MTP prefill scratch shapes");
     expect(round.logits.region.offset < exact_prefill.region.offset &&
                exact_prefill.region.offset < round.mtp->draft_tokens.region.offset,
            "exact prefill extension retains established round-region order");
     expect(round.mtp.has_value() && round.mtp->position.shape[0] == 1,
            "MTP prefill scratch is explicit");
-    expect(round.mtp_decode.has_value() && round.mtp_decode->alignment_ids.shape[0] == 6 &&
+    expect(round.mtp_decode.has_value() && round.mtp_decode->alignment_ids.shape[0] == 16 &&
                round.mtp_decode->alignment_ids.shape[1] == 1,
            "MTP decode frame is explicit");
 

@@ -437,9 +437,13 @@ int exercise_layout_and_transfer(ninfer::DeviceContext& context, ninfer::KVPageG
         stage_views.push_back(v);
         stage_const_views.push_back(v);
     }
+    ninfer::CudaCompletionEvent source_ready(context), transfer_done(context);
+    source_ready.record(context.stream);
+    source_ready.wait(context.transfer_stream);
     const std::size_t d2h_runs =
-        source.copy_to_host_pages(source_handles, stage_views, context.stream);
-    context.synchronize();
+        source.copy_to_host_pages(source_handles, stage_views, context.transfer_stream);
+    transfer_done.record(context.transfer_stream);
+    transfer_done.synchronize();
     failures += expect_size(d2h_runs, 2, label + " D2H page gather did not merge contiguous runs");
     for (std::size_t i = 0; i < 5; ++i) {
         failures += expect(std::memcmp(stage_views[i].data(),
@@ -449,8 +453,12 @@ int exercise_layout_and_transfer(ninfer::DeviceContext& context, ninfer::KVPageG
     }
 
     destination.zero_pages(restored_handles, context.stream);
+    source_ready.record(context.stream);
+    source_ready.wait(context.transfer_stream);
     const std::size_t h2d_runs =
-        destination.copy_from_host_pages(stage_const_views, restored_handles, context.stream);
+        destination.copy_from_host_pages(stage_const_views, restored_handles, context.transfer_stream);
+    transfer_done.record(context.transfer_stream);
+    transfer_done.wait(context.stream);
     std::memset(roundtrip_view.data(), 0, host_layout.page_stride * roundtrip_view.page_count());
     destination.copy_to_host(restored_handles, roundtrip_view, context.stream);
     context.synchronize();
@@ -464,8 +472,12 @@ int exercise_layout_and_transfer(ninfer::DeviceContext& context, ninfer::KVPageG
         stage_const_views[0], stage_const_views[1], stage_const_views[3], stage_const_views[2],
         stage_const_views[4]};
     destination.zero_pages(restored_handles, context.stream);
+    source_ready.record(context.stream);
+    source_ready.wait(context.transfer_stream);
     const std::size_t permuted_runs =
-        destination.copy_from_host_pages(permuted_views, restored_handles, context.stream);
+        destination.copy_from_host_pages(permuted_views, restored_handles, context.transfer_stream);
+    transfer_done.record(context.transfer_stream);
+    transfer_done.wait(context.stream);
     std::memset(roundtrip_view.data(), 0, host_layout.page_stride * roundtrip_view.page_count());
     destination.copy_to_host(restored_handles, roundtrip_view, context.stream);
     context.synchronize();

@@ -155,9 +155,11 @@ long-decode, and long-context inputs.
 
 ## Speculative decoding
 
-Speculative decoding is disabled by default. Select MTP with one to seven draft positions, or the
-35B-A3B DFlash or Qwen3.8-27B DFlash2 backend with one to fifteen. Both masked-draft backends
-may be combined with `--vision`.
+Speculative decoding is disabled by default. Fixed MTP accepts one to fifteen draft positions.
+The 35B-A3B DFlash and Qwen3.8-27B DFlash2 backends accept one to fifteen. Both masked-draft backends may be combined
+with `--vision`. For the local Qwen3.8 GSQ / RTX 4070 Ti SUPER profile, seven fixed MTP drafts
+with the optimized proposal head remain the recommendation until the release-profile comparison
+selects a replacement; support for fifteen does not establish a performance or quality recommendation.
 `--lm-head-draft` selects the optimized proposal head and requires a selected backend:
 
 ```bash
@@ -192,44 +194,10 @@ use MTP with three draft tokens and DFlash with seven draft tokens (block length
 the optimized proposal head. DFlash accepts one to fifteen draft tokens; seven forms the measured
 block length eight, while fifteen uses the maximum supported block length sixteen.
 
-`--adaptive-mtp` makes `--draft-tokens` a ceiling instead of a fixed width. Each round tracks how
-often each draft position survived acceptance and how long the round took at that width, then
-verifies the prefix the measured survival per unit of round cost favors; the draft window itself
-stays at the ceiling, and only the verified and proposed prefix narrows. Because drafts are still
-verified against the target model, the committed greedy output is identical to a fixed window. The
-width starts at three, grows when wider rounds earn their cost, and contracts when the drafts stop
-surviving, so one configuration serves chat text (where late draft positions rarely survive and a
-narrow round is cheaper) and highly regular output such as generated JSON (where they do). Three
-rounds in a row that committed every draft up to the fourth land the request on the widest
-admissible width at once instead of climbing one draft per window, because the same maximum-width
-probation that governs growth contracts a wrong landing within two rounds. Measured on one
-Qwen3.8-27B build, generated JSON at a 61,674-token prompt rose from 171.2 to 184.4 t/s and now
-matches a fixed seven-draft window (187.4 against 187.3 t/s), while long-form prose at a
-61,650-token prompt kept 78.5 against 66.9 t/s for that fixed window. It requires `--spec mtp` and
-a ceiling of at least three.
-
-`--lookup-ngram` gives an MTP round a second source of drafts: when the request's last eight
-tokens repeat a run that already appeared in its own context, the continuation of that earlier
-occurrence is proposed for the round when it is at least as wide as the draft head's own proposal.
-Copied text -- reproduced passages, repeated JSON lines, echoed tool arguments -- is what this
-covers, and the draft head cannot know it because the continuation lives in the prompt rather than
-in the model's weights. The lookup indexes the request's token stream as it grows and trusts a run
-only when its two most recent occurrences continued identically for sixteen tokens, so a repeated
-template (a JSON key before a varied value, a phrase that recurs with a different ending) keeps the
-draft head's drafts instead of the lookup's. Agreement on the right is not enough by itself: a run
-that occurs once in the prompt, an example the request is imitating, matches the eight tokens while
-the text around it differs, so a hit also needs the sixteen tokens before the match to agree with
-the ones the request has already written. A copy corroborates on both sides -- the tokens it has
-reproduced stand before the matched run exactly as the earlier occurrence's own tokens do -- so the
-draft head keeps the first tokens of a copy and the lookup takes over once the copy has enough of
-itself behind the run. A prediction covers at least three tokens and never reaches past the agreed
-window, and it is verified by the target model exactly like an MTP draft, so the committed greedy
-output is unchanged and a wrong prediction costs at most the verify columns it occupies. On one
-Qwen3.8-27B build, copying an identifier manifest verbatim measured 260.0 t/s against 239.2 for the
-same fixed window, generated JSON at a 61,674-token prompt was level with the same window without
-the lookup (190.4 against 191.7 t/s; it cost 186.1 before the rule), and prose and copied prose were
-unchanged. It requires `--spec mtp` with a draft window of at least three,
-and combines with `--adaptive-mtp`; a round the lookup drafted still verifies at the adapted width.
+The `ninfer` CLI uses fixed draft windows. Adaptive MTP and n-gram lookup are available through
+the [Serve configuration](serving.md) and the in-tree
+[`SpeculativeOptions` API](../include/ninfer/types.h). Those modes retain a maximum draft ceiling
+of seven; adaptive MTP requires a ceiling of at least three.
 
 ## Common options
 
@@ -246,9 +214,7 @@ The table lists executable defaults. The examples above select FP8 KV and MTP3.
 | `--cache-type-k bf16\|int8\|fp8\|nvfp4\|int4\|int4-e8` | key-side KV-cache storage | `bf16` |
 | `--cache-type-v bf16\|int8\|fp8\|nvfp4\|int4` | value-side KV-cache storage | `bf16` |
 | `--spec mtp\|dflash\|dflash2` | speculative backend | off |
-| `--draft-tokens N` | MTP `1..7`; DFlash/DFlash2 `1..15` | unset |
-| `--adaptive-mtp` | MTP only: verify `3..--draft-tokens` drafts per round, chosen per request | off |
-| `--lookup-ngram` | MTP only: draft from an earlier occurrence of the last eight tokens | off |
+| `--draft-tokens N` | fixed MTP `1..15`; DFlash/DFlash2 `1..15` | unset |
 | `--lm-head-draft` | optimized proposal head | off |
 | `--vision` | enable image/video input and load Vision GPU allocations | off |
 | `--no-cuda-graph` | disable CUDA Graph decode | graphs on |
@@ -286,6 +252,18 @@ generated token IDs in diagnostics.
 Run `./build/apps/ninfer --help` for the exact option contract.
 
 ## Context and memory
+
+`--kvmem-transfer-mode sync|async` selects the startup transfer mode, with `sync`
+remaining the default. Experimental `async` supports one active text request with
+INT8 KV, including base, CUDA Graph, MTP and DFlash2 on the validated Qwen3.8 GSQ
+path. Higher concurrency and Vision combinations explicitly reject async mode.
+Eligible D2H/H2D batches are bounded at 16 MiB per typed pool. Required restores
+wait for copy and rephase before publication; Cold/oversized/partial-page paths
+retain bounded synchronous fallback. The selected history budget is unchanged.
+Speculative growth and provisional lead are charged to real Device capacity;
+reserve enough `--kvmem-gen-reserve` and physical pool room for the requested
+output. A live speculative batch cannot compact to fund an unfunded tail.
+This mode does not imply full-history recall or a guaranteed speedup.
 
 The registered model IDs have a native context limit of 262,144 tokens. `--max-context` may
 extend it up to twice that window (524,288 tokens): past 262,144 the text RoPE divisors take the

@@ -1,7 +1,7 @@
 #pragma once
 
 // Implements: include/ninfer/ops/mtp_round.h
-// Match: request-major K=1..7 verification and P=1..15 next autoregressive proposals.
+// Match: request-major K=1..15 verification and P=1..15 next autoregressive proposals.
 
 #include <cstdint>
 
@@ -11,6 +11,7 @@ __global__ void mtp_prepare_next_round_kernel(
     const std::int32_t* verify_ids, const std::int32_t* next_anchors, const std::int32_t* accepted,
     const std::int32_t* updated_frontiers, const std::int32_t* remaining_budgets,
     const std::int32_t* licensed_counts, const std::int32_t* rope_deltas,
+    const std::int32_t* updated_logical_frontiers,
     std::int32_t* alignment_ids, std::int32_t* next_extents, std::int32_t* ar_positions,
     std::int32_t* ar_rope_positions, std::int32_t* ar_valid_columns, std::int32_t k,
     std::int32_t proposal_k, std::int32_t ar_step_stride, std::int32_t max_context) {
@@ -26,14 +27,20 @@ __global__ void mtp_prepare_next_round_kernel(
         const int licensed       = licensed_counts[row];
         const int remaining      = remaining_budgets[row] - licensed;
         const int budget_extent  = remaining > 1 ? remaining - 1 : 0;
-        const int context_extent = max_context - updated_frontiers[row] - 1;
+        // KVMem original-position mode accepts in logical space, while the
+        // compact base is intentionally not mutated by the accept kernel.
+        const int cache_frontier = updated_frontiers[row] +
+            (updated_logical_frontiers != nullptr ? licensed : 0);
+        const int logical_frontier = updated_logical_frontiers != nullptr
+            ? updated_logical_frontiers[row] : updated_frontiers[row];
+        const int context_extent = max_context - logical_frontier - 1;
         int next                 = budget_extent < context_extent ? budget_extent : context_extent;
         next                     = next < 0 ? 0 : (next > proposal_k ? proposal_k : next);
         next_extents[row]        = next;
         const int steps          = proposal_k > 1 ? proposal_k - 1 : 1;
         for (int s = 0; s < steps; ++s) {
             const int offset          = s * ar_step_stride + row;
-            const int position        = updated_frontiers[row] + s;
+            const int position        = cache_frontier + s;
             ar_positions[offset]      = position;
             ar_rope_positions[offset] = position + rope_deltas[row];
             ar_valid_columns[offset]  = s + 1 < next ? 1 : 0;

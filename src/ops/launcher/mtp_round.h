@@ -13,6 +13,6 @@ void mtp_prepare_next_round_launch(const Tensor& verify_ids, const Tensor& next_
                                    Tensor& next_extents, Tensor& ar_positions,
                                    Tensor& ar_rope_positions, Tensor& ar_valid_columns,
                                    std::int32_t proposal_drafts, std::int32_t max_context,
-                                   cudaStream_t stream);
+                                   cudaStream_t stream, const Tensor* updated_logical_frontiers);
 
 } // namespace ninfer::ops::detail

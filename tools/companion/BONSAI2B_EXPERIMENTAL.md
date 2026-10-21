@@ -118,3 +118,19 @@ are not implied by these focused semantic requests.
 This checkpoint patch must not be confused with full v3 Vision inference,
 27B Groupwise/NVFP4 serving, TP2 native multi-GPU execution, or Strata ×
 ActKV, which are separate remaining features in the main task.
+
+## Existing-artifact recheck after the single-GPU recall work
+
+The existing complete Bonsai2B artifact and existing formal-path Companion
+executable were rechecked without downloads, conversion or rebuilding the dirty
+Companion tree. Two actual streaming requests completed with terminal/usage:
+remember code 37 → `ACK`, then recall → `37`. The second request reused the
+compatible prefix. Evidence is in the main checkout's
+`tmp-nvcc/qualification-20261020/bonsai2b-cli/`.
+
+The initial wrapper wrongly passed the main Ada CLI's `--managed-weights` and
+was rejected before any inference request. The corrected invocation uses the
+Companion's own `--kv-capacity 1024` with ordinary resident 608.4 MiB weights;
+its original failure log is retained in `qualification-20261020/existing/`.
+This confirms this binary/artifact pair, not a clean full Ninja rebuild or
+new long-context/vision capability for Bonsai2B.

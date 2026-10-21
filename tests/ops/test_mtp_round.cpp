@@ -139,6 +139,8 @@ int main() {
     // Adaptive MTP verifies fewer drafts than it proposes: the AR tail still spans the proposal.
     failures += run_case(2, 7, {0, 1, 2});
     failures += run_case(4, 6, {0, 3, 4});
+    // R29 fixed K15: reject, partial prefix, last rejection, and full acceptance.
+    failures += run_case(15, 15, {0, 7, 14, 15});
 
     if (failures != 0) {
         std::cerr << "mtp_round failures=" << failures << '\n';

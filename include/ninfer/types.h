@@ -250,7 +250,7 @@ enum class SpeculativeBackend : std::uint8_t {
 
 struct SpeculativeOptions {
     SpeculativeBackend backend = SpeculativeBackend::None;
-    // Startup-fixed K: MTP 1..7, DFlash and DFlash2 1..15 (query width K+1). Under adaptive MTP
+    // Startup-fixed K: fixed MTP 1..15, adaptive/lookup MTP 1..7, DFlash/DFlash2 1..15. Under adaptive MTP
     // this is the ceiling of a per-round choice, and K stays the draft window in every case.
     std::uint32_t draft_tokens = 0;
     // MTP only: verify fewer than K drafts when a request's measured draft survival and the
@@ -348,6 +348,7 @@ struct KvMemOptions {
     bool action_lrfu = false;
     double lrfu_lambda = 0.5;
     double lrfu_top_fraction = 0.9;
+    bool async_transfers = false;
 };
 
 // KVMem's production default for the generation headroom, the same number the upstream KVMem
@@ -444,6 +445,8 @@ struct EngineOptions {
     // Opt-in demand-paged CUDA Unified Memory for weight storage. Useful for
     // large artifacts on smaller GPUs at the cost of PCIe paging and speed.
     bool managed_weights                   = false;
+    // Zero keeps the 1 GiB managed runtime ceiling; explicit bytes retain 512 MiB free headroom.
+    std::size_t managed_runtime_capacity_bytes = 0;
     ContextCacheOptions context_cache;
     ContextCostOptions context_cost;
     KvMemOptions kvmem;
@@ -1210,6 +1213,17 @@ struct KvMemUsage {
     std::uint64_t stage_out_blocks = 0;
     std::uint64_t transfer_runs    = 0;
     std::uint64_t transfer_us      = 0;
+    std::uint64_t async_submitted  = 0;
+    std::uint64_t async_completed  = 0;
+    std::uint64_t async_discarded  = 0;
+    std::uint64_t async_submit_us  = 0;
+    std::uint64_t async_wait_us    = 0;
+    std::uint64_t async_bytes      = 0;
+    std::uint64_t async_fallbacks  = 0;
+    std::uint64_t async_restore_submitted = 0;
+    std::uint64_t async_restore_us = 0;
+    std::uint64_t inflight_pages   = 0;
+    std::size_t inflight_bytes    = 0;
     std::uint64_t scoreable_blocks = 0;
     std::uint64_t zero_score_blocks = 0;
     std::uint32_t window_tokens     = 0;
@@ -1217,6 +1231,23 @@ struct KvMemUsage {
     std::size_t host_capacity_bytes = 0;
     std::size_t cold_bytes          = 0;
     std::uint64_t host_to_cold_spills = 0;
+    // Backing-file spans are not fixed resident RAM; staging is pinned Host payload.
+    std::size_t host_cache_capacity_bytes = 0;
+    std::size_t source_k_bytes = 0;
+    std::size_t source_k_file_capacity_bytes = 0;
+    std::size_t source_k_staging_bytes = 0;
+    std::uint64_t source_k_captures = 0;
+    std::uint64_t source_k_rebuilds = 0;
+    // Program-level extra model work, counted once rather than once per typed pool.
+    std::uint64_t history_replay_tokens = 0;
+    std::uint64_t query_replay_tokens = 0;
+    std::uint64_t history_replay_rounds = 0;
+    std::uint64_t history_reused_tokens = 0;
+    std::size_t replay_checkpoint_capacity_bytes = 0;
+    std::uint64_t async_split_batches = 0;
+    std::uint64_t nvme_prefetch_submitted = 0;
+    std::uint64_t nvme_prefetch_completed = 0;
+    std::uint64_t nvme_prefetch_wait_us = 0;
 
     void merge(const KvMemUsage& other) noexcept {
         plans += other.plans;
@@ -1226,6 +1257,17 @@ struct KvMemUsage {
         stage_out_blocks += other.stage_out_blocks;
         transfer_runs += other.transfer_runs;
         transfer_us += other.transfer_us;
+        async_submitted += other.async_submitted;
+        async_completed += other.async_completed;
+        async_discarded += other.async_discarded;
+        async_submit_us += other.async_submit_us;
+        async_wait_us += other.async_wait_us;
+        async_bytes += other.async_bytes;
+        async_fallbacks += other.async_fallbacks;
+        async_restore_submitted += other.async_restore_submitted;
+        async_restore_us += other.async_restore_us;
+        inflight_pages += other.inflight_pages;
+        inflight_bytes += other.inflight_bytes;
         scoreable_blocks += other.scoreable_blocks;
         zero_score_blocks += other.zero_score_blocks;
         if (other.window_tokens > window_tokens) { window_tokens = other.window_tokens; }
@@ -1233,6 +1275,21 @@ struct KvMemUsage {
         host_capacity_bytes += other.host_capacity_bytes;
         cold_bytes += other.cold_bytes;
         host_to_cold_spills += other.host_to_cold_spills;
+        host_cache_capacity_bytes += other.host_cache_capacity_bytes;
+        source_k_bytes += other.source_k_bytes;
+        source_k_file_capacity_bytes += other.source_k_file_capacity_bytes;
+        source_k_staging_bytes += other.source_k_staging_bytes;
+        source_k_captures += other.source_k_captures;
+        source_k_rebuilds += other.source_k_rebuilds;
+        history_replay_tokens += other.history_replay_tokens;
+        query_replay_tokens += other.query_replay_tokens;
+        history_replay_rounds += other.history_replay_rounds;
+        history_reused_tokens += other.history_reused_tokens;
+        replay_checkpoint_capacity_bytes += other.replay_checkpoint_capacity_bytes;
+        async_split_batches += other.async_split_batches;
+        nvme_prefetch_submitted += other.nvme_prefetch_submitted;
+        nvme_prefetch_completed += other.nvme_prefetch_completed;
+        nvme_prefetch_wait_us += other.nvme_prefetch_wait_us;
     }
 };
 
@@ -1243,7 +1300,8 @@ struct RuntimeStats {
     KvMemUsage kvmem;
     CaptureSkipStats capture_skips;
     RuntimeHostWorkStats host_work;
-    // Actual prompt tokens evaluated by prefill; reused checkpoint-prefix tokens are excluded.
+    // Logical prompt tokens evaluated by prefill; extra internal KVMem replay is reported
+    // separately in kvmem.history_replay_tokens/query_replay_tokens.
     std::uint64_t computed_prefill_tokens = 0;
     // Tokens committed by decode rounds; the first token emitted by prefill is excluded.
     std::uint64_t committed_decode_tokens = 0;

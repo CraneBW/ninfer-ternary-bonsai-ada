@@ -44,12 +44,13 @@ inline void validate_speculative_cli_options(const SpeculativeOptions& options) 
         }
         return;
     case SpeculativeBackend::Mtp:
-        // 7, kept in step with the engine's other three limits on this number by hand rather than
-        // by a shared constant: this one is a CLI range check, those are the captured graph's width
-        // and the runtime invariant behind it, and a single constant would couple a validation
-        // message to the shape of a CUDA graph. Listed in round_state.h's comment.
-        if (options.draft_tokens == 0 || options.draft_tokens > 7) {
-            throw std::invalid_argument("--spec mtp requires --draft-tokens in [1,7]");
+        // R29: fixed-window MTP may use the existing T16 GGUF/MMQ path.
+        // Keep the CLI, decode frame, model ceiling and mtp_round width in step.
+        if (options.draft_tokens == 0 || options.draft_tokens > 15) {
+            throw std::invalid_argument("--spec mtp requires --draft-tokens in [1,15]");
+        }
+        if (options.draft_tokens > 7 && (options.adaptive_mtp || options.lookup_ngram)) {
+            throw std::invalid_argument("MTP windows above 7 require fixed drafting without lookup");
         }
         // The adaptive floor is three: a two-wide round buys almost nothing over a one-wide one,
         // so a ceiling below three would leave the controller with nothing to choose between.

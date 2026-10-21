@@ -143,9 +143,25 @@ void verify_gathered_columns(int tokens) {
     std::printf("GGUF Q8_0 gathered T=%d max_abs_error=%.6f PASS\n", tokens, worst);
 }
 
-void verify_real_mixed_formats(const char* artifact_path) {
-    // Test actual mixed-format GSQ-RCO checkpoint bytes from the already
-    // downloaded prefix; the same CUDA bridge supplies GEMV and MMQ.
+struct RealOptions {
+    bool timing = false;
+    std::string format;
+    std::string entry;
+    std::string dump_output;
+    std::string pattern = "constant";
+    int tokens = 0;
+
+    bool filtered() const { return !format.empty() || !entry.empty() || tokens != 0; }
+};
+
+void verify_real_mixed_formats(const char* artifact_path, const char* oracle_path,
+                              const RealOptions& options) {
+    std::ifstream oracle_file(oracle_path);
+    require(bool(oracle_file), "CPU GGUF oracle file is unavailable");
+    const auto cpu_oracle = nlohmann::json::parse(oracle_file);
+    // Test actual mixed-format GSQ-RCO checkpoint bytes from the existing
+    // artifact. GGML's independent NumPy CPU decoder supplies represented
+    // weights, with FP64 host accumulation; no CUDA dequantizer is the oracle.
     std::ifstream file(artifact_path, std::ios::binary);
     require(bool(file), "GSQ model file is unavailable");
     std::array<unsigned char, 32> header{};
@@ -170,104 +186,258 @@ void verify_real_mixed_formats(const char* artifact_path) {
         const char* name;
         ninfer::QType qtype;
     };
-    constexpr std::array<FormatSample, 6> samples{{
+    constexpr std::array<FormatSample, 10> samples{{
         {"gguf_iq4_xs", ninfer::QType::GGUF_IQ4_XS},
         {"gguf_iq3_s", ninfer::QType::GGUF_IQ3_S},
         {"gguf_iq3_xxs", ninfer::QType::GGUF_IQ3_XXS},
         {"gguf_iq2_xs", ninfer::QType::GGUF_IQ2_XS},
+        {"gguf_iq2_s", ninfer::QType::GGUF_IQ2_S},
+        {"gguf_iq2_xxs", ninfer::QType::GGUF_IQ2_XXS},
+        {"gguf_q6_k", ninfer::QType::GGUF_Q6_K},
+        {"gguf_iq1_m", ninfer::QType::GGUF_IQ1_M},
         {"gguf_q2_k", ninfer::QType::GGUF_Q2_K},
         {"gguf_q4_k", ninfer::QType::GGUF_Q4_K},
     }};
-    for (const auto& sample : samples) {
-    const nlohmann::json* object = nullptr;
-    for (const auto& item : directory.at("objects")) {
-        if (item.value("format", "") == sample.name && item.value("kind", "") == "tensor" &&
-            item.at("shape").size() == 2 &&
-            item.at("shape")[0].get<int>() >= 128 &&
-            item.at("shape")[1].get<int>() % 256 == 0) {
-            object = &item;
-            break;
-        }
-    }
-    require(object != nullptr, "GSQ mixed-format tensor missing");
-    constexpr int rows = 128;
-    const int k = object->at("shape")[1].get<int>();
-    require(k > 0 && k % 256 == 0 && object->at("shape")[0].get<int>() >= rows,
-            "GSQ checkpoint geometry invalid");
-    const auto block = ninfer::gguf_block_shape(sample.qtype);
-    require(block.elements > 0 && k % block.elements == 0,
-            "GSQ block geometry invalid");
-    const std::uint64_t bytes_per_row =
-        static_cast<std::uint64_t>(k / block.elements) * block.bytes;
-    const std::uint64_t start =
-        ((32 + json_length + 4095) / 4096) * 4096 + object->at("offset").get<std::uint64_t>();
-    require(object->at("bytes").get<std::uint64_t>() >= rows * bytes_per_row,
-            "GSQ tensor payload too small");
-    std::vector<std::uint8_t> codes(static_cast<std::size_t>(rows * bytes_per_row));
-    file.seekg(static_cast<std::streamoff>(start), std::ios::beg);
-    file.read(reinterpret_cast<char*>(codes.data()),
-              static_cast<std::streamsize>(codes.size()));
-    require(static_cast<std::size_t>(file.gcount()) == codes.size(),
-            "GSQ selected tensor data not yet downloaded");
-    ninfer::DeviceBuffer weights(codes.size()), decoded(rows * k * sizeof(float));
-    weights.copy_from_host(codes.data(), codes.size());
-    ninfer::ops::gguf::dequantize_rows(
-        ninfer::ops::detail::gguf_type(sample.qtype), weights.p, bytes_per_row, k, nullptr,
-        rows, static_cast<float*>(decoded.p), k, nullptr);
-    require(cudaDeviceSynchronize() == cudaSuccess, "GGUF CUDA dequantization");
-    std::vector<float> weights_f32(rows * k);
-    decoded.copy_to_host(weights_f32.data(), weights_f32.size() * sizeof(float));
-    std::vector<float> expected(rows, 0.0f);
-    for (int r = 0; r < rows; ++r) {
-        for (int c = 0; c < k; ++c) { expected[r] += weights_f32[r * k + c]; }
-    }
-
-    ninfer::Weight w{};
-    w.qtype = sample.qtype;
-    w.layout = ninfer::QuantLayout::GgufBlocks;
-    w.qdata = weights.p;
-    w.n = rows;
-    w.k = k;
-    for (int tokens : {1, 16}) {
-        std::vector<__nv_bfloat16> ones(k * tokens, __float2bfloat16(1.0f));
-        std::vector<__nv_bfloat16> result(rows * tokens);
-        ninfer::DeviceBuffer input(ones.size() * sizeof(__nv_bfloat16));
-        ninfer::DeviceBuffer output(result.size() * sizeof(__nv_bfloat16));
-        input.copy_from_host(ones.data(), ones.size() * sizeof(__nv_bfloat16));
-        ninfer::WorkspaceArena ws(
-            ninfer::ops::detail::gguf_linear_workspace_capacity_bytes(
-                w.qtype, rows, k, 1, tokens));
-        ninfer::Tensor x(input.p, ninfer::DType::BF16, {k, tokens});
-        ninfer::Tensor y(output.p, ninfer::DType::BF16, {rows, tokens});
-        ninfer::ops::detail::gguf_linear_dispatch(x, w, y, ws, nullptr);
-        require(cudaDeviceSynchronize() == cudaSuccess, "GSQ CUDA product");
-        output.copy_to_host(result.data(), result.size() * sizeof(__nv_bfloat16));
-        float worst = 0.0f;
-        for (int token = 0; token < tokens; ++token) {
-            for (int row = 0; row < rows; ++row) {
-                const float value = __bfloat162float(result[token * rows + row]);
-                const float error = std::fabs(value - expected[row]);
-                worst = std::max(worst, error);
-                const float tolerance = std::max(0.7f, std::fabs(expected[row]) * 0.012f);
-                require(std::isfinite(value) && error < tolerance,
-                        "GSQ mixed-format tensor numerical mismatch");
+    auto token_counts = cpu_oracle.value(
+        "token_counts", std::vector<int>{1, 16, 128, 129, 256, 512, 513});
+    if (options.tokens != 0) { token_counts = {options.tokens}; }
+    require(!token_counts.empty() &&
+                std::all_of(token_counts.begin(), token_counts.end(), [](int t) { return t > 0; }),
+            "CPU oracle token counts must be positive");
+    const auto timing_tokens = cpu_oracle.value("timing_tokens", std::vector<int>{512});
+    int checked_entries = 0;
+    bool dumped_output = false;
+    for (const auto& entry : cpu_oracle.at("formats").items()) {
+        if (!options.entry.empty() && options.entry != entry.key()) { continue; }
+        const auto& oracle = entry.value();
+        const auto format = oracle.value("format", entry.key());
+        if (!options.format.empty() && options.format != format) { continue; }
+        const auto sample = std::find_if(samples.begin(), samples.end(),
+                                        [&](const auto& s) { return format == s.name; });
+        require(sample != samples.end(), "CPU oracle contains an unsupported GGUF format");
+        const auto offset = oracle.at("offset").get<std::uint64_t>();
+        const nlohmann::json* object = nullptr;
+        for (const auto& item : directory.at("objects")) {
+            if (item.value("format", "") == format && item.value("kind", "") == "tensor" &&
+                item.at("offset").get<std::uint64_t>() == offset) {
+                object = &item;
+                break;
             }
         }
-        std::printf("real GSQ %s T=%d rows=%d K=%d max_abs_error=%.6f PASS\n",
-                    sample.name, tokens, rows, k, worst);
+        require(object != nullptr, "CPU oracle tensor offset and format are absent from artifact");
+        const int rows = oracle.at("rows").get<int>();
+        const int k = oracle.at("k").get<int>();
+        require(object->at("shape").size() == 2 && rows > 0 && k > 0 && k % 256 == 0 &&
+                    object->at("shape")[0].get<int>() >= rows && object->at("shape")[1] == k,
+                "CPU oracle tensor geometry differs from artifact");
+        if (oracle.contains("n")) {
+            require(oracle.at("n") == object->at("shape")[0], "CPU oracle N differs from artifact");
+        }
+        if (oracle.contains("object_id")) {
+            require(oracle.at("object_id") == object->at("id"), "CPU oracle tensor ID differs from artifact");
+        }
+        const auto block = ninfer::gguf_block_shape(sample->qtype);
+        require(block.elements > 0 && k % block.elements == 0,
+                "GSQ block geometry invalid");
+        const std::uint64_t bytes_per_row =
+            static_cast<std::uint64_t>(k / block.elements) * block.bytes;
+        const std::uint64_t start = ((32 + json_length + 4095) / 4096) * 4096 + offset;
+        require(object->at("bytes").get<std::uint64_t>() >= rows * bytes_per_row,
+                "GSQ tensor payload too small");
+        std::vector<std::uint8_t> codes(static_cast<std::size_t>(rows * bytes_per_row));
+        file.seekg(static_cast<std::streamoff>(start), std::ios::beg);
+        file.read(reinterpret_cast<char*>(codes.data()),
+                  static_cast<std::streamsize>(codes.size()));
+        require(static_cast<std::size_t>(file.gcount()) == codes.size(),
+                "GSQ selected tensor payload is incomplete");
+        ninfer::DeviceBuffer weights(codes.size());
+        weights.copy_from_host(codes.data(), codes.size());
+        const auto expected = oracle.at("row_sums").get<std::vector<double>>();
+        require(expected.size() == static_cast<std::size_t>(rows), "CPU oracle has incorrect row count");
+
+        ninfer::Weight w{};
+        w.qtype = sample->qtype;
+        w.layout = ninfer::QuantLayout::GgufBlocks;
+        w.qdata = weights.p;
+        w.n = rows;
+        w.k = k;
+        for (int tokens : token_counts) {
+            std::vector<__nv_bfloat16> ones(static_cast<std::size_t>(k) * tokens);
+            const auto column_scale = [](int token) { return (token % 7 - 3) * 0.25f; };
+            if (options.pattern == "random") {
+                // Fixed xorshift32 stream; every integer/16 in [-8, 8) is
+                // exactly representable in BF16, independent of host libraries.
+                std::uint32_t state = 0x6d2b79f5u;
+                for (auto& value : ones) {
+                    state ^= state << 13;
+                    state ^= state >> 17;
+                    state ^= state << 5;
+                    const int numerator = static_cast<int>(state & 255u) - 128;
+                    value = __float2bfloat16(static_cast<float>(numerator) / 16.0f);
+                }
+            } else {
+                for (int token = 0; token < tokens; ++token) {
+                    std::fill_n(ones.begin() + static_cast<std::size_t>(token) * k, k,
+                                __float2bfloat16(column_scale(token)));
+                }
+            }
+            std::vector<__nv_bfloat16> result(static_cast<std::size_t>(rows) * tokens);
+            ninfer::DeviceBuffer input(ones.size() * sizeof(__nv_bfloat16));
+            constexpr std::size_t kOutputGuardBytes = 256;
+            const std::size_t output_bytes = result.size() * sizeof(__nv_bfloat16);
+            ninfer::DeviceBuffer output(output_bytes + 2 * kOutputGuardBytes);
+            output.fill(0xa5);
+            auto* output_data = static_cast<std::uint8_t*>(output.p) + kOutputGuardBytes;
+            input.copy_from_host(ones.data(), ones.size() * sizeof(__nv_bfloat16));
+            require(cudaMemset(output_data, 0xff, output_bytes) == cudaSuccess,
+                    "GSQ output NaN poison");
+            ninfer::WorkspaceArena ws(
+                ninfer::ops::detail::gguf_linear_workspace_capacity_bytes(
+                    w.qtype, rows, k, 1, tokens));
+            ninfer::Tensor x(input.p, ninfer::DType::BF16, {k, tokens});
+            ninfer::Tensor y(output_data, ninfer::DType::BF16, {rows, tokens});
+            ninfer::ops::detail::gguf_linear_dispatch(x, w, y, ws, nullptr);
+            require(cudaDeviceSynchronize() == cudaSuccess, "GSQ CUDA product");
+            output.copy_to_host(result.data(), output_bytes, kOutputGuardBytes);
+            std::array<std::uint8_t, kOutputGuardBytes> prefix, suffix;
+            output.copy_to_host(prefix.data(), prefix.size());
+            output.copy_to_host(suffix.data(), suffix.size(), kOutputGuardBytes + output_bytes);
+            const auto canary = [](std::uint8_t value) { return value == 0xa5; };
+            require(std::all_of(prefix.begin(), prefix.end(), canary) &&
+                        std::all_of(suffix.begin(), suffix.end(), canary),
+                    "GSQ public output guard changed");
+            std::printf("GGUF_OUTPUT_GUARDS entry=%s tokens=%d prefix_bytes=%zu suffix_bytes=%zu PASS\n",
+                        entry.key().c_str(), tokens, prefix.size(), suffix.size());
+            float worst = 0.0f;
+            if (options.pattern == "constant") {
+                for (int token = 0; token < tokens; ++token) {
+                    for (int row = 0; row < rows; ++row) {
+                        const float value = __bfloat162float(result[static_cast<std::size_t>(token) * rows + row]);
+                        const double ref = expected[row] * column_scale(token);
+                        const float error = static_cast<float>(std::fabs(value - ref));
+                        worst = std::max(worst, error);
+                        const double tolerance = std::max(0.7, std::fabs(ref) * 0.012);
+                        if (!std::isfinite(value) || error >= tolerance) {
+                            std::fprintf(stderr,
+                                         "GSQ mismatch entry=%s T=%d token=%d row=%d got=%.9g ref=%.9g tolerance=%.9g\n",
+                                         entry.key().c_str(), tokens, token, row, value, ref, tolerance);
+                        }
+                        require(std::isfinite(value) && error < tolerance,
+                                "GSQ mixed-format tensor numerical mismatch");
+                    }
+                }
+                std::printf("real GSQ %s T=%d rows=%d K=%d max_abs_error=%.6f entry=%s object=%s PASS\n",
+                            sample->name, tokens, rows, k, worst, entry.key().c_str(),
+                            object->at("id").get_ref<const std::string&>().c_str());
+            } else {
+                require(std::all_of(result.begin(), result.end(), [](const auto& value) {
+                            return std::isfinite(__bfloat162float(value));
+                        }), "random GGUF capture contains a non-finite output");
+                std::printf("real GSQ %s T=%d rows=%d K=%d entry=%s object=%s pattern=random seed=0x6d2b79f5 BITWISE_CAPTURE\n",
+                            sample->name, tokens, rows, k, entry.key().c_str(),
+                            object->at("id").get_ref<const std::string&>().c_str());
+            }
+            if (!options.dump_output.empty()) {
+                require(!dumped_output && checked_entries == 0 && token_counts.size() == 1,
+                        "--dump-output requires exactly one selected entry and token count");
+                static_assert(sizeof(__nv_bfloat16) == 2, "BF16 capture requires two-byte elements");
+                std::ofstream dump(options.dump_output, std::ios::binary | std::ios::trunc);
+                require(bool(dump), "cannot open BF16 output capture");
+                dump.write(reinterpret_cast<const char*>(result.data()),
+                           static_cast<std::streamsize>(result.size() * sizeof(__nv_bfloat16)));
+                dump.close();
+                require(bool(dump), "cannot write complete BF16 output capture");
+                dumped_output = true;
+                std::printf("GGUF_OUTPUT_DUMP entry=%s tokens=%d rows=%d k=%d pattern=%s bytes=%zu path=%s\n",
+                            entry.key().c_str(), tokens, rows, k, options.pattern.c_str(),
+                            result.size() * sizeof(__nv_bfloat16), options.dump_output.c_str());
+            }
+            if (options.timing && (options.tokens != 0 ||
+                std::find(timing_tokens.begin(), timing_tokens.end(), tokens) != timing_tokens.end())) {
+                cudaEvent_t start_event, stop_event;
+                require(cudaEventCreate(&start_event) == cudaSuccess, "timing start event");
+                require(cudaEventCreate(&stop_event) == cudaSuccess, "timing stop event");
+                std::vector<float> times;
+                for (int rep = 0; rep < 9; ++rep) {
+                    require(cudaEventRecord(start_event) == cudaSuccess, "timing start");
+                    ninfer::ops::detail::gguf_linear_dispatch(x, w, y, ws, nullptr);
+                    require(cudaEventRecord(stop_event) == cudaSuccess, "timing stop");
+                    require(cudaEventSynchronize(stop_event) == cudaSuccess, "timing wait");
+                    float ms = 0;
+                    require(cudaEventElapsedTime(&ms, start_event, stop_event) == cudaSuccess,
+                            "timing elapsed");
+                    if (rep >= 2) { times.push_back(ms * 1000.0f); }
+                }
+                cudaEventDestroy(start_event);
+                cudaEventDestroy(stop_event);
+                std::sort(times.begin(), times.end());
+                std::printf("GGUF_NATIVE_TIMING format=%s tokens=%d rows=%d k=%d median_us=%.3f min_us=%.3f max_us=%.3f entry=%s pattern=%s\n",
+                            sample->name, tokens, rows, k, times[3], times.front(), times.back(),
+                            entry.key().c_str(), options.pattern.c_str());
+            }
+        }
+        ++checked_entries;
     }
-    }
+    require(checked_entries > 0, "CPU oracle filters selected no tensor entries");
+    require(options.dump_output.empty() || dumped_output, "BF16 capture selected no output");
 }
 
 } // namespace
 
 int main(int argc, char** argv) {
     try {
-        verify(1);   // GGUF vector decode
-        verify(16);  // GGUF integer tensor-core prefill
-        verify_gathered_columns(1);
-        verify_gathered_columns(16);
-        if (argc == 2) { verify_real_mixed_formats(argv[1]); }
+        RealOptions options;
+        if (argc == 2) {
+            throw std::invalid_argument("real GSQ check requires artifact and CPU oracle JSON");
+        }
+        for (int arg = 3; arg < argc; ++arg) {
+            const std::string name = argv[arg];
+            if (name == "--time") {
+                options.timing = true;
+            } else if (name == "--format" || name == "--entry" || name == "--tokens" ||
+                       name == "--dump-output" || name == "--pattern") {
+                require(arg + 1 < argc, "GGUF filter option is missing a value");
+                const std::string value = argv[++arg];
+                if (name == "--format") { options.format = value; }
+                if (name == "--entry") { options.entry = value; }
+                if (name == "--dump-output") {
+                    require(!value.empty(), "--dump-output requires a path");
+                    options.dump_output = value;
+                }
+                if (name == "--pattern") { options.pattern = value; }
+                if (name == "--tokens") {
+                    std::size_t end = 0;
+                    options.tokens = std::stoi(value, &end);
+                    require(end == value.size() && options.tokens > 0,
+                            "--tokens requires a positive integer");
+                }
+            } else {
+                throw std::invalid_argument("unknown GGUF test option: " + name);
+            }
+        }
+        require(options.pattern == "constant" || options.pattern == "random",
+                "--pattern must be constant or random");
+        if (!options.dump_output.empty()) {
+            require(!options.entry.empty() && options.tokens > 0,
+                    "--dump-output requires explicit --entry and --tokens");
+            require(options.dump_output != argv[1] && options.dump_output != argv[2],
+                    "BF16 output capture must differ from the artifact and CPU oracle paths");
+        }
+        require(options.pattern != "random" || options.timing || !options.dump_output.empty(),
+                "--pattern random is only available for --dump-output or --time");
+        // Filters and random captures skip the unrelated constant synthetic
+        // cases so their output cannot be mistaken for the captured evidence.
+        if (!options.filtered() && options.pattern == "constant") {
+            verify(1);   // GGUF vector decode
+            verify(16);  // GGUF integer tensor-core prefill
+            verify_gathered_columns(1);
+            verify_gathered_columns(16);
+            verify(512);
+            verify_gathered_columns(512);
+        }
+        if (argc >= 3) {
+            verify_real_mixed_formats(argv[1], argv[2], options);
+        }
         return 0;
     } catch (const std::exception& e) {
         std::fprintf(stderr, "GGUF test failed: %s\n", e.what());

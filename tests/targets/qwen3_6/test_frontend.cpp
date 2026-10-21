@@ -1227,6 +1227,35 @@ int test_text_and_image_prepare(const Frontend& frontend) {
                               thinking_data.query_begin,
                       "closed historical assistant reasoning was not indexed");
 
+    ninfer::ChatMessage action_user;
+    action_user.role = ninfer::ChatRole::User;
+    action_user.parts.push_back({.kind = ninfer::MessagePartKind::Text, .text = "read both"});
+    ninfer::ChatMessage action_call;
+    action_call.role = ninfer::ChatRole::Assistant;
+    action_call.tool_calls.push_back({.id = "read_1", .name = "read", .arguments_json = "{}"});
+    ninfer::ChatMessage result_one;
+    result_one.role = ninfer::ChatRole::Tool;
+    result_one.tool_call_id = "read_1";
+    result_one.parts.push_back({.kind = ninfer::MessagePartKind::Text, .text = "first result"});
+    ninfer::ChatMessage result_two = result_one;
+    result_two.parts[0].text = "second result";
+    ninfer::PromptInput action_input;
+    action_input.messages = {action_user, action_call, result_one, result_two};
+    const auto active_action = frontend.prepare(action_input);
+    const auto& active_action_data = FrontendFactory::inspect(active_action);
+    failures += check(active_action_data.action_begin >= active_action_data.query_end &&
+                          active_action_data.action_end > active_action_data.action_begin,
+                      "active tool call and adjacent results lost current-action protection");
+    ninfer::ChatMessage followup_user = action_user;
+    followup_user.parts[0].text = "recall the first result";
+    action_input.messages.push_back(std::move(followup_user));
+    const auto historical_action = frontend.prepare(std::move(action_input));
+    const auto& historical_action_data = FrontendFactory::inspect(historical_action);
+    failures += check(historical_action_data.action_begin == historical_action_data.query_begin &&
+                          historical_action_data.action_end == historical_action_data.query_end &&
+                          historical_action_data.query_begin > 0,
+                      "historical tool action still consumes new-user protection quota");
+
     ninfer::ChatMessage preserved_message;
     preserved_message.role = ninfer::ChatRole::User;
     preserved_message.parts.push_back(

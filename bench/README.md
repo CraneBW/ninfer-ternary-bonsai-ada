@@ -67,9 +67,12 @@ Example:
 `bf16` selects BF16 KV storage, `int8` selects INT8 group-64 KV storage, and `fp8` selects
 row-scaled E4M3 D256 KV storage.
 
-Select a backend with `--spec mtp|dflash|dflash2 --draft-tokens K` (MTP K=1..5, DFlash/DFlash2
-K=1..15); `--lm-head-draft` selects the optimized proposal head. CUDA Graph decode is
-enabled by default.
+Select a backend with `--spec mtp|dflash|dflash2 --draft-tokens K` (fixed MTP K=1..15,
+DFlash/DFlash2 K=1..15); `--lm-head-draft` selects the optimized proposal head. Adaptive/lookup
+MTP in the Engine/Serve API remains limited to a ceiling of seven; this benchmark uses a fixed
+window. CUDA Graph decode is enabled by default. For the local Qwen3.8 GSQ / RTX 4070 Ti SUPER
+profile, MTP7 remains the recommendation pending the release-profile comparison; support for MTP15
+is not a performance result.
 
 `--profile-measured` is a benchmark-only profiler boundary. It requires exactly one selected test
 and `-r 1`, synchronizes after warmup, and brackets only the measured repetition with
@@ -87,6 +90,14 @@ For a DFlash2 companion artifact:
 The benchmark disables context retention because every repetition is an independent root request.
 Schema v14 records `speculative_backend`, `draft_tokens`, and the proposal head independently;
 JSON and CSV identify DFlash2 explicitly. MTP alone reserves its extra lookahead KV margin.
+
+For configuration comparisons that must preserve generated tokens, set
+`NINFER_BENCH_TOKEN_IDS_PATH` to a fresh TSV path. After each complete public
+Engine call, the benchmark appends its label, token count and actual generated
+token IDs. Graph prime has its own label; warmup and measured calls share the
+test label. Capture occurs outside Engine phase timings and is disabled when
+the variable is unset. Compare the complete measured ID vectors between
+configurations; output-token counts alone do not establish identical output.
 
 ## Context-cost calibration
 

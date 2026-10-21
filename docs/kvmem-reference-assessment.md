@@ -209,3 +209,26 @@ K3 的位置压缩是锦上添花，但它是内核级改动 + MRoPE 适配，�
 3. **DFlash2 × KVMem 正交性结论（`docs/dflash2-kvmem-audit-20261019.md`）**：
    - DFlash2 自带 5 层局部滑窗 KV 池，与主模型 16 层全注意力 KVMem 池完全独立；所有接缝均走公开接口（`store.window_tokens(kv)`、`store.block_table(kv)`），仅生成期中段主动压缩因 `speculative_active` 守卫跳过（prefill 后重选与跨轮重选正常生效）。
 
+
+## 7. 2026-10-20 异步流水的源码复用落点
+
+本阶段按“遇到问题先看相关项目源码，能直接复用或小幅适配的优先复用”的原则实施。
+不把外部 README 的成绩或 API 名称直接当作本仓已验收能力。
+
+| 来源及读取位置 | 本次复用/适配 |
+|---|---|
+| `ecosystem/kvmem`，`faf3c22582adf9d99ff072c543ea30ca03a8e2ca`，`kvmem_runtime.cpp` 的 `prepare_native_selection`、`spill_outgoing`、`admit_incoming` | 沿用 prepare/transfer/commit 分工与源/目标归属；不以提前释放 GPU 页换取虚假空闲 |
+| `ecosystem/melis-actkv`，`182113cdbc6bbdd9ef300a84289075e761a1c075`，`kvmem_store.cpp` 的 retrieval/stratum 路径 | 继续使用已移植的 Action-LRFU 和保护顺序；搬运模式不改选页预算 |
+| 同一 ActKV 快照，`tools/llama-kvmem-server.cpp` 的 last-user query 定位及 `docs/kvmem-chat-tools-plan.md` T5 的 retrieval suffix | 当前用户轮内的工具后缀仍保护；新用户问题不再继承已结束工具动作的强保护，历史事实仍可普通检索 |
+| `ecosystem/kvmem` 同一快照，`backends/patches/ninfer-kvmem.patch` 的 `rewind_memory_query` / `restore_memory_prefix` 及 pre-query probe/replay 调度 | 借用“恢复选中历史后再计算问题”的先后关系；本仓已有正文词法候选，无需新建 probe/replay 状态机，直接复用 prefill compact/H2D/re-RoPE。仅对可移动的独占窗口提前重选，保留同一预算与保护顺序 |
+| `ecosystem/kvmem/backends/patches/ninfer-kvmem.patch`，5698–5703 的 `set_retrieval_scores` / `commit_retrieval_round`，以及 ActKV retrieval/profile 字段 | 分离本轮内容检索和历史 LRFU profile；每个完整 prompt 只提交一轮历史信号，prefill 预览不反复计热度；无词法候选时在 query_end 与回答前缀之间复用现有恢复，不复制其 query replay 状态机 |
+| [Async v2 D2H](https://github.com/paicat1/Ninfer-KVMem-Async/blob/6cfc93e8cbd0d2ac7ab49edd6448aa841bb3139e/patches/ledger42_v2_async_demote.patch) | 独立搬运流、源就绪依赖、持有源 pin/Host 目标、完成后发布与释放；本仓每批使用独立事件，默认同步 |
+| [Async in-flight demand fix](https://github.com/paicat1/Ninfer-KVMem-Async/blob/6cfc93e8cbd0d2ac7ab49edd6448aa841bb3139e/patches/ledger46_v2.1_inflight_demand_fix.patch) | 预计释放只用于需求裁决；实际分配仅用真实空闲，不足时先收割再判断。本仓首版为每池一批、16 MiB 上限 |
+| [Strata fusion spill manager](https://github.com/HairuoLiu/kvmem-strata-fusion/blob/9377c1997ea85ccc58ebdbb8dc87de6ddc77963d/kvmem_fusion/spill_manager.py)、同版本 `core.py` | 参考字节/令牌双水位及回落余量。该 Python canonical-K/SuperTile 布局与本仓 INT8 H256/native Cold 格式不同，保留已有磁盘路径和数学实现 |
+| 本仓 `LogicalKVPageStore` 已有 `materialize_transfer_destination`、`publish_transfer_destination`、`abort_transfer_destination` | H2D 直接复用现有 destination pin 与回滚 reservation，不另造 allocator |
+| `ecosystem/ninfer-kvmem-ring/src/models/qwen3_5/program/prefill.cpp`，`LOCAL FIX (mtp-bridge mapping)` 两处桥接 | 直接适配“写入 bridge 前确保 backend 映射”的修复；本仓额外将映射、RoPE、提交及 checkpoint 判断统一到压缩 KV 坐标，MTP 复用 Main 的准确逻辑页集合 |
+| `ecosystem/ninfer-all/docs/weight-conversion.md` 及 `tools/convert/` | 后续模型/gguftoninfer 相关问题优先查现有转换配方与绑定；本轮主线直接复用完整 Qwen3.8 GSQ，不重复转换权重 |
+
+外部补丁只用于机制和相关代码的适配，不整包覆盖当前树；各来源快照的文件缓存在工作区
+`.tmp/source-reuse-20261020/`。Sync 相关实现按具体问题继续定位，尚未把名称不确定的远端仓库
+写成已经移植的来源。当前生命周期与支持域以 paged-KV、CLI/serving 和本轮验证记录为准。

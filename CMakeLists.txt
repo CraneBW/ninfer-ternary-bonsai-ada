@@ -19,7 +19,7 @@ if(NOT CMAKE_CUDA_ARCHITECTURES MATCHES "^(120a|89|86|75)$")
     "'${CMAKE_CUDA_ARCHITECTURES}'")
 endif()
 
-project(ninfer LANGUAGES C CXX CUDA)
+project(ninfer VERSION 1.0.0 LANGUAGES C CXX CUDA)
 
 # --- Global settings ---------------------------------------------------------
 option(NINFER_BUILD_APPS "Build the NInfer CLI and server" ON)

@@ -32,6 +32,16 @@ int check(bool condition, const char* message) {
 
 int main() {
     int failures = 0;
+    const auto async = parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--kvmem",
+                              "--kvmem-transfer-mode", "async"});
+    failures += check(async.kvmem.async_transfers, "CLI dropped asynchronous KVMem mode");
+    failures += check(!parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--kvmem"})
+                           .kvmem.async_transfers,
+                      "CLI KVMem transfer default must stay synchronous");
+    failures += check(rejects([] {
+        (void)parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--kvmem",
+                      "--kvmem-transfer-mode", "invalid"});
+    }), "CLI accepted an invalid KVMem transfer mode");
     const auto lrfu = parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--kvmem",
                              "--kvmem-action-lrfu", "--kvmem-lrfu-lambda", "0.5",
                              "--kvmem-lrfu-top-frac", "0.9"});

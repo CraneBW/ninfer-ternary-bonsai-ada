@@ -29,6 +29,21 @@ ServeOptions parse(std::vector<std::string> arguments) {
 int main() {
     int failures = 0;
 
+    const auto managed = parse({"ninfer-serve", "model.ninfer", "--managed-weights",
+                                "--managed-runtime-mib", "2048"});
+    failures += check(managed.managed_weights &&
+                          managed.managed_runtime_capacity_bytes == (2ULL << 30),
+                      "explicit managed runtime budget was not preserved");
+    for (const auto& arguments : std::vector<std::vector<std::string>>{
+             {"ninfer-serve", "model.ninfer", "--managed-runtime-mib", "2048"},
+             {"ninfer-serve", "model.ninfer", "--managed-weights", "--managed-runtime-mib", "0"},
+             {"ninfer-serve", "model.ninfer", "--managed-weights", "--managed-runtime-mib",
+              "18446744073709551615"}}) {
+        bool rejected = false;
+        try { (void)parse(arguments); }
+        catch (const std::invalid_argument&) { rejected = true; }
+        failures += check(rejected, "invalid/unmanaged runtime budget was accepted");
+    }
     const ServeOptions defaults = parse({"ninfer-serve", "model.ninfer"});
     failures += check(defaults.allow_prefix_reuse, "prefix reuse is not enabled by default");
     failures +=
@@ -111,6 +126,23 @@ int main() {
 
     const ServeOptions kvmem = parse({"ninfer-serve", "model.ninfer", "--kvmem"});
     failures += check(kvmem.kvmem.enabled, "--kvmem did not enable the KVMem window");
+    failures += check(!kvmem.kvmem.async_transfers, "KVMem transfer default must stay synchronous");
+    for (const std::string mode : {"sync", "async"}) {
+        const auto configured = parse({"ninfer-serve", "model.ninfer", "--kvmem",
+                                         "--kvmem-transfer-mode", mode});
+        failures += check(configured.kvmem.async_transfers == (mode == "async"),
+                          "KVMem transfer mode was not retained");
+    }
+    for (const std::vector<std::string> args : {
+             std::vector<std::string>{"ninfer-serve", "model.ninfer", "--kvmem",
+                                       "--kvmem-transfer-mode", "invalid"},
+             std::vector<std::string>{"ninfer-serve", "model.ninfer",
+                                       "--kvmem-transfer-mode", "async"}}) {
+        bool rejected = false;
+        try { (void)parse(args); }
+        catch (const std::invalid_argument&) { rejected = true; }
+        failures += check(rejected, "invalid KVMem transfer mode configuration was accepted");
+    }
     // KVMem sizes its own pool: a front end that enabled it without choosing one gets an
     // automatic pool bounded by the working set, not by whatever device memory is left.
     failures += check(kvmem.kv_capacity.mode == ninfer::KvCapacityMode::Automatic &&

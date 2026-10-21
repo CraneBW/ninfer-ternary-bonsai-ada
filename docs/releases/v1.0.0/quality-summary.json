@@ -1,0 +1,278 @@
+{
+  "software_version": "1.0.0",
+  "date": "2026-10-21",
+  "state": "PASS_RELEASE_ORIGINAL6",
+  "profile": "long-context K15/R29=1",
+  "sent": 6,
+  "correct": 6,
+  "server_exit": 0,
+  "http_statuses": [
+    200,
+    200,
+    200,
+    200,
+    200,
+    200
+  ],
+  "terminal_and_usage_complete": true,
+  "original_request_sha256": [
+    "c14fa7420b6e61aa49148be1d9c99d15d6e427461560a687b1a5990cb7fb72e4",
+    "618bf495937b023627acf16492a99420a1b350cea95e59ced9fd0446cecc9f2f",
+    "7730fde4393970cfaaa1fd1e9777d9056e6f6ab901411d6c2b32dde7c2e9c00c",
+    "e9d1329ba4a589f199dbe4b5f47939afae7a65707a3b20576af14d20e5f857d5",
+    "d93ca7b366286eb8b3d8cbb0c57d0bbe927593db783d63176c89528246b4d73b",
+    "edad0bcf6e958e6ca8daa3840f78e1ff60828b26e8fb4ef2d89cb3cb90c6b0d8"
+  ],
+  "exact_expected": [
+    "ACK",
+    "silver-maple-41",
+    "amber-willow-92",
+    "copper-lotus-35",
+    "copper-lilac-28",
+    "teal-jasmine-61"
+  ],
+  "normalized_engine": {
+    "context_cache": {
+      "device_state_slots": 1,
+      "enabled": true,
+      "host_kv_capacity_bytes": 0,
+      "host_state_slots": 8,
+      "max_long_anchors_per_continuation": 2,
+      "max_private_continuations": 2,
+      "max_shared_prefixes": 4,
+      "total_device_state_slots": 2
+    },
+    "context_cost": {
+      "hardware_class": "nvidia-geforce-rtx-4070-ti-super-sm89",
+      "model_id": "qwen3.8-27b",
+      "prefill_source": "generic-default",
+      "preset_path": "",
+      "transfer_source": "generic-default",
+      "weights_id": "groupwise-int"
+    },
+    "cuda_graph": true,
+    "device": 0,
+    "kv_cache": "int8-group64",
+    "kv_capacity": 36864,
+    "kv_capacity_max_page_groups": 3328,
+    "kv_capacity_mode": "explicit",
+    "kv_capacity_page_groups": 576,
+    "log_stats_interval_ms": 5000,
+    "max_concurrency": 1,
+    "max_context": 212992,
+    "max_pending_requests": 16,
+    "pending_timeout_ms": 30000,
+    "prefill_chunk": 512,
+    "prefix_reuse": true,
+    "proposal_head": "optimized",
+    "speculative_backend": "mtp",
+    "speculative_draft_window": 15,
+    "vision": false
+  },
+  "measurements": [
+    {
+      "ttft_s": 152.591680272,
+      "request_wall_s": 152.682889963,
+      "sent_ns": 224377842983590,
+      "ended_ns": 224530525873553,
+      "usage": {
+        "completion_tokens": 2,
+        "completion_tokens_details": {
+          "reasoning_tokens": 0
+        },
+        "prompt_tokens": 212276,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_tokens": 212278
+      }
+    },
+    {
+      "ttft_s": 18.497629558,
+      "request_wall_s": 18.571500359,
+      "sent_ns": 224530534196991,
+      "ended_ns": 224549105697350,
+      "usage": {
+        "completion_tokens": 7,
+        "completion_tokens_details": {
+          "reasoning_tokens": 0
+        },
+        "prompt_tokens": 212303,
+        "prompt_tokens_details": {
+          "cached_tokens": 212269
+        },
+        "total_tokens": 212310
+      }
+    },
+    {
+      "ttft_s": 19.684832809,
+      "request_wall_s": 19.758202775,
+      "sent_ns": 224549114769859,
+      "ended_ns": 224568872972634,
+      "usage": {
+        "completion_tokens": 7,
+        "completion_tokens_details": {
+          "reasoning_tokens": 0
+        },
+        "prompt_tokens": 212335,
+        "prompt_tokens_details": {
+          "cached_tokens": 212296
+        },
+        "total_tokens": 212342
+      }
+    },
+    {
+      "ttft_s": 17.714984064,
+      "request_wall_s": 17.787146507,
+      "sent_ns": 224568882863239,
+      "ended_ns": 224586670009746,
+      "usage": {
+        "completion_tokens": 9,
+        "completion_tokens_details": {
+          "reasoning_tokens": 0
+        },
+        "prompt_tokens": 212368,
+        "prompt_tokens_details": {
+          "cached_tokens": 212328
+        },
+        "total_tokens": 212377
+      }
+    },
+    {
+      "ttft_s": 16.581921935,
+      "request_wall_s": 16.655156101,
+      "sent_ns": 224586677226098,
+      "ended_ns": 224603332382199,
+      "usage": {
+        "completion_tokens": 9,
+        "completion_tokens_details": {
+          "reasoning_tokens": 0
+        },
+        "prompt_tokens": 212403,
+        "prompt_tokens_details": {
+          "cached_tokens": 212361
+        },
+        "total_tokens": 212412
+      }
+    },
+    {
+      "ttft_s": 17.473723457,
+      "request_wall_s": 17.545897978,
+      "sent_ns": 224603340188645,
+      "ended_ns": 224620886086623,
+      "usage": {
+        "completion_tokens": 8,
+        "completion_tokens_details": {
+          "reasoning_tokens": 0
+        },
+        "prompt_tokens": 212441,
+        "prompt_tokens_details": {
+          "cached_tokens": 212396
+        },
+        "total_tokens": 212449
+      }
+    }
+  ],
+  "metrics": {
+    "llamacpp:prompt_tokens_total": 212476.0,
+    "llamacpp:prompt_seconds_total": 242.409,
+    "llamacpp:tokens_predicted_total": 42.0,
+    "llamacpp:tokens_predicted_seconds_total": 0.450736,
+    "llamacpp:requests_processing": 0.0,
+    "llamacpp:requests_deferred": 0.0,
+    "ninfer:requests_total": 6.0,
+    "ninfer:requests_completed_total": 6.0,
+    "ninfer:requests_active": 0.0,
+    "ninfer:ttft_seconds_total": 242.522,
+    "ninfer:prefix_cache_hit_tokens_total": 1061650.0,
+    "ninfer:draft_tokens_total": 90.0,
+    "ninfer:draft_accepted_tokens_total": 50.0,
+    "ninfer:computed_prefill_tokens_total": 212489.0,
+    "ninfer:committed_decode_tokens_total": 39.0,
+    "ninfer:reused_prompt_tokens_total": 1061650.0,
+    "ninfer:decode_rounds_total": 8.0,
+    "ninfer:running_requests": 0.0,
+    "ninfer:prefilling_requests": 0.0,
+    "ninfer:waiting_requests": 0.0,
+    "ninfer:materializing_requests": 0.0,
+    "ninfer:capture_pending_requests": 0.0,
+    "ninfer:device_state_occupied_slots": 2.0,
+    "ninfer:host_state_occupied_slots": 0.0,
+    "ninfer:device_main_kv_occupied_pages": 512.0,
+    "ninfer:device_backend_kv_occupied_pages": 512.0,
+    "ninfer:host_kv_occupied_bytes": 0.0,
+    "ninfer:kvmem_enabled": 1.0,
+    "ninfer:kvmem_budget_tokens": 32768.0,
+    "ninfer:kvmem_gen_reserve_tokens": 512.0,
+    "ninfer:kvmem_plans_total": 1677.0,
+    "ninfer:kvmem_compactions_total": 718.0,
+    "ninfer:kvmem_compact_skips_total": 0.0,
+    "ninfer:kvmem_stage_in_blocks_total": 2936.0,
+    "ninfer:kvmem_stage_out_blocks_total": 8552.0,
+    "ninfer:kvmem_transfer_runs_total": 2792.0,
+    "ninfer:kvmem_transfer_us_total": 2454291.0,
+    "ninfer:kvmem_async_enabled": 0.0,
+    "ninfer:kvmem_async_submitted_total": 0.0,
+    "ninfer:kvmem_async_completed_total": 0.0,
+    "ninfer:kvmem_async_discarded_total": 0.0,
+    "ninfer:kvmem_async_submit_us_total": 0.0,
+    "ninfer:kvmem_async_wait_us_total": 0.0,
+    "ninfer:kvmem_async_bytes_total": 0.0,
+    "ninfer:kvmem_async_fallbacks_total": 0.0,
+    "ninfer:kvmem_async_restore_submitted_total": 0.0,
+    "ninfer:kvmem_async_restore_us_total": 0.0,
+    "ninfer:kvmem_inflight_pages": 0.0,
+    "ninfer:kvmem_inflight_bytes": 0.0,
+    "ninfer:kvmem_scoreable_blocks_total": 717568.0,
+    "ninfer:kvmem_zero_score_blocks_total": 677748.0,
+    "ninfer:kvmem_window_tokens": 32697.0,
+    "ninfer:kvmem_host_bytes": 1199616000.0,
+    "ninfer:kvmem_host_capacity_bytes": 7649361920.0,
+    "ninfer:kvmem_cold_bytes": 5252763648.0,
+    "ninfer:kvmem_host_to_cold_spills_total": 3010.0,
+    "ninfer:kvmem_source_k_bytes": 3262955520.0,
+    "ninfer:kvmem_source_k_file_capacity_bytes": 3813292032.0,
+    "ninfer:kvmem_source_k_staging_bytes": 2297856.0,
+    "ninfer:kvmem_source_k_captures_total": 11496.0,
+    "ninfer:kvmem_source_k_rebuilds_total": 36998.0,
+    "ninfer:kvmem_history_replay_tokens_total": 185836.0,
+    "ninfer:kvmem_query_replay_tokens_total": 162.0,
+    "ninfer:kvmem_history_replay_rounds_total": 6.0,
+    "ninfer:kvmem_history_reused_tokens_total": 10240.0,
+    "ninfer:kvmem_replay_checkpoint_capacity_bytes": 615817216.0,
+    "ninfer:kvmem_async_split_batches_total": 0.0,
+    "ninfer:kvmem_nvme_prefetch_submitted_total": 0.0,
+    "ninfer:kvmem_nvme_prefetch_completed_total": 0.0,
+    "ninfer:kvmem_nvme_prefetch_wait_us_total": 0.0,
+    "ninfer:physical_prefill_tokens_total": 398487.0,
+    "ninfer:host_kv_capacity_bytes": 0.0,
+    "ninfer:managed_runtime_budget_limit_bytes": 0.0,
+    "ninfer:capture_skips_total": 6.0,
+    "ninfer:capture_skips{reason=\"cancelled\"}": 0.0,
+    "ninfer:capture_skips{reason=\"nothing_to_publish\"}": 0.0,
+    "ninfer:capture_skips{reason=\"invalid_pressure\"}": 0.0,
+    "ninfer:capture_skips{reason=\"physical_peak\"}": 0.0,
+    "ninfer:capture_skips{reason=\"transaction_busy\"}": 0.0,
+    "ninfer:capture_skips{reason=\"private_baseline_unavailable\"}": 0.0,
+    "ninfer:capture_skips{reason=\"no_admissible_plan\"}": 6.0,
+    "ninfer:capture_skips{reason=\"terminal\"}": 0.0,
+    "ninfer:capture_skips{reason=\"unspecified\"}": 0.0
+  },
+  "server_binary_sha256": "e7a13af583f4e30ce5dc32a086f7131099d7c7a85e6e0cbec996c2d66a358e42",
+  "service": {
+    "unit": "ninfer-v1-original6-long-profile",
+    "session": 56958,
+    "exit": 0,
+    "runtime_s": 248.36,
+    "cpu_s": 259.21,
+    "memory_peak": "16.9G",
+    "swap_peak": "329.5M",
+    "MemoryMax": "20G",
+    "MemorySwapMax": "2G",
+    "sent": 6,
+    "correct": 6
+  },
+  "TTFT_scope": "single final-profile six-request sample, no paired TTFT speedup or new P4 claim",
+  "first_request_ttft_s": 152.591680272,
+  "later_five_ttft_median_s": 17.714984064
+}

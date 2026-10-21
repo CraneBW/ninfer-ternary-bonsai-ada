@@ -34,6 +34,15 @@ example `--managed-weights --max-context 1024 --kv-capacity 1024
 --max-concurrency 1 --host-kv-mib 256 --no-cuda-graph`. Default CUDA weight
 allocations are unchanged when this flag is absent.
 
+`--managed-runtime-mib N` sets the managed runtime budget ceiling explicitly
+(default1024MiB). It requires `--managed-weights`, rejects zero/overflow, and
+retains512MiB of initially free device memory before materializing managed
+weights. The capacity curve still admits only what fits; the ceiling is not an
+extra allocation or a guarantee of resident weights. For the existing Qwen3.8
+W32K configuration, `--managed-weights --managed-runtime-mib 2048` admits the
+original64K request with36864physical KV tokens. Larger full-KV diagnostics can
+use an explicit ceiling without a separately modified registry executable.
+
 When `--kvmem` is enabled, previously evicted KV pages are kept in a
 pinned Host arena, which preserves its original size by default.
 Set `NINFER_KVMEM_HOST_PAGES` to a positive number of full KV pages to
@@ -45,6 +54,27 @@ selected for attention, with historical closed-thinking pages preferred
 for spilling over ordinary context. System/tool prefixes and active
 agent-action pages retain their protection.
 
+The global `--host-kv-mib` payload pool is separate from the KVMem archive
+bounded by `NINFER_KVMEM_HOST_PAGES`. In KVMem mode, logical page descriptors
+cover the configured logical context independently of that global payload pool;
+request admission charges retained payload to its actual owner. R22 qualified
+the original six 213K requests with `--host-kv-mib 0`, a 32K working window,
+36864 physical KV tokens, and the existing independent KVMem archive and
+StateImage pools. Same-binary ABBAAB subsequently passed all 36 original
+requests: the later-five-query TTFT sum decreased by a paired median 2.262371%,
+while the first long-prefill TTFT showed no stable gain. This does not disable
+the other Host allocations or prove an 8 GiB RSS reduction. The earlier 64K qualification used 2048 MiB global Host KV
+and a 16-page KVMem archive; that historical setting is no longer a required
+descriptor/admission workaround. Ordinary non-KVMem Host payload accounting is
+unchanged.
+On a system where `/tmp` is tmpfs, set `NINFER_KVMEM_COLD_DIR` to the intended
+NVMe mount before calling the file tier an NVMe test.
+
+For the local 4070 Ti SUPER operating rules, including graceful shutdown and
+the 256 MiB free-VRAM floor, see
+[local CUDA service operations](maintainer/cuda-service-operations.md).
+
+
 With `C=2` and two extra Device checkpoint slots, the process owns two active StateImage guarantees
 plus a global pool of two Device-resident checkpoints. Eight pinned Host State slots and 8 GiB of
 pinned Host KV retain inactive continuations under Device pressure. Active request capacity is two.
@@ -54,7 +84,10 @@ selection with `--spec dflash --draft-tokens 7 --lm-head-draft`. Qwen3.8-27B
 artifacts with DFlash2 companion weights also support `--spec dflash2 --draft-tokens 7`, with
 `--lm-head-draft` optional. DFlash2 accepts draft counts 1..15 and supports the same sampling,
 concurrency, prefix reuse, and image/video request surfaces. It may remain combined with
-`--vision`.
+`--vision`. Fixed MTP accepts draft counts `1..15`; adaptive or lookup MTP remains limited to
+`1..7` (adaptive MTP requires a ceiling of at least three). The local Qwen3.8 GSQ / RTX 4070 Ti
+SUPER recommendation remains fixed MTP7 with the optimized proposal head until the release-profile
+comparison selects a replacement. A supported draft count is not a measured speed or quality guarantee.
 
 When `--model-id` is omitted, the server advertises and accepts the loaded container's exact
 `identity.model_id`. An explicit `--model-id` remains a public HTTP alias override and does not
@@ -911,10 +944,11 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--kvmem-action-lrfu` | protect latest query/action span and rank history by decayed retrieval evidence | off |
 | `--kvmem-lrfu-lambda F` | LRFU exponential decay in range 0..1 | `0.5` |
 | `--kvmem-lrfu-top-frac F` | retain strongest positive score fraction in range (0,1] | `0.9` |
+| `--kvmem-transfer-mode sync\|async` | synchronous transfers or experimental bounded D2H/H2D pipeline | `sync` |
 | `--spec mtp\|dflash\|dflash2` | speculative backend | off |
-| `--draft-tokens N` | MTP `1..7`; DFlash/DFlash2 `1..15` | unset |
-| `--adaptive-mtp` | MTP verifies `3..--draft-tokens` drafts per round, chosen per request from measured draft survival and round cost | off |
-| `--lookup-ngram` | MTP drafts an earlier occurrence's continuation when the last eight tokens repeat, which is what copied text needs | off |
+| `--draft-tokens N` | fixed MTP `1..15`; adaptive/lookup MTP ceiling `1..7`; DFlash/DFlash2 `1..15` | unset |
+| `--adaptive-mtp` | MTP ceiling `3..7`; verifies `3..--draft-tokens` drafts per round from measured draft survival and round cost | off |
+| `--lookup-ngram` | MTP ceiling at most `7`; drafts an earlier occurrence's continuation when the last eight tokens repeat | off |
 | `--lm-head-draft` | optimized proposal head | off |
 | `--default-max-tokens N` | output limit when omitted by a request | `8192` |
 | `--default-thinking-budget N` | positive thinking cap inherited by thinking-enabled requests | unset |
@@ -956,17 +990,23 @@ context, which a device pool below the context always exceeds, so pass `--kvmem-
 
 KVMem scores four independent 16-token mean-key centroids per 64-token KV page.
 With `--kvmem-action-lrfu`, the latest captured query span has priority over the retrieval quota,
-and positive retrieval hits accumulate with exponential decay across compactions.
+and positive retrieval hits enter a decayed history profile once per completed
+prompt, rather than once per prefill compaction.
 These options can also be set with `NINFER_KVMEM_ACTION_LRFU=1`,
 `NINFER_KVMEM_LRFU_LAMBDA`, and `NINFER_KVMEM_LRFU_TOP_FRAC`. The retrieval index
 remains host-resident for evicted pages. With Action-LRFU, the frontend marks complete
 historical assistant `<think>...</think>` spans based on the rendered prompt's actual
 token positions. Pages fully inside those spans are ranked below standard context;
 mixed pages retain the standard tier, and a current action span always takes priority.
+Only a tool call/result group after the latest user message belongs to that
+current action. Once a new user question starts, older tool results return to
+ordinary retrievable history instead of consuming its protected quota.
 The serialized system and tool-definition prefix remains pinned even when it exceeds
 the automatic sink size. A window too small to retain it reports a capacity error.
-Retrieval scores combine recency for shallow attention layers with content similarity
-for deeper layers.
+Current retrieval uses content cosine similarity at all indexed attention layers.
+Historical LRFU heat is a separate profile score; previewing a partially available
+query neither advances its decay clock nor adds another hit. Sink, action and
+recent bands retain their existing positional protection.
 
 `--kvmem` sizes its own pool when neither `--kv-capacity` nor `--kv-device-tokens` is given: the
 automatic resolution is pinned to the working set the runtime asks for -- one window per lane,
@@ -1008,6 +1048,106 @@ address order so consecutive physical device pages and adjacent host slots merge
 multi-page transfer runs (`ninfer:kvmem_transfer_runs_total` and `ninfer:kvmem_transfer_us_total`
 in `GET /metrics`; `KVMEM_RESELECT=1` logs `KVMEM_RESELECT blocks=<n> stage_out=<n> stage_in=<n>
 runs=<n> transfer_us=<n> window=<n>` per compaction on stderr).
+
+`--kvmem-transfer-mode async` supports one active text request and INT8 KV.
+Qwen3.8 GSQ base, CUDA Graph, MTP and DFlash2 have targeted same-token/lifetime
+comparisons. Higher concurrency and Vision combinations explicitly reject it.
+Host transfers split large transactions into at most16MiB submissions. Earlier
+D2H sub-batches complete inside the exclusive compaction step; only the final
+sub-batch may stay pending across an Engine boundary, holding source pins and
+reserved Host targets until completion and epoch/coverage verification. Required
+pure-Host H2D copies also split, overlap the final sub-batch with independent
+resident rephase, and wait before restored-page rephase/table publication.
+NVMe-backed restores read ahead at most two pages using owned futures; a third
+fixed staging page serves outgoing Cold writes. Source records and buffers stay
+owned until I/O and GPU reads end. Cold consumers, partial pages and other
+ineligible cases can still wait or fall back; immutable-source K remains a
+separate single-page synchronous path. Final pending copies retire before a
+reusable checkpoint; shutdown/cancellation drain started accesses.
+
+MTP retains its independent full-context/provisional pool claim, while Main
+charges the configured speculative growth reserve plus provisional lead to real
+physical capacity, without shrinking the selected history window. A speculative
+batch still cannot compact its live geometry: increase `--kvmem-gen-reserve`
+and physical capacity together or reduce output if the funded tail is exhausted.
+The short integration results do not establish arbitrary-length speculative
+or multimodal acceptance.
+During prefill reselection MTP follows Main's exact logical history page IDs and
+packed slots. Checkpoint readiness and MTP bridge mapping/positions use the
+compacted KV frontier; history matching and input slicing use the original token
+ledger. Short-text lexical evidence can therefore be restored before the current
+question through the same sync/async page path. Short lexical candidates rank
+by their rarest anchor frequency before combined hit weight, so repeated words
+from old questions do not outweigh a more specific subject. Equal matches prefer
+the newest occurrence; older tied matches rank behind other optional pages in
+the retrieval/profile fill, while mandatory protections still win.
+
+For a movable, private text history exceeding its window, with the latest
+query not already inside the reused prefix and its suffix bounded by prefill
+chunk size, the runtime probes the complete query without sampling, rolls back
+probe KV and freezes Q. It reconstructs the exact selected original-token view
+with native StateImage reset and prefill, invalidating old source/replica/mean
+state, then replays the unchanged query and samples. Prompt usage/progress is
+counted once; internal replay is separately charged to admission service work.
+Up to four distinct rare-anchor signatures retain alternatives when a previous
+question template ties a real name; only identical signatures are old versions.
+Fixed/shared geometry and unbounded tool/media suffixes retain their existing
+qualified paths rather than silently entering this reconstruction.
+
+With an explicit KVMem window of at least4096tokens, startup also funds four
+complete pinned Host StateImages per lane. Canonical replay checkpoints at
+window fractions1/16,1/8,1/4 and the last full chunk are aligned down to
+prefill_chunk; zero/unreached boundaries are skipped. Reuse requires the same
+address generation and identical original token IDs/positions throughout the
+prefix. The retained K is restored from that canonical epoch's immutable source;
+only the suffix revokes old coverage/source/means and rebuilds. Writes before a
+cached boundary invalidate it. These images are a separate fixed Host budget
+(587.29MiB/lane for this Qwen3.8), not extra Device KV or a compressed-timeline
+snapshot. Unmatched histories still require reconstruction.
+
+A retained compressed private branch cannot use a resident-page-only prefix
+Fork: that copy does not inherit the full archive/source directory. Such a
+reuse candidate is skipped before mutation; the request can rebuild from root
+while preserving the original session. Normal sequential Consume/Move keeps
+its original archive owner.
+
+`ninfer:host_kv_capacity_bytes` describes the global Host context-cache arena;
+`ninfer:kvmem_host_capacity_bytes`/`kvmem_host_bytes` describe the separate
+ordinary KVMem archive arena. `kvmem_source_k_bytes` is live immutable K backing,
+`kvmem_source_k_file_capacity_bytes` includes reusable file slots,
+`kvmem_source_k_staging_bytes` is its pinned staging payload, and source
+`captures_total`/`rebuilds_total` count actual operations. Backing-file bytes
+are not a unified resident-RAM budget: /tmp is tmpfs on this host; /home backing
+uses NVMe and may still have OS page-cache occupancy.
+
+`kvmem_history_replay_tokens_total`, `kvmem_query_replay_tokens_total` and
+`kvmem_history_replay_rounds_total` expose extra model work. The original
+`computed_prefill_tokens` counter tracks logical uncached prompt work;
+`ninfer:physical_prefill_tokens_total` adds internal history/query replay.
+It counts main-model token positions once, not per typed pool, FLOPs or decode
+speculative work.
+`cached_tokens` still denotes the logical reuse frontier, not all computation
+avoided. `kvmem_history_reused_tokens_total` reports actual canonical-prefix
+computation avoided, while `kvmem_replay_checkpoint_capacity_bytes` reports the
+fixed Host payload. `kvmem_async_split_batches_total` counts earlier completed
+sub-batches; `kvmem_nvme_prefetch_submitted_total`, `completed_total` and
+`wait_us_total` report file-layer read-ahead, consumption and future-get time.
+`managed_runtime_budget_limit_bytes` reports the configured managed
+ceiling, not current free VRAM or the exact arena allocation.
+
+`ninfer:kvmem_transfer_us_total` retains synchronized transfer-phase wall time;
+background submissions are reported separately by `kvmem_async_submit_us_total`,
+with uncovered blocking wait in `kvmem_async_wait_us_total`. The completed H2D
+phase (including overlapped resident rephase) is separately recorded as
+`kvmem_async_restore_us_total`; it is not added to the legacy synchronized
+transfer metric. `kvmem_async_restore_submitted_total` identifies H2D batches.
+The async submitted,
+completed, discarded, bytes and fallback counters and the `kvmem_inflight_pages`
+and `kvmem_inflight_bytes` gauges distinguish work in flight from free capacity.
+Discard means an address no longer needs that pending batch; its started copy
+still drains before its source, target and quota are released. Submission time
+is not copy-completion time. This experimental mode has no end-to-end speedup
+claim and does not change the selected history window or its recall limits.
 
 `--max-context` may exceed the model's native 262,144-token rotary window, up to twice it (524,288
 tokens). Past the native window the text RoPE divisors are published once at startup with the YaRN

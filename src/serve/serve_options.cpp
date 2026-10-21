@@ -87,14 +87,15 @@ std::string serve_usage_text(const char* argv0) {
            "--cache-type-k <bf16|int8|fp8|nvfp4|int4|int4-e8> "
            "--cache-type-v <bf16|int8|fp8|nvfp4|int4>] "
            "[--kvmem [--kvmem-budget N] [--kvmem-gen-reserve N] "
-           "[--kvmem-action-lrfu] [--kvmem-lrfu-lambda F] [--kvmem-lrfu-top-frac F]] "
+           "[--kvmem-action-lrfu] [--kvmem-lrfu-lambda F] [--kvmem-lrfu-top-frac F] "
+           "[--kvmem-transfer-mode sync|async]] "
            "[--spec mtp|dflash|dflash2 --draft-tokens N] "
            "[--adaptive-mtp] [--lookup-ngram] [--default-max-tokens N] [--default-thinking-budget N] "
            "[--vision] [--vision-max-tokens N] [--no-cuda-graph] [--no-prefix-reuse] "
            "[--lm-head-draft] [--no-thinking] [--preserve-thinking] "
            "[--tolerant-tool-calls] [--cors] "
            "[--temperature F] [--top-p F] [--top-k N] [--min-p F] [--presence-penalty F] "
-           "[--frequency-penalty F] [--seed N] [--greedy] [--wddm-evictable-budget] [--managed-weights]\n"
+           "[--frequency-penalty F] [--seed N] [--greedy] [--wddm-evictable-budget] [--managed-weights] [--managed-runtime-mib N]\n"
            "       [--log-level trace|debug|info|warning|error|critical|off]\n"
            "       serves OpenAI Responses/Chat Completions and Anthropic Messages endpoints\n"
            "       --default-max-tokens defaults to " +
@@ -154,7 +155,9 @@ std::string serve_usage_text(const char* argv0) {
            "GPUs, ignoring the WDDM process budget (Windows only; the GPU must not drive a "
            "concurrent desktop GPU workload)\n"
            "       --managed-weights demand-pages model weights through CUDA Unified Memory; "
-           "may load models exceeding VRAM, with slower generation and system RAM requirements\n";
+           "may load models exceeding VRAM, with slower generation and system RAM requirements\n"
+           "       --managed-runtime-mib sets an explicit managed runtime ceiling (default 1024), "
+           "bounded by initially free VRAM minus 512 MiB; requires --managed-weights\n";
 }
 
 ServeOptions parse_serve_options(int argc, char** argv) {
@@ -181,6 +184,7 @@ ServeOptions parse_serve_options(int argc, char** argv) {
     bool kvmem_gen_reserve_given     = false;
     std::uint32_t kvmem_gen_reserve  = 0;
     bool kvmem_action_lrfu           = false;
+    std::optional<bool> kvmem_async_transfers;
     std::optional<double> kvmem_lrfu_lambda;
     std::optional<double> kvmem_lrfu_top_fraction;
     std::optional<KvKeyStorage> kv_key_storage;
@@ -357,6 +361,12 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             kvmem_gen_reserve_given = true;
         } else if (arg == "--kvmem-action-lrfu") {
             kvmem_action_lrfu = true;
+        } else if (arg == "--kvmem-transfer-mode") {
+            const std::string_view mode(require_value("--kvmem-transfer-mode"));
+            if (mode != "sync" && mode != "async") {
+                throw std::invalid_argument("--kvmem-transfer-mode must be sync or async");
+            }
+            kvmem_async_transfers = mode == "async";
         } else if (arg == "--kvmem-lrfu-lambda") {
             kvmem_lrfu_lambda =
                 parse_float_in(require_value("--kvmem-lrfu-lambda"), "kvmem-lrfu-lambda", 0.0F, 1.0F);
@@ -439,11 +449,20 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             options.wddm_evictable_budget = true;
         } else if (arg == "--managed-weights") {
             options.managed_weights = true;
+        } else if (arg == "--managed-runtime-mib") {
+            const auto mib = parse_u64(require_value("--managed-runtime-mib"), "managed-runtime-mib");
+            if (mib == 0 || mib > std::numeric_limits<std::size_t>::max() / (1ULL << 20)) {
+                throw std::invalid_argument("--managed-runtime-mib is out of range");
+            }
+            options.managed_runtime_capacity_bytes = static_cast<std::size_t>(mib << 20);
         } else if (arg == "--log-level") {
             options.log_level = product::parse_log_level(require_value("--log-level"));
         } else {
             throw std::invalid_argument("unknown argument: " + arg);
         }
+    }
+    if (options.managed_runtime_capacity_bytes != 0 && !options.managed_weights) {
+        throw std::invalid_argument("--managed-runtime-mib requires --managed-weights");
     }
     if (kv_capacity_explicit && kv_device_tokens_explicit) {
         throw std::invalid_argument("--kv-capacity and --kv-device-tokens cannot be combined");
@@ -451,6 +470,12 @@ ServeOptions parse_serve_options(int argc, char** argv) {
     options.kvmem = resolve_kvmem_options(kvmem_switch, kvmem_budget_given, kvmem_budget,
                                           kvmem_gen_reserve_given, kvmem_gen_reserve);
     options.kvmem.action_lrfu |= kvmem_action_lrfu;
+    if (kvmem_async_transfers) {
+        if (!options.kvmem.enabled) {
+            throw std::invalid_argument("--kvmem-transfer-mode needs --kvmem");
+        }
+        options.kvmem.async_transfers = *kvmem_async_transfers;
+    }
     if (kvmem_lrfu_lambda) { options.kvmem.lrfu_lambda = *kvmem_lrfu_lambda; }
     if (kvmem_lrfu_top_fraction) {
         options.kvmem.lrfu_top_fraction = *kvmem_lrfu_top_fraction;

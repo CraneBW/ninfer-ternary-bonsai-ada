@@ -439,9 +439,12 @@ void assign_retention_spans(
         }
     }
     // A tool result is actionable together with the immediately preceding
-    // assistant call. Preserve the last call/result group; the system/tool
+    // assistant call. Preserve the last call/result group in the current user
+    // turn (as in ActKV's last-user retrieval suffix), not a completed historical
+    // action after a new user question. The system/tool
     // definitions are preserved separately by the existing sink band.
     for (std::size_t i = roles.size(); i > 0; --i) {
+        if (roles[i - 1U] == ChatRole::User) { break; }
         if (roles[i - 1U] != ChatRole::Tool || !boundaries[i]) { continue; }
         std::size_t begin = i - 1U;
         while (begin > 0 && roles[begin - 1U] == ChatRole::Tool) { --begin; }
@@ -1625,6 +1628,17 @@ PreparedPrompt Frontend::prepare(PromptInput input, const PreparationControl& co
     }
     (void)checked_token_count(result.token_ids.size());
     assign_query_span(result, message_boundaries, query_message);
+    if (!has_media && query_message >= 0 && result.query_end - result.query_begin <= 128) {
+        // Retention scoring keeps its existing serialized query span. Lexical
+        // matching must not count the role header or special chat delimiters
+        // as rare evidence, so encode only the actual message content.
+        const auto content = messages[static_cast<std::size_t>(query_message)].rendered_content();
+        auto encoded = impl_->tokenizer->encode_with_boundaries(
+            content.text, {}, fi::EncodeOptions{.max_tokens = 129}, content.literal_spans);
+        if (encoded.input_ids.size() <= 128) {
+            result.lexical_query_token_ids = std::move(encoded.input_ids);
+        }
+    }
     assign_retention_spans(result, *impl_->tokenizer, message_roles,
                            assistant_tool_calls, message_boundaries);
     result.identity.reusable = true;

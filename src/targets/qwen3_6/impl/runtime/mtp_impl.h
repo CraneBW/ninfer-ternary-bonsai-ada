@@ -9,6 +9,7 @@
 #include <cuda_runtime.h>
 
 #include <stdexcept>
+#include <limits>
 
 namespace ninfer::targets::qwen3_6::detail::NINFER_QWEN36_RUNTIME_NS::schedule {
 void mtp_bridge_and_propose(PrefillContext& state, const Tensor& next_token,
@@ -29,6 +30,21 @@ void mtp_bridge_and_propose(PrefillContext& state, const Tensor& next_token,
                      state.mtp_cache);
     configure_text_card(card, state.execution, state.sampling, state.state_source_slot,
                         state.state_destination_slot, state.mtp_proposal_extent);
+    card.set_original_kv_positions(state.original_kv_positions);
+    if (state.original_kv_positions) {
+        // Callers supply compact `position` and original three-axis RoPE. The
+        // plain-text donor mode needs the same delta for every following AR step.
+        if (rope_position[0] != rope_position[1] || rope_position[0] != rope_position[2]) {
+            throw std::invalid_argument("original-position MTP bridge currently requires plain text");
+        }
+        const auto delta = static_cast<std::int64_t>(rope_position[0]) - position;
+        if (delta < std::numeric_limits<std::int32_t>::min() ||
+            delta > std::numeric_limits<std::int32_t>::max()) {
+            throw std::overflow_error("MTP bridge effective RoPE delta exceeds int32");
+        }
+        ops::set_i32_scalar(state.execution.io.rope_delta, static_cast<std::int32_t>(delta),
+                            state.execution.device.stream);
+    }
 
     Tensor position_view = state.execution.io.mtp->target_positions.slice(0, 0, 1);
     ops::set_i32_scalar(position_view, position, state.execution.device.stream);
@@ -95,6 +111,9 @@ auto mtp_decode_batch_body(MtpBatchContext& state, std::int32_t batch_size,
         card.set_attn_scale(state.execution.attn_scale);
         Tensor anchors            = frame.anchors.slice(0, 0, batch_size);
         Tensor frontiers          = frame.base_frontiers.slice(0, 0, batch_size);
+        const bool original_positions = state.host_ingress.original_kv_positions != 0;
+        Tensor logical_frontiers = original_positions
+            ? frame.logical_frontiers.slice(0, 0, batch_size) : frontiers;
         Tensor budgets            = frame.remaining_budgets.slice(0, 0, batch_size);
         Tensor current_extents    = frame.current_extents.slice(0, 0, batch_size);
         Tensor target_valid       = frame.target_valid_columns.slice(0, 0, batch_size);
@@ -144,7 +163,7 @@ auto mtp_decode_batch_body(MtpBatchContext& state, std::int32_t batch_size,
                                      .target_tokens           = target_tokens,
                                      .drafts                  = current_drafts,
                                      .current_extents         = current_extents,
-                                     .frontiers               = frontiers,
+                                     .frontiers               = logical_frontiers,
                                      .anchors                 = anchors,
                                      .licensed_tokens         = licensed_tokens,
                                      .licensed_counts         = licensed_counts,
@@ -171,7 +190,8 @@ auto mtp_decode_batch_body(MtpBatchContext& state, std::int32_t batch_size,
                 alignment_ids, next_extents, ar_positions, ar_rope_positions, ar_valid_columns,
                 static_cast<std::int32_t>(proposal_drafts),
                 static_cast<std::int32_t>(state.text_cache.max_context()),
-                state.execution.device.stream);
+                state.execution.device.stream,
+                original_positions ? &logical_frontiers : nullptr);
             card.mtp_forward_decode_batch(alignment_ids, target_hidden, target_positions,
                                           target_rope, licensed_counts, mtp_rows, envelopes.batch,
                                           alignment_hidden);

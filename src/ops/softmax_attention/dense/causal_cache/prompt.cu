@@ -6,12 +6,29 @@
 #include "ops/kv_cache/append/launch.h"
 #include "ops/softmax_attention/dense/causal_cache/prompt_bf16.cuh"
 #include "ops/softmax_attention/dense/causal_cache/prompt_i8.cuh"
+#include "ops/softmax_attention/dense/causal_cache/prompt_i8_pipeline.cuh"
 #include "core/device.h" // CUDA_CHECK
 
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <stdexcept>
 
 namespace ninfer::ops::detail {
 namespace {
+
+#if defined(NINFER_SM89)
+bool prompt_i8_pipeline_enabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("NINFER_PROMPT_I8_PIPELINE");
+        // SM89 plain INT8: qualified producer/worker pipeline; 0 restores the old schedule.
+        if (value == nullptr || std::strcmp(value, "1") == 0) { return true; }
+        if (std::strcmp(value, "0") == 0) { return false; }
+        throw std::invalid_argument("NINFER_PROMPT_I8_PIPELINE must be 0 or 1");
+    }();
+    return enabled;
+}
+#endif
 
 template <typename Geometry, typename CacheView, typename Metadata>
 void causal_attention_prompt_attention_launch_for(const Tensor& q, const Tensor& positions,
@@ -65,6 +82,22 @@ void causal_attention_prompt_attention_launch_for(const Tensor& q, const Tensor&
         if (cache.storage == KvCacheStorage::RK4V4E8 ||
             cache.storage == KvCacheStorage::RotatedInt4KeyInt4ValueGroup64) {
             launch_i8.template operator()<true, true, true, true, false>();
+        } else if (prompt_i8_pipeline_enabled()) {
+            static const cudaError_t attr_pipeline = cudaFuncSetAttribute(
+                prompt_i8_pipeline::causal_attention_prompt_i8_pipeline_kernel<Geometry, Metadata>,
+                cudaFuncAttributeMaxDynamicSharedMemorySize,
+                prompt_i8_pipeline::kCausalPromptI8SmemBytes);
+            CUDA_CHECK(attr_pipeline);
+            prompt_i8_pipeline::causal_attention_prompt_i8_pipeline_kernel<Geometry, Metadata>
+                <<<attention_grid, prompt_i8_pipeline::kCausalPromptI8Threads,
+                   prompt_i8_pipeline::kCausalPromptI8SmemBytes, stream>>>(
+                    static_cast<const __nv_bfloat16*>(q.data),
+                    static_cast<const std::int8_t*>(cache_k.data),
+                    static_cast<const std::uint8_t*>(cache_v.data),
+                    static_cast<const __half*>(cache_k_scale.data),
+                    static_cast<const __half*>(cache_v_scale.data), metadata,
+                    static_cast<const std::int32_t*>(positions.data), scale,
+                    static_cast<__nv_bfloat16*>(out.data), tokens);
         } else {
             launch_i8.template operator()<false, false, false, false, false>();
         }

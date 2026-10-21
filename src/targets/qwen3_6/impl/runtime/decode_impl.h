@@ -29,6 +29,10 @@ auto ordinary_batch_body(OrdinaryBatchContext& state, std::int32_t batch_size,
 
         Tensor tokens             = ordinary.tokens.slice(0, 0, batch_size);
         Tensor cache_positions    = ordinary.cache_positions.slice(0, 0, batch_size);
+        // The mode is frozen before graph capture. Keep the legacy RNG key
+        // unchanged; original-position mode supplies the logical P key, not P+1.
+        Tensor sample_positions = state.host_ingress.original_kv_positions != 0
+            ? ordinary.sample_positions.slice(0, 0, batch_size) : cache_positions;
         Tensor rope_positions     = ordinary.rope_positions.slice(0, 0, batch_size);
         Tensor kv_rows            = ordinary.text_kv_table_rows.slice(0, 0, batch_size);
         Tensor state_sources      = ordinary.state_source_slots.slice(0, 0, batch_size);
@@ -41,7 +45,7 @@ auto ordinary_batch_body(OrdinaryBatchContext& state, std::int32_t batch_size,
                                    state_destinations, envelope, hidden, logits);
         ops::scatter(hidden, state_destinations, state.continuation_hidden_store,
                      state.execution.device.stream);
-        ops::sample(logits, sampled, TextConfig::token_domain, ordinary.sampling, cache_positions,
+        ops::sample(logits, sampled, TextConfig::token_domain, ordinary.sampling, sample_positions,
                     ops::kSamplePurposeDecode, state.execution.work, state.execution.device.stream);
         CUDA_CHECK(cudaMemcpyAsync(&state.host_egress, ordinary.egress.data,
                                    sizeof(qwen3_6::OrdinaryDecodeEgress), cudaMemcpyDeviceToHost,

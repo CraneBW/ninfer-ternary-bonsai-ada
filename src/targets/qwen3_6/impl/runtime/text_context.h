@@ -172,6 +172,7 @@ public:
     }
 
     void set_sampling(const ops::SamplingConfig* config) noexcept { sampling_config_ = config; }
+    void set_original_kv_positions(bool enabled) noexcept { original_kv_positions_ = enabled; }
 
     // YaRN stretches the rotary window past the native one and rescales the dot-product scalar by
     // the temperature multiplier that comes with it (see yarn.h).
@@ -321,6 +322,7 @@ private:
     std::uint32_t text_kv_base_;
     // Cache-slot/RoPE shift applied to `text_kv_base_` (see PrefillContext::text_kv_offset).
     std::int32_t text_kv_offset_ = 0;
+    bool original_kv_positions_ = false;
     // Dot-product scale of the attention kernels: kAttnScale, or kAttnScale times the YaRN
     // temperature multiplier once the context is extended past the native window.
     float attn_scale_ = kAttnScale;

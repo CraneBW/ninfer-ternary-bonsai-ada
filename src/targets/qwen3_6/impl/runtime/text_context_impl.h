@@ -1124,6 +1124,9 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
     const int T              = static_cast<int>(ids.size());
     const int chunk          = static_cast<int>(prefill_chunk_);
     const std::uint32_t base = text_kv_base_;
+    if (original_kv_positions_ && multimodal != nullptr) {
+        throw std::invalid_argument("original-position KV prefill currently requires plain text");
+    }
 
     if (text_prefill != nullptr) {
         if (multimodal != nullptr || base != text_prefill->begin ||
@@ -1146,7 +1149,15 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
     } else if (text_kv_base_ == 0) {
         rope_delta_ = 0;
     }
-    ops::set_i32_scalar(io_.rope_delta, rope_delta_, s);
+    // KVMem donor's cache_position_shift is -text_kv_offset_ here: C=P+O,
+    // so the existing AR helper needs r=C+(delta-O), independent of packed slots.
+    const std::int64_t effective_rope_delta = original_kv_positions_
+        ? static_cast<std::int64_t>(rope_delta_) - text_kv_offset_ : rope_delta_;
+    if (effective_rope_delta < std::numeric_limits<std::int32_t>::min() ||
+        effective_rope_delta > std::numeric_limits<std::int32_t>::max()) {
+        throw std::overflow_error("TextContext effective RoPE delta exceeds int32");
+    }
+    ops::set_i32_scalar(io_.rope_delta, static_cast<std::int32_t>(effective_rope_delta), s);
 
     // Prefix-append prefill continues an existing cache: positions are absolute (start at the
     // resident length) and KV/GDN state is not reset. For a reset prefill base == 0.
@@ -1154,8 +1165,8 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
         static_cast<std::uint64_t>(std::numeric_limits<std::int32_t>::max())) {
         throw std::overflow_error("TextContext::prefill absolute position exceeds int32");
     }
-    // Cache slots and RoPE positions of a KVMem-compacted lineage are shifted away from the
-    // prompt index; every other use of `base` above stays in prompt space.
+    // Cache slots shift from prompt space. Legacy mode also shifts RoPE; the new
+    // original-timeline mode keeps RoPE in prompt space throughout the lineage.
     const int kv_base_i = static_cast<int>(base + static_cast<std::uint32_t>(text_kv_offset_));
 
     const std::int64_t base64    = static_cast<std::int64_t>(base);
@@ -1204,7 +1215,8 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
                 }
             }
 
-            const std::int32_t rope_axes = multimodal != nullptr ? 3 : (rope_delta_ != 0 ? 1 : 0);
+            const std::int32_t rope_axes = multimodal != nullptr ? 3
+                : ((rope_delta_ != 0 || (original_kv_positions_ && text_kv_offset_ != 0)) ? 1 : 0);
             const auto roots             = workspace_recipe::text_prefill_roots<TextConfig>(
                 work_, len, rope_axes, static_cast<std::int32_t>(local_scatter_indices.size()));
             Tensor ids_device = roots.ids;
@@ -1226,6 +1238,9 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
                                 rope_positions_host.data() + static_cast<std::size_t>(axis) * len);
                 }
                 copy_i32(rope_positions_host.data(), rope_positions, s);
+            } else if (original_kv_positions_ && text_kv_offset_ != 0) {
+                rope_positions = roots.rope_positions;
+                ops::fill_i32_positions(rope_positions, static_cast<int>(base) + t0 + rope_delta_, s);
             } else if (rope_delta_ != 0) {
                 rope_positions = roots.rope_positions;
                 ops::offset_i32_positions(positions, io_.rope_delta, rope_positions, s);
@@ -1264,8 +1279,10 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
                 // Set io_.pos to the bonus token's absolute position (base + T) before picking so
                 // the sampler RNG is keyed by it (prefill purpose keeps it distinct from the first
                 // decode step, which reuses the same io_.pos).
-                ops::set_i32_scalar(io_.pos, kv_base_i + T, s);
-                ops::set_i32_scalar(io_.rope_pos, kv_base_i + T + rope_delta_, s);
+                const int sample_position = original_kv_positions_ ? static_cast<int>(base) + T
+                                                                  : kv_base_i + T;
+                ops::set_i32_scalar(io_.pos, sample_position, s);
+                ops::set_i32_scalar(io_.rope_pos, sample_position + rope_delta_, s);
                 if (sampling_config_ != nullptr) {
                     ops::sample(logits, io_.token, kCfg.token_domain, sampling_config_, io_.pos,
                                 ops::kSamplePurposePrefill, work_, s);

@@ -90,7 +90,7 @@ std::string usage_text(const char* argv0) {
            "[--prefill-chunk N] [--max-new N]\n"
            "       [--device N] [--kvmem [--kvmem-budget N] [--kvmem-gen-reserve N] "
            "[--host-kv-mib N] [--kvmem-action-lrfu [--kvmem-lrfu-lambda F] "
-           "[--kvmem-lrfu-top-frac F]]]\n"
+           "[--kvmem-lrfu-top-frac F]] [--kvmem-transfer-mode sync|async]]\n"
            "       [--kv-dtype bf16|int8|fp8|nvfp4|k8v4|rk4v4|rk4v4-e8] "
            "[--cache-type-k bf16|int8|fp8|nvfp4|int4|int4-e8 "
            "--cache-type-v bf16|int8|fp8|nvfp4|int4]\n"
@@ -151,6 +151,7 @@ Options parse_options(int argc, char** argv) {
     bool kvmem_gen_reserve_given    = false;
     std::uint32_t kvmem_gen_reserve = 0;
     bool kvmem_action_lrfu = false;
+    std::optional<bool> kvmem_async_transfers;
     std::optional<double> kvmem_lrfu_lambda;
     std::optional<double> kvmem_lrfu_top_fraction;
     std::optional<KvKeyStorage> kv_key_storage;
@@ -194,6 +195,12 @@ Options parse_options(int argc, char** argv) {
             kvmem_gen_reserve_given = true;
         } else if (arg == "--kvmem-action-lrfu") {
             kvmem_action_lrfu = true;
+        } else if (arg == "--kvmem-transfer-mode") {
+            const std::string_view mode(value(arg));
+            if (mode != "sync" && mode != "async") {
+                throw std::invalid_argument("--kvmem-transfer-mode must be sync or async");
+            }
+            kvmem_async_transfers = mode == "async";
         } else if (arg == "--kvmem-lrfu-lambda") {
             kvmem_lrfu_lambda = parse_float(value(arg), "kvmem-lrfu-lambda", 0.0F, 1.0F);
         } else if (arg == "--kvmem-lrfu-top-frac") {
@@ -295,6 +302,12 @@ Options parse_options(int argc, char** argv) {
     options.kvmem = resolve_kvmem_options(kvmem_switch, kvmem_budget_given, kvmem_budget,
                                           kvmem_gen_reserve_given, kvmem_gen_reserve);
     options.kvmem.action_lrfu |= kvmem_action_lrfu;
+    if (kvmem_async_transfers) {
+        if (!options.kvmem.enabled) {
+            throw std::invalid_argument("--kvmem-transfer-mode needs --kvmem");
+        }
+        options.kvmem.async_transfers = *kvmem_async_transfers;
+    }
     if (kvmem_lrfu_lambda) { options.kvmem.lrfu_lambda = *kvmem_lrfu_lambda; }
     if (kvmem_lrfu_top_fraction) {
         options.kvmem.lrfu_top_fraction = *kvmem_lrfu_top_fraction;

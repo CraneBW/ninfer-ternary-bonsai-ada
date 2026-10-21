@@ -22,6 +22,20 @@ namespace ninfer::ops::detail {
 void gguf_linear_dispatch(const Tensor& x, const Weight& weight, Tensor& out,
                           WorkspaceArena& workspace, cudaStream_t stream);
 
+// IndividualGdn-only packed BF16 rows: K=5120, Q/K N=2048 at rows
+// 0/2048 or V N=6144 at row 4096, in contiguous [10240,T]. The caller
+// owns the destination; no intermediate output allocation or copy is added.
+void gguf_linear_gdn_rows_bf16_dispatch(
+    const Tensor& x, const Weight& weight, Tensor& packed, std::int32_t row_begin,
+    WorkspaceArena& workspace, cudaStream_t stream);
+
+// Main Individual MLP only: gate/up are already BF16 [17408,512].
+// The activation is explicitly BF16-RN before the unchanged GGML quantizer.
+// This writes the original projected BF16 [5120,512]; residual remains separate.
+void gguf_linear_silu_mul_down_dispatch(
+    const Tensor& gate, const Tensor& up, const Weight& weight, Tensor& projected,
+    WorkspaceArena& workspace, cudaStream_t stream);
+
 // Exact FP32 accumulation output for vocabulary ranking. Unlike BF16 logits,
 // it preserves close winners and deterministic score/id ties for TopK.
 void gguf_linear_dispatch_f32(const Tensor& x, const Weight& weight, Tensor& out,

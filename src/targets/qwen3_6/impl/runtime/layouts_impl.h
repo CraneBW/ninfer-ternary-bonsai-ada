@@ -249,6 +249,10 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
     out.sampling_config = add_tensor(
         builder, DType::I32, {config_words, static_cast<std::int32_t>(plan.max_concurrency)},
         "sampling config");
+    if (plan.kvmem.enabled) {
+        // Shared by sequential text/backend compaction, outside Graph capture.
+        out.kvmem_rerope_meta = i32(3ULL * logical_pages, "KVMem rephase metadata");
+    }
     out.bytes = builder.finish(kArenaAlign, "persistent layout");
     out.kv_payload_bytes =
         out.decoder.kv_payload_bytes() + (out.dflash ? out.dflash->kv_payload_bytes() : 0);
@@ -283,7 +287,9 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
 
     const auto text_common_root = [&](WorkspaceLayoutBuilder& layout, std::int32_t tokens) {
         (void)workspace_recipe::text_prefill_roots<TextConfig>(
-            layout, tokens, plan.features.vision ? 3 : 0, plan.features.vision ? tokens : 0);
+            // A compact text window can keep logical RoPE independently of its cache
+            // positions even without Vision. Fund that one-axis optional root.
+            layout, tokens, plan.features.vision ? 3 : 1, plan.features.vision ? tokens : 0);
     };
     const auto attention_stage = [&](WorkspaceLayoutBuilder& layout, std::int32_t first,
                                      std::int32_t last, qwen3_6::TextPhase phase,
@@ -721,6 +727,11 @@ void validate_target_options(DeviceContext& device, const EngineOptions& options
             "KVMem requires an int8-group64 KV cache: it re-phases and scores the KV planes "
             "through the int8-group64 codec, so start with --kv-dtype int8");
     }
+    if (options.kvmem.async_transfers &&
+        (!options.kvmem.enabled || options.max_concurrency != 1 || options.enable_vision)) {
+        throw std::invalid_argument(
+            "async KVMem currently requires --kvmem, one request and text input");
+    }
     // The KVMem window is the resident working set, so it cannot exceed the device page
     // pool: a request would have to keep more pages on the device than the pool holds. A
     // window of zero means the whole context, which a device budget below the context always
@@ -816,7 +827,11 @@ void validate_target_options(DeviceContext& device, const EngineOptions& options
     case SpeculativeBackend::Mtp:
         if (options.speculative.draft_tokens == 0 ||
             options.speculative.draft_tokens > kMaximumMtpDraftTokens) {
-            throw std::invalid_argument("MTP draft window must be in [1,5]");
+            throw std::invalid_argument("MTP draft window must be in [1,15]");
+        }
+        if (options.speculative.draft_tokens > 7 &&
+            (options.speculative.adaptive_mtp || options.speculative.lookup_ngram)) {
+            throw std::invalid_argument("MTP windows above 7 require fixed drafting without lookup");
         }
         break;
     case SpeculativeBackend::DFlash:

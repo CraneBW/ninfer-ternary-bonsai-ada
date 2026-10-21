@@ -4,6 +4,7 @@
 
 #include <climits>
 #include <cstdint>
+#include <type_traits>
 
 #define MMQ_DP4A_MAX_BATCH_SIZE 64 // Max. batch size to use for dp4a MMQ kernels when FP16 tensor cores are available.
 #define MMQ_ITER_K             256
@@ -476,9 +477,13 @@ template <ggml_type type, int J, bool fallback> static __device__ __forceinline_
     }
 }
 
-template<ggml_type type, int J, bool fallback>
+// NInfer: preserve the original float writer by default. The BF16 destination
+// uses CUDA's operator=(float), which calls __float2bfloat16 (RN), just as the
+// bridge's separate store_plane did. Reuse the final BF16 materialization idea
+// from ninfer-3090/ggml_mmq.cuh; its quantization and MMA math are not copied.
+template<ggml_type type, int J, bool fallback, typename Dst = float>
 static __device__ __forceinline__ void ggml_cuda_mmq_write_back_mma(
-            const float * __restrict__ sum, const int * __restrict__ ids_dst, float * __restrict__ dst,
+            const float * __restrict__ sum, const int * __restrict__ ids_dst, Dst * __restrict__ dst,
             const float * __restrict__ y_scale, const int stride, const int i_max, const int j_max) {
 
 #if defined(AMD_MFMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
@@ -877,13 +882,16 @@ static constexpr __device__ ggml_cuda_mmq_write_back_t ggml_cuda_mmq_get_write_b
 
 // ---------------------------------------------------------------------------------------------
 
-template <ggml_type type, int J, bool fallback, bool fixup, ggml_prec prec_src1 = GGML_PREC_Q8>
+template <ggml_type type, int J, bool fallback, bool fixup, ggml_prec prec_src1 = GGML_PREC_Q8, typename Dst = float>
 static __device__ __forceinline__ void mul_mat_q_process_tile(
         const char * __restrict__ x, const int offset_x, const int * __restrict__ y,
-        const int * __restrict__ ids_dst, float * __restrict__ dst, float * __restrict__ tmp_fixup,
+        const int * __restrict__ ids_dst, Dst * __restrict__ dst, float * __restrict__ tmp_fixup,
         const float * __restrict__ y_scale,
         const int stride_row_x, const int ncols_y, const int stride_col_dst,
         const int tile_x_max_i, const int tile_y_max_j, const int kb0_start, const int kb0_stop) {
+
+    // NInfer: partial products and their fixup plane always retain FP32.
+    static_assert(!fixup || std::is_same_v<Dst, float>, "MMQ partial products must remain float");
 
     constexpr int              warp_size  = ggml_cuda_get_physical_warp_size();
     constexpr int              nwarps     = ggml_cuda_mmq_get_nthreads(type, J, fallback, prec_src1) / warp_size;
@@ -948,21 +956,26 @@ static __device__ __forceinline__ void mul_mat_q_process_tile(
         __syncthreads();
     }
 
-    if (fixup) {
+    if constexpr (fixup) {
         write_back(sum, ids_dst, tmp_fixup + blockIdx.x*(J*I), y_scale, I, I, J);
-    } else {
+    } else if constexpr (std::is_same_v<Dst, float>) {
         write_back(sum, ids_dst, dst, y_scale, stride_col_dst, tile_x_max_i, tile_y_max_j);
+    } else {
+        static_assert(ggml_cuda_mmq_get_config(type, J, fallback, prec_src1).use_mma_data_layout(),
+                      "MMQ typed output requires the MMA writer");
+        ggml_cuda_mmq_write_back_mma<type, J, fallback, Dst>(
+            sum, ids_dst, dst, y_scale, stride_col_dst, tile_x_max_i, tile_y_max_j);
     }
 }
 
 
 // The mul_mat_q kernel implements "stream-k" work partitioning as described in https://arxiv.org/abs/2301.03598
 
-template <ggml_type type, int J, bool fallback, ggml_prec prec_src1 = GGML_PREC_Q8>
+template <ggml_type type, int J, bool fallback, ggml_prec prec_src1 = GGML_PREC_Q8, typename Dst = float>
 __launch_bounds__(ggml_cuda_mmq_get_nthreads(type, J, fallback, prec_src1), ggml_cuda_mmq_get_occupancy(type, J, fallback, prec_src1))
 static __global__ void mul_mat_q(
         const char * __restrict__ x, const int * __restrict__ y, const int32_t * __restrict__ ids_dst,
-        const int32_t * __restrict__ expert_bounds, float * __restrict__ dst, float * __restrict__ tmp_fixup,
+        const int32_t * __restrict__ expert_bounds, Dst * __restrict__ dst, float * __restrict__ tmp_fixup,
         const float * __restrict__ y_scale,
         const uint3 blocks_per_ne00, const int nrows_x, const int ncols_dst, const int stride_row_x, const int ncols_y, const int stride_col_dst,
         const uint3 channel_ratio, const uint3 nchannels_y, const int stride_channel_x, const int stride_channel_y, const int stride_channel_dst,
@@ -1061,7 +1074,7 @@ static __global__ void mul_mat_q(
         const int offset_x = fastdiv(wt, sample_ratio)*stride_sample_x + fastdiv(zt, channel_ratio)*stride_channel_x + it*I*stride_row_x;
 
         constexpr bool fixup = false;
-        mul_mat_q_process_tile<type, J, fallback, fixup, prec_src1>
+        mul_mat_q_process_tile<type, J, fallback, fixup, prec_src1, Dst>
             (x, offset_x, y + offset_y, ids_dst_shared, dst + offset_dst, tmp_fixup, y_scale_tile,
              stride_row_x, ncols_y, stride_col_dst,
              tile_x_max_i, tile_y_max_j, 0, blocks_per_ne00.z);
@@ -1155,7 +1168,7 @@ static __global__ void mul_mat_q(
         const int offset_x = fastdiv(wt, sample_ratio)*stride_sample_x + fastdiv(zt, channel_ratio)*stride_channel_x + it*I*stride_row_x;
 
         constexpr bool fixup = false; // All but (potentially) the last iterations write their data to dst rather than the fixup buffer.
-        mul_mat_q_process_tile<type, J, fallback, fixup, prec_src1>
+        mul_mat_q_process_tile<type, J, fallback, fixup, prec_src1, Dst>
             (x, offset_x, y + offset_y, ids_dst_shared, dst + offset_dst, tmp_fixup, y_scale_tile,
              stride_row_x, ncols_y, stride_col_dst,
              tile_x_max_i, tile_y_max_j, kb0_start, kb0_stop);
@@ -1238,11 +1251,17 @@ static __global__ void mul_mat_q(
 
     const int offset_x = fastdiv(wt, sample_ratio)*stride_sample_x + fastdiv(zt, channel_ratio)*stride_channel_x + it*I*stride_row_x;
 
-    constexpr bool fixup = true; // Last index writes its data to fixup buffer to avoid data races with other blocks.
-    mul_mat_q_process_tile<type, J, fallback, fixup, prec_src1>
-        (x, offset_x, y + offset_y, ids_dst_shared, dst + offset_dst, tmp_fixup, y_scale_tile,
-         stride_row_x, ncols_y, stride_col_dst,
-         tile_x_max_i, tile_y_max_j, kb0_start, kb0_stop);
+    if constexpr (std::is_same_v<Dst, float>) {
+        constexpr bool fixup = true; // Last index writes its data to fixup buffer to avoid data races with other blocks.
+        mul_mat_q_process_tile<type, J, fallback, fixup, prec_src1, Dst>
+            (x, offset_x, y + offset_y, ids_dst_shared, dst + offset_dst, tmp_fixup, y_scale_tile,
+             stride_row_x, ncols_y, stride_col_dst,
+             tile_x_max_i, tile_y_max_j, kb0_start, kb0_stop);
+    } else {
+        // NInfer's host admits typed final output only with whole output tiles
+        // per CTA (blocks == tiles, no fixup). Reaching a partial is invalid.
+        NO_DEVICE_CODE;
+    }
 }
 
 template <ggml_type type, int J, bool fallback, ggml_prec prec_src1 = GGML_PREC_Q8>

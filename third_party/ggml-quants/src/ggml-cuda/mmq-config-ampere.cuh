@@ -290,7 +290,12 @@ static constexpr __host__ __device__ ggml_cuda_mmq_config ggml_cuda_mmq_get_conf
     CASE(GGML_TYPE_IQ3_XXS, 256, 1, 128,  80, GGML_CUDA_MMQ_SRAM_LAYOUT_Q8_0, MMQ_ITER_K, true, false);
     CASE(GGML_TYPE_IQ3_XXS, 256, 1, 128,  96, GGML_CUDA_MMQ_SRAM_LAYOUT_Q8_0, MMQ_ITER_K, true, false);
     CASE(GGML_TYPE_IQ3_XXS, 256, 1, 128, 112, GGML_CUDA_MMQ_SRAM_LAYOUT_Q8_0, MMQ_ITER_K, true, false);
+    // NInfer: the dedicated IQ3_XXS I64 TU alone opts into this configuration.
+#if defined(NINFER_GGML_MMQ_IQ3_XXS_I64) && NINFER_GGML_MMQ_IQ3_XXS_I64
+    CASE(GGML_TYPE_IQ3_XXS, 128, 1,  64, 128, GGML_CUDA_MMQ_SRAM_LAYOUT_Q8_0, MMQ_ITER_K, true, false);
+#else
     CASE(GGML_TYPE_IQ3_XXS, 256, 1, 128, 128, GGML_CUDA_MMQ_SRAM_LAYOUT_Q8_0, MMQ_ITER_K, true, false);
+#endif
 
     CASE(GGML_TYPE_IQ3_S, 256, 1, 128,   8, GGML_CUDA_MMQ_SRAM_LAYOUT_Q8_0, MMQ_ITER_K, true, true);
     CASE(GGML_TYPE_IQ3_S, 256, 1, 128,  16, GGML_CUDA_MMQ_SRAM_LAYOUT_Q8_0, MMQ_ITER_K, true, true);
@@ -307,7 +312,12 @@ static constexpr __host__ __device__ ggml_cuda_mmq_config ggml_cuda_mmq_get_conf
     CASE(GGML_TYPE_IQ3_S, 256, 1, 128,  80, GGML_CUDA_MMQ_SRAM_LAYOUT_Q8_0, MMQ_ITER_K, true, false);
     CASE(GGML_TYPE_IQ3_S, 256, 1, 128,  96, GGML_CUDA_MMQ_SRAM_LAYOUT_Q8_0, MMQ_ITER_K, true, false);
     CASE(GGML_TYPE_IQ3_S, 256, 1, 128, 112, GGML_CUDA_MMQ_SRAM_LAYOUT_Q8_0, MMQ_ITER_K, true, false);
+    // NInfer: the dedicated IQ3_S I64 TU alone opts into this configuration.
+#if defined(NINFER_GGML_MMQ_IQ3_S_I64) && NINFER_GGML_MMQ_IQ3_S_I64
+    CASE(GGML_TYPE_IQ3_S, 128, 1,  64, 128, GGML_CUDA_MMQ_SRAM_LAYOUT_Q8_0, MMQ_ITER_K, true, false);
+#else
     CASE(GGML_TYPE_IQ3_S, 256, 1, 128, 128, GGML_CUDA_MMQ_SRAM_LAYOUT_Q8_0, MMQ_ITER_K, true, false);
+#endif
 
     CASE(GGML_TYPE_IQ4_XS, 256, 1, 128,   8, GGML_CUDA_MMQ_SRAM_LAYOUT_Q8_0, MMQ_ITER_K, true, true);
     CASE(GGML_TYPE_IQ4_XS, 256, 1, 128,  16, GGML_CUDA_MMQ_SRAM_LAYOUT_Q8_0, MMQ_ITER_K, true, true);
@@ -324,7 +334,12 @@ static constexpr __host__ __device__ ggml_cuda_mmq_config ggml_cuda_mmq_get_conf
     CASE(GGML_TYPE_IQ4_XS, 256, 1, 128,  80, GGML_CUDA_MMQ_SRAM_LAYOUT_Q8_0, MMQ_ITER_K, true, false);
     CASE(GGML_TYPE_IQ4_XS, 256, 1, 128,  96, GGML_CUDA_MMQ_SRAM_LAYOUT_Q8_0, MMQ_ITER_K, true, false);
     CASE(GGML_TYPE_IQ4_XS, 256, 1, 128, 112, GGML_CUDA_MMQ_SRAM_LAYOUT_Q8_0, MMQ_ITER_K, true, false);
+    // R28 dedicated TU alone opts into the existing I64/J128 row/warp ratio.
+#if defined(NINFER_GGML_MMQ_IQ4_XS_I64) && NINFER_GGML_MMQ_IQ4_XS_I64
+    CASE(GGML_TYPE_IQ4_XS, 128, 1,  64, 128, GGML_CUDA_MMQ_SRAM_LAYOUT_Q8_0, MMQ_ITER_K, true, false);
+#else
     CASE(GGML_TYPE_IQ4_XS, 256, 1, 128, 128, GGML_CUDA_MMQ_SRAM_LAYOUT_Q8_0, MMQ_ITER_K, true, false);
+#endif
 
     CASE(GGML_TYPE_IQ4_NL, 256, 1, 128,   8, GGML_CUDA_MMQ_SRAM_LAYOUT_Q8_0, MMQ_ITER_K, true, true);
     CASE(GGML_TYPE_IQ4_NL, 256, 1, 128,  16, GGML_CUDA_MMQ_SRAM_LAYOUT_Q8_0, MMQ_ITER_K, true, true);

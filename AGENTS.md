@@ -30,7 +30,9 @@ approval requirements beyond the user's instructions and the actual execution en
 NInfer is a from-scratch C++/CUDA inference engine for maximum single-GPU performance on explicitly
 registered artifacts. Current identities are `qwen3.6-27b/groupwise-int`, `qwen3.6-27b/nvfp4`,
 `qwen3.8-27b/groupwise-int`, `qwen3.8-27b/nvfp4`, and `qwen3.6-35b-a3b/groupwise-int`.
-The implementation targets `sm_120a` and is tuned on NVIDIA GeForce RTX 5090.
+Upstream tuning includes `sm_120a` / NVIDIA GeForce RTX 5090. This checkout is developed and
+validated locally on Linux with an NVIDIA GeForce RTX 4070 Ti SUPER (`sm_89`, 66 SM, 16 GiB).
+Current local performance claims apply to that Ada profile, not automatically to upstream 5090 results.
 
 Generation uses one GPU, one resident model, startup-fixed concurrency of one to eight requests,
 bounded FIFO ingress, no active-request preemption, and one compact decode batch per round.
@@ -99,7 +101,7 @@ Choose the affected checks, rather than running this table as a checklist:
 |---|---|
 | Documentation | affected links/references and `git diff --check` |
 | C++ runtime/API | affected build targets and behavioral tests |
-| Python tooling | Python 3.11 `py_compile` and affected tests |
+| Python tooling | selected Python interpreter, `py_compile`, and affected tests |
 | Artifact framing/binding/conversion | affected contract tests; real artifact when semantics require it |
 | CUDA mathematics | independent oracle at relevant shapes and route boundaries |
 | Memory or lifetime | affected execution; sanitizer for a concrete lifetime question |
@@ -138,11 +140,11 @@ Read the authority relevant to the current decision; this is not a mandatory rea
 Use `cmake --build <build-dir> -j` by default. Adjust parallelism when actual resource pressure
 causes failures or interferes with the task, and briefly explain why.
 
-Use the selected Python 3.11 interpreter explicitly. On this machine it is
-`/home/neroued/miniconda3/envs/py311/bin/python`; the default shell's `python3` may be a different
-version. Use `python3` only after selecting the maintainer environment or checking its version.
-Normal resources are `build/`, `out/qwen3_6_27b.ninfer`, its `.conversion.json` report, and
-`profiles/ncu/`, `profiles/nsys/`, `profiles/bench/`; the local toolchain is CUDA 13.1.
+The current local toolchain is CUDA 13.4 and Python 3.14 (`/usr/bin/python3`) on Linux.
+Upstream Python 3.11 commands and `/home/neroued/` paths describe their original environment,
+not this machine. Use an explicitly selected interpreter when reproducing those commands.
+Local resources include `build/`, explicitly supplied `.ninfer` artifacts, and
+`profiles/ncu/`, `profiles/nsys/`, `profiles/bench/`.
 Select model artifacts by explicit path, never glob order, modification time, or unqualified
 “latest”. Source checkpoints and large artifacts are prerequisites; download or regenerate them
 only when that work is in scope. Install or upgrade dependencies only when the task needs it.

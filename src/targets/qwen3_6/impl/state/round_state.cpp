@@ -94,6 +94,7 @@ OrdinaryDecodeState::OrdinaryDecodeState(DeviceSpan backing,
     tokens          = ingress_tensor(offsetof(OrdinaryDecodeIngress, tokens), DType::I32);
     cache_positions = ingress_tensor(offsetof(OrdinaryDecodeIngress, cache_positions), DType::I32);
     rope_positions  = ingress_tensor(offsetof(OrdinaryDecodeIngress, rope_positions), DType::I32);
+    sample_positions = ingress_tensor(offsetof(OrdinaryDecodeIngress, sample_positions), DType::I32);
     text_kv_table_rows =
         ingress_tensor(offsetof(OrdinaryDecodeIngress, text_kv_table_rows), DType::I32);
     state_source_slots =
@@ -246,6 +247,8 @@ MtpDecodeState::MtpDecodeState(DeviceSpan backing, const MtpDecodeStateLayout& l
     anchors = ingress_tensor(offsetof(MtpDecodeIngress, anchors), DType::I32, {batch});
     base_frontiers =
         ingress_tensor(offsetof(MtpDecodeIngress, base_frontiers), DType::I32, {batch});
+    logical_frontiers =
+        ingress_tensor(offsetof(MtpDecodeIngress, logical_frontiers), DType::I32, {batch});
     remaining_budgets =
         ingress_tensor(offsetof(MtpDecodeIngress, remaining_budgets), DType::I32, {batch});
     current_extents =

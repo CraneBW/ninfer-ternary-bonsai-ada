@@ -5,6 +5,7 @@
 #include <cuda_profiler_api.h>
 #include <cuda_runtime.h>
 
+#include <cstdlib>
 #include <exception>
 #include <filesystem>
 #include <fstream>
@@ -88,6 +89,23 @@ ninfer::bench::RepTiming run_repetition(ninfer::Engine& engine,
     }
     if (generated.finish_reason != ninfer::FinishReason::OutputLimit) {
         throw std::runtime_error(test.label + " did not finish at the requested output limit");
+    }
+
+    // Optional native token capture for same-workload configuration A/B. Like
+    // CLI --print-token-ids, consume the public Engine result; never infer IDs
+    // from decoded text. This I/O is outside Engine's measured phase timings.
+    static const std::string capture_path = [] {
+        const char* path = std::getenv("NINFER_BENCH_TOKEN_IDS_PATH");
+        return path != nullptr ? std::string(path) : std::string{};
+    }();
+    if (!capture_path.empty()) {
+        std::ofstream capture(capture_path, std::ios::app);
+        if (!capture) { throw std::runtime_error("cannot open benchmark token capture"); }
+        capture << test.label << '\t' << generated.generated_token_ids.size() << '\t';
+        for (const auto id : generated.generated_token_ids) { capture << id << ' '; }
+        capture << '\n';
+        capture.close();
+        if (!capture) { throw std::runtime_error("cannot write complete benchmark token capture"); }
     }
 
     ninfer::bench::RepTiming timing;

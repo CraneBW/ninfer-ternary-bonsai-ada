@@ -1,920 +1,223 @@
-[![English](https://img.shields.io/badge/Language-English-2ea44f?style=flat-square)](README.en.md)
-[![简体中文](https://img.shields.io/badge/Language-%E7%AE%80%E4%BD%93%E4%B8%AD%E6%96%87-d73a49?style=flat-square)](README.md)
+# NInfer Ada：单卡原生推理与 KVMem 长上下文
 
-# 三元 Bonsai 2 27B 跑在 **NINFER** 上
 
-> 16 GB 的 RTX 4070 Ti SUPER，跑三元量化的 Bonsai 2 27B（2.125 bit/参数），上下文开满模型
-> 原生的 262,144 token（int8 KV）。210K token 的真实文本（上下文输入了一个大文件）实测：
-> 首 token 164 秒、decode 88.8 t/s、运行时显存 5.21 GiB。开与不开 KVMem，decode 在六种任务
-> 配置上没有差别（最大 0.5%），prefill 也一样，短上下文同样一致。KVMem 与 MTP 投机解码可同时开。
-> 短上下文里纯工具调用 232 t/s，写小说 89；prefill 在 28k 提示上 2.30k t/s。
-> 三种任务（鹈鹕骑自行车 SVG、中文短篇小说、带工具查询）× 长/短上下文 × 带/不带思考的
-> 完整矩阵、夹具和原始数据都在仓库里（`bench/fixtures/`），默认分支就是这一版。
+**v1.0.0 · 2026-10-21**
 
----
+面向 NVIDIA Ada 单卡的 C++20/CUDA 推理项目。主要验证设备为 **RTX 4070 Ti SUPER，SM89 / 66 SM / 16 GiB**；当前主要模型是已有的 **Qwen3.8-27B GSQ-RCO-IQ3_S `.ninfer` v3**。项目提供命令行、HTTP 服务、MTP 投机解码，以及在有限 GPU KV 工作集上运行更长逻辑上下文的 KVMem 路径。
 
-> 单卡 C++20/CUDA 推理引擎 **NINFER** 的 Ada（`sm_89`）移植，跑三元量化的 Bonsai 2 27B。
-> 目标机器是一张 **RTX 4070 Ti SUPER（16 GB）**，本文所有性能数字都在它上面实测。
+本仓库也保留三元 Bonsai 和其它模型目标的实现。本页的质量、配置与性能结论以表中实际模型和工作负载为准。
 
-三元权重按 `{−1, 0, +1}` 打包，每码 2 bit，外加每 128 权重一组一个 fp16 scale。
-存储代价是**每权重 2.125 bit**（常说的"1.58-bit"是 log₂3，即一个三元符号的信息量——
-两个数都对，量的是不同的东西，**内存系统付出的是前者**）。这大约是 4-bit 格式一半的权重流量，
-也正是下面所有数字的来源：模型每验证轮要读 7.12 GiB 权重，而这张卡的实测读带宽是 637 GB/s。
+> 提供两种显式配置：**短档 K7，32K 长档 K15**。本次长档原 213K 六请求 **6/6 精确正确**；18 次整体 Graph 测量通过，每档九次运行的完整 129 个输出 token 一致。详见[发布报告](docs/releases/v1.0.0.md)。
 
-**本仓库是衍生作品，不是 NINFER 上游。** 谱系与致谢见 §8。
+## 这套实现怎样运行
 
-**这份文档怎么读**：
+```mermaid
+flowchart LR
+    A[CLI / HTTP API] --> B[NInfer Engine与调度]
+    B --> C[Qwen目标：Attention / GDN / MLP]
+    C --> D[CUDA算子与GGML量化产品]
+    D --> E[单张NVIDIA GPU]
+    B --> F[KVMem页与状态管理]
+    F --> E
+    F <--> G[Host归档 / NVMe冷层]
+```
 
-| 你想要的 | 去哪 |
+- **原生 Engine**：模型绑定、聊天模板、调度、KV 页、GDN 状态、投机接受与提交由 NInfer 管理，产品入口直接调用 C++/CUDA。
+- **GGUF 编码仍可原生运行**：当前 GSQ artifact 保留 IQ3_S、IQ3_XXS、IQ4_XS、Q4_K 等逐张量量化块，并通过本仓 GGML CUDA bridge 计算。混合量化描述权重表示；推理由 NInfer 执行，不启动外部 llama.cpp 进程。
+- **`.ninfer` 是模型契约**：容器还携带目标配置、张量布局、语义绑定、tokenizer/模板，以及相应 MTP、Vision 等组件。把任意 `.gguf` 改后缀不能得到可执行模型；转换必须匹配已实现的模型目标及其真实组件。
+- **GPU 工作集与逻辑上下文分开**：KVMem 按查询和历史证据选择页，使用受限 GPU 池，其余历史由 Host/Cold 归档。它不是让所有历史 KV 同时常驻 GPU。
+- **完整混合状态恢复**：不可变 K 来源保留已表示的量化 K 码、尺度及 birth positions；页恢复同时受 owner/generation、pin 与 CUDA 完成事件约束。选页变化后，canonical 路径重建所选有序历史对应的 GDN 与各层 KV，再回放问题。
+
+后一点影响 TTFT：逻辑 prompt 已命中公开 prefix cache，仍可能需要内部历史重建。项目分别记录 logical computed/cached、history/query replay、source restore 和搬运指标，不把“缓存命中”视为“完全没有重算”。
+
+## 运行环境与模型
+
+| 项目 | 本项目当前明确范围 |
 |---|---|
-| 这个分支比上游正式版强在哪、都动了什么 | **§2** |
-| 在 16 GB 卡上跑 262k 上下文 | **§3**（KVMem） |
-| 把它装起来 | **§4** |
-| 调参数、选 KV 档、决定上下文开多大 | **§5** |
-| 看数据（三版对比、速度矩阵、PPL） | **§6** |
-| 引擎内部怎么按 T 选内核 | **§7** |
+| 主要实测平台 | Linux、RTX 4070 Ti SUPER 16 GiB，CUDA 13.4；单 GPU、C1 |
+| 编译工具 | CMake ≥ 3.28、Ninja、支持 C++20 的 CUDA 兼容宿主编译器；本次使用 CUDA 13.4 |
+| Linux 系统依赖 | pkg-config、FFmpeg 开发库：libavformat ≥ 60、libavcodec ≥ 60、libavutil ≥ 58、libswscale ≥ 7；媒体输入还需 libcurl ≥ 7.85 |
+| 主要验收模型 | `qwen3_8_gsq_rco_iq3_s_v3.ninfer`，15,017,456,896 bytes |
+| 其它编译目标 | CMake 提供 SM75、SM86、SM89、SM120a；本页性能不外推其它 GPU |
 
----
+权重独立准备，遵循模型和量化来源的许可证。程序按启用组件 materialize 权重；MTP、DFlash2、Vision 的显存需求不同，16 GiB 文本配置不能直接复用为任意多模态/高并发配置。历史长档服务记录约18–20G主存峰值，另有GPU显存、pinned buffer和文件缓存开销。
 
-## 1. 这是什么
+模型组件、格式与已验收入口可查 [GSQ 原生验证](docs/maintainer/2026-10-20-v3-gsq-live-validation.md)。
 
-**一句话**：把三元量化的 Bonsai 2 27B 跑在 NINFER 引擎上，针对 Ada（`sm_89`）单卡调优，
-并把长上下文做成 16 GB 卡上也开得起的能力。
+## 构建
 
-三件事构成本仓库相对上游的差异，后文各有一节：
+在源码根目录执行。4070 Ti SUPER 必须显式选择 SM89；CMake 默认架构不是本机 Ada。
 
-1. **内核与调度的改良**（§2）—— 剥掉精度差异后，本机的 bf16 prefill 内核比上游快 35%（30k）/ 32%（64k）；
-   加上各自的默认精度，长提示反超 29%。
-2. **KVMem**（§3）—— 设备显存只保留一个常驻窗口，其余 KV 换出到主机内存，
-   于是 262,144 的逻辑上下文在一张 16 GB 卡上成立，**且速度代价为零**。
-3. **部署与配置的收口**（§4、§5）—— 编译、跑起来、每个参数的代价、KV 档怎么选。
+```sh
+cmake -S . -B build -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_CUDA_ARCHITECTURES=89 \
+  -DNINFER_SM_COUNT=66 \
+  -DNINFER_BUILD_APPS=ON \
+  -DNINFER_BUILD_BENCHMARKS=ON
 
-**上游是谁**：
-
-| | |
-|---|---|
-| **三元移植的出处** | 魔搭 **[shensanshu/ninfer-ada-ternary](https://www.modelscope.cn/shensanshu/ninfer-ada-ternary)** —— 引擎侧 `patches/`、打包与验证工具、技术记录。**发布物是 Windows `.exe` 包（MSVC）** |
-| **源码树的直接基座** | **`Ambolio/ninfer-4090-windows`** v1.0.8 线 —— ⚠️ **该仓库现已不可公开访问**（账号 `public_repos = 0`，链接 404；2026-09-28 复核）。基座关系是历史事实，署名保留、链接不再给出 |
-| **规范上游** | **[Neroued/ninfer](https://github.com/Neroued/ninfer)** —— C++20/CUDA 架构、DFlash2、ReplaySSM、Paged KV Cache |
-
-本文所有"上游三元版"的数字，跑的都是**本机用 GCC 16.2.1 重编出来的 Linux 二进制**
-（`~/ninfer-off-build/build/apps/ninfer`，sha256 `b89c77e9…`），不是上游发布的那个 Windows 包。
-好处是只比内核、不比工具链；代价是它不代表上游发布物的行为。口径详见 §6.1。
-
----
-
-## 2. 相对上游正式版的改良
-
-### 2.1 改了什么
-
-**每一处的实测数据都写在代码注释里。** 收益一栏是同二进制 A/B 或真交替多轮的中位数，
-口径见 §6.1。
-
-**prefill 路径**
-
-| 改动 | 收益 | 说明 |
-|---|---:|---|
-| **int8（`s8`）激活档移植** | **1.61×** | 上游正式版的 int8 激活 × 张量核档位。PPL 偏移 +0.0015% |
-| **token tile 铺进 `blockIdx.y`（G2）** | **+26.2%**（T=508）/ **+24.7%**（28k） | 逐位相同。s8 的 grid 是 `div_up(n,64)`、**与 T 无关**，小 n 层在任何 T 都只有 1.2 CTA/SM；把 tile 铺进 grid 后权重流量一模一样，占用却上去了 |
-| **split-K 补 T ≤ 64 的空档（G3）** | **+7.1%**（T=28） | 代价是 K 的累加重结合成 fp32 分片——确定，但**不逐位相同**，PPL +0.041%。回退开关见 §5.5 |
-| **prefill token tile 按 T 分档** | **+42%**（T=42/50） | 128 宽 tile 原本没有 token 循环，T 不满 128 时整块 K 扫描照付。T≤64 改走 64 宽档（shared 43264 → 26880 B，2 → 3 CTA/SM） |
-| **填 T=9..31 的空洞** | **+131% ~ +266%** | 这一带原本两个阈值的覆盖面之间有个缝，而普通短问题（prompt 13~35）正好落在里面。现在按代价模型分段：T≤16 走 8 宽张量核、T≥17 走 int8 |
-| **s8 阈值重拟合 33 → 17** | 消掉 T=32 上一个 74% 的台阶 | 上游的 33 是对着它自己的 bf16 档量的；本机两条线的交叉点在 16/17 |
-
-**decode 路径**
-
-| 改动 | 收益 | 说明 |
-|---|---:|---|
-| **投机验证轮的 small-T 张量核路径** | decode 的主力 | 取代 blocked GEMV |
-| **逐形状选 row block** | **+1.8%** | `n ≤ 5120` 用 16，否则 32。响应**非单调**，一个全局值不可能对。逐位相同 |
-| **small_t 的 split-K** | **+1.3 ~ 1.4%** | 只对「行网格填不满 **且每片还剩 ≥4 个 K 步」的形状切。**不逐位相同**，回退开关见 §5.5 |
-| **旋转内核的发射打包** | — | 每轮 274 次旋转（每次一个激活，已是下限） |
-| **两轮读 SASS 找出来的优化** | — | 见 `.claude/skills/ninfer-perf-tuning/SKILL.md` |
-| **K 上限 5 → 7** | 结构化输出 **+21%** | `T=K+1≤8`，再高会掉出 `small_t`（验证轮 13.3 ms → 40 ms）。上限写在四个类型不同的地方，改要一起改 |
-
-**KV 与长上下文**
-
-| 改动 | 收益 | 说明 |
-|---|---:|---|
-| **KV 档默认按 `--max-context` 自动选** | 64k 上 **+16.2%** | ≤16383 用 bf16，≥16384 用 fp8。纯函数，不写回字段。见 §5.3 |
-| **KVMem 换出** | **262k 逻辑上下文成立** | 速度代价为零，见 §3 |
-
-**构建选项——不改变默认路径，只修一个对非旗舰卡本来就错的事实**
-
-| 改动 | 收益 | 说明 |
-|---|---:|---|
-| **`-DNINFER_SM_COUNT=<n>`** | int8 档 decode **+0.86% ~ +0.96%** | `kTargetSmCount` 按架构写死的是**旗舰**的 SM 数（sm_89 = 128 / 4090），同架构的小卡按旗舰编会被当成有那么多 SM 来调度。**默认不传、行为一位不变**；只有传了才生效。详见 §4.2 |
-
-> 这条**收窄得很厉害，别按表面数字读**：它只在 `--kv-dtype int8` + MTP `--draft-tokens 5`
-> （T=6，`small_t` 分片上限唯一生效的入口）+ 解码窗口落在 (5000, 8198] 时成立。
-> 本仓库默认 KV 是 bf16/fp8、默认 K=3 ⇒ **默认配置一点都吃不到**。
-> 对照：同样的 A/B 换 bf16 档，两臂**逐位相同**（那个上限根本不查）。
-> 数值上**不逐位相同**（分片数变了 ⇒ 归约顺序变了），int8 下两臂 ids 第 12 位分歧、各自跨轮稳定。
-
-### 2.2 三版对比
-
-三个版本，**同一台机器、同一个模型文件、同一批夹具、同一套参数**
-（`--greedy --no-thinking`，prefill 取 `--max-new 8`，decode 取 300 token），
-每格是**真交替 3 轮的中位数**（交替是为了让 GPU 温度漂移不整段落在某一个版本头上）。
-
-| 版本 | 具体是什么 | 本表用的二进制 |
-|---|---|---|
-| **上一版** | 本仓库 **`bd71d74`**（2026-09-21）—— 上一轮结束时的状态，也是本轮开工前 `origin/master` 的位置。**不是"上游的某个版本"，是本仓库自己的上一个提交** | `~/ninfer-work/bin-pre-s8/ninfer`<br><sub>2026-09-26 07:06 构建，sha256 `cea0e193…`</sub> |
-| **上游三元版** | §1 那张表里定义的那个（本机重编的 Linux 版） | `~/ninfer-off-build/build/apps/ninfer`<br><sub>sha256 `b89c77e9…`</sub> |
-| **本版** | 本仓库当前 HEAD | `~/ninfer-build/build/apps/ninfer`<br><sub>sha256 `70ecd5ca…`</sub> |
-
-三份都是本机用同一个 GCC（16.2.1）编的 Linux 二进制（`readelf -p .comment` 可核），
-构建时间分别是 07:06 / 05:59 / 16:33（2026-09-26）。
-
-**Prefill · 各自默认精度**（tok/s，越高越好）：
-
-| 提示规模 | 上一版<br>(bf16) | 上游三元版<br>(int8) | **本版**<br>(int8) | 对上一版 | 对上游三元版 |
-|---|---:|---:|---:|---:|---:|
-| 长（T=1759） | 1.22k | 1.96k | **2.53k** | **+107%** | **+29%** |
-| 中（T=123） | 769.9 | 1.33k | **1.58k** | **+105%** | **+19%** |
-| 短（T=38） | 280.6 | 664.1 | **734.7** | **+162%** | **+11%** |
-| 极小（T=15） | 144.4 | 333.8 | **388.4** | **+169%** | +16% |
-
-**Decode**（tok/s，`en-code.json`，300 token）：
-
-| 场景 | 上一版 | 上游三元版 | **本版** | 对上一版 | 对上游三元版 |
-|---|---:|---:|---:|---:|---:|
-| MTP draft 3 | 145.4 | 122.5 | **147.3** | **+1.3%** | **+20%** |
-| └ 轮净耗时（ms） | 20.77 | 24.65 | **20.30** | **−2.3%** | **−18%** |
-| 无投机 | 64.8 | 57.4 | **64.4** | −0.6% | **+12%** |
-
-> **注意 MTP 的接受率**：上一版与上游三元版都是 67.6%，本版是 **66.3%**。
-> 差异来自 split-K（§2.1）：它在 T=17..64 的 prefill 上是 fp32 重结合，数值不完全逐位相同，
-> 于是这一题的输出轨迹分叉，落到一条接受率略低的路径上。**它不是"每轮算得慢"，是"换了条轨迹"**
-> （KSPLIT=0 时接受率立刻回到 67.6%）。同一二进制内这个选择是确定的、可复现的，
-> 跨版本比较时才需要注意；`NINFER_TERNARY_S8_KSPLIT=0` 可以退回逐位相同的那条。
-
-> **decode 那两个改动的来历**（都在验证路 T ≤ 8 的 small_t 上，都不进 prefill）：
-> **① 逐形状选 row block** —— 响应非单调、一个全局值不可能对，真交替双向 A/B **+1.8%**，
-> 接受率/直方图/生成文本全不变。**② 小形状的 split-K** —— 只对 `n ≤ 6144` 且每片还剩 ≥4 个
-> K 步的形状切（本模型只有 5120×17408 满足），双向 A/B **+1.3~1.4%**，六夹具 +0.2~1.8%
-> 且接受长度无一下降。②**不是逐位相同**。
-
-**一句话**：长提示从"追平"变成**反超 29%**，其余 prefill 场景全面领先，
-decode 保持 20% 领先（接受率那一格的差别见上）。
-
-### 2.3 剥掉精度差之后
-
-§2.2 那张表是**各自默认精度**——上游三元版与本版吃 int8，上一版吃 bf16。
-把 int8 关掉（`NINFER_TERNARY_S8=0`）才能看出**内核本身**谁强。
-
-`./three-way-long.sh`，KV 显式钉 `--kv-dtype bf16`（见 §5.3：不钉的话本仓库在这个长度上会
-自动选 fp8，另外两版不会，于是量到的是精度差而不是内核差），真交替 3 轮中位数：
-
-| 提示规模 | 精度 | 上一版 | 上游三元版 | **本版** |
-|---|---|---:|---:|---:|
-| **28,199**<br><sub>`--max-context 32768`</sub> | 各自默认 | 1.17k <sub>(bf16)</sub> | 1.75k <sub>(int8)</sub> | **2.18k** <sub>(int8)</sub> |
-| | **同为 bf16** | 1.17k | **864** | **1.17k** |
-| **61,636**<br><sub>`--max-context 65536`</sub> | 各自默认 | 1.06k <sub>(bf16)</sub> | 1.51k <sub>(int8)</sub> | **1.81k** <sub>(int8)</sub> |
-| | **同为 bf16** | 1.06k | **804** | **1.06k** |
-
-三个结论，**两个长度上都成立**：
-
-1. **剥掉精度差异后，本机的 bf16 prefill 内核快上游三元版 35%（30k）/ 32%（64k）**。
-   上游三元版的 prefill 优势**全部**来自它的 int8 档——这一条在 T=1.7k、28k、62k 上都成立。
-2. **加回精度，本仓库反超 25%（30k）/ 20%（64k）**（2.18k 对 1.75k；1.81k 对 1.51k）。
-   上一版这里还是"持平"——差的那一截是 **token tile 铺进 `blockIdx.y`（G2，+26%）**，
-   而它**只作用于 int8 那条路**，所以下面"同为 bf16"那一行不动。
-3. **同为 bf16 时，上一版与本版仍然持平**（1.17k / 1.17k；1.06k / 1.06k），
-   上游三元版则被拉开 35%/32%。**本轮的长提示提速全部走 int8 档**：bf16 那条路上本轮没有改动，
-   而它也不需要——它本来就在前面。
-
-> **超过 64k 的三方对比用 CLI 做得到，只是不能用 `rk4v4`。** 上游三元版的 CLI 不认 `rk4v4`
-> （只有它的 serve 认），但 **`fp8` 三版都认**，且实测能撑到 **233k**——124k 语境只需 3.9 GiB。
-> 所以 >64k 走 `fp8` 即可，不需要 serve，也就不需要任何口径对齐。**本仓库尚未补测。**
-
-### 2.4 明确试过但无效的
-
-负面结论同样记在代码里。
-
-| 尝试 | 结果 | 机制 |
-|---|---|---|
-| 加宽 small_t 的 tile | **回归**（45.2 → 19.0 t/s） | 累加器吃掉了驻留 CTA |
-| 用 `__launch_bounds__` 换 occupancy | 三处独立实测**单调变慢** | `MinBlocks` 只设寄存器上限，**拦不住 shared**——`TernaryS8Storage<64,4>` × 4 = 103424 B > 102400 B，第 4 个 CTA 根本进不去 |
-| 收窄 s8 的 token tile 让它跟 T 走 | **回归**（六夹具 +1%） | kernel 不是 mma 受限（张量核只 17~35% 活跃），砍一半 tile 只把每 CTA 的固定开销摊到一半工作量上。**强制 32 在 T=38 上更是 +19%**——`tok_base` 循环跑两遍，权重读两遍 |
-| 拆 LUT | **−12.6%** | 同地址广播 |
-| `--lm-head-draft` | 噪声内（en-code −3.6%） | 它的头 356.5 MB 比主 output head 337.7 MB 还大，流量反而 +6% |
-| `rk4v4-e8` KV 档 | 比 `rk4v4` 差 3.5 倍 | 解码端是刻意的半陪集近似，E8 的整形增益丢了一部分。**当前实现下没有存在理由** |
-
----
-
-## 3. KVMem：长上下文不再要求全驻留
-
-**融合自 [naamfung/zatfung](https://github.com/naamfung/zatfung)**，本仓库打通了它与 MTP 的共存。
-
-### 3.1 它解决什么
-
-16 GB 卡上，KV 和权重抢同一块显存。262,144 token 的上下文按 `rk4v4` 算是 4.71 GiB，
-按 `int8` 算是 8.06 GiB——加上 7.12 GiB 权重就装不下了。
-
-KVMem 的思路是**设备池只保留一个常驻窗口，其余换出到主机内存**。关键在窗口外的页
-不是"原地留空"，而是**紧凑打包 + re-RoPE**：被换出的区间搬走，留下的页重新定相，坐标不变。
-原地选块的实现省不掉一次 tile 迭代，等于白开——这是它在别处失效的原因。
-
-### 3.2 怎么开
-
-```bash
-./build/apps/ninfer-serve <model.ninfer> \
-  --kvmem --kv-dtype int8 \
-  --kv-device-tokens 131072 \
-  --kvmem-budget 98304 \
-  --host-kv-mib 8192
+cmake --build build --target ninfer ninfer-serve ninfer_bench -j2
 ```
 
-| 参数 | 作用 |
-|---|---|
-| `--kvmem` | 开启。**不写就是全驻留**，行为与融合前一致 |
-| `--kv-device-tokens N` | 设备池压到 context 以下，省下的就是它还给显存的部分 |
-| `--kvmem-budget N` | 常驻窗口的 token 数 |
-| `--kvmem-gen-reserve N` | 给 decode 留的池余量（默认 8192） |
-| `--host-kv-mib N` | 主机侧 KV 池大小 |
+产物为 `build/apps/ninfer`、`build/apps/ninfer-serve` 和 `build/bench/ninfer_bench`。CUDA 编译较占主存，示例使用两个并行 worker。其它架构需要选择对应目标并重新构建。
 
-CLI 与 server 两端都有这几个开关。环境变量 `NINFER_KVMEM` / `NINFER_KVMEM_BUDGET` /
-`NINFER_KVMEM_GEN_RESERVE` 是给不暴露这些 flag 的前端的等价写法。
+## 从一次文本请求开始
 
-**两个硬约束**：
+```sh
+export NINFER_MODEL=/absolute/path/qwen3_8_gsq_rco_iq3_s_v3.ninfer
 
-- **必须 `--kv-dtype int8`。** 换出与打分直接寻址 int8-group64 的码本平面，fp8 走不了。
-- **窗口大小决定质量，不是免费的。** 见 §3.5。
+# 本页短请求配置B；这些开关需在进程启动前固定。
+export NINFER_GGUF_MMQ_BF16=1 NINFER_GGUF_IQ2_S_MMQ_BF16=1
+export NINFER_GGUF_IQ3_S_MMQ_I64=1 NINFER_GGUF_IQ3_XXS_MMQ_I64=1
+export NINFER_PROMPT_I8_PIPELINE=1 NINFER_R27_BUNDLE=1
+export NINFER_R26_BUNDLE=0 NINFER_R28_BUNDLE=0 NINFER_R29_BUNDLE=0
 
-### 3.3 速度代价是零
-
-同 KV 格式（int8）下，KVMem 与全驻留在**真换出**状态下逐位相同：
-
-| 任务 | 思考 | 全驻留-int8 | KVMem-int8 |
-|---|---|---:|---:|
-| 鹈鹕骑自行车 | 不思考 | 108.1 | 108.2 |
-| 鹈鹕骑自行车 | 思考 | 74.6 | 74.7 |
-| 小说撰写 | 思考 | 77.3 | 77.3 |
-| 小说撰写 | 不思考 | 58.8 | 58.9 |
-| 带工具查询 | 思考 | 134.3 | 134.5 |
-| 带工具查询 | 不思考 | 180.4 | 181.3 |
-
-口径：124k prompt、设备池 2,048 页对逻辑 4,096 页、`host KV pinned 8.00 GiB`（**真在换出**）。
-prefill 同样（1520~1540 对 1520~1530）。短上下文（池装得下、不换出）也一致
-（155.2/155.1、232.5/232.0）。**它买到的是 16 GB 卡上的 262k 逻辑 context，不是用速度换的。**
-
-**融合本身也没有动全驻留那条路**：同一夹具、同一 CLI 口径、真交替 3 轮，融合前后的
-64k decode 逐档一致 —— bf16 98.3 / 98.3、int8 112.0 / 112.0、fp8 114.5 / 114.4、
-rk4v4 111.5 / 111.5，接受率逐位相同（60.1%）。
-
-### 3.4 显存总账
-
-每行都是 `ninfer-serve` 启动日志的 `capacity` 行。
-
-| 配置 | 权重 | 设备池 | runtime | 整机占用 | GPU 剩余 |
-|---|---:|---:|---:|---:|---:|
-| 全驻留 8k，无 MTP | 6.70 | 128/128 | 0.75 | **8.08** | 7.92 |
-| 全驻留 8k，MTP3 | 7.12 | 128/128 | 0.84 | **8.53** | 7.47 |
-| 全驻留 64k，MTP3 | 7.12 | 1024/1024 | 2.76 | **10.45** | 5.55 |
-| 全驻留 128k，MTP3 | 7.12 | 2048/2048 | 4.95 | **12.64** | 3.36 |
-| **KVMem 256k 逻辑 / 池 128k，无 MTP** | 6.70 | 2048/4096 | 4.61 | **11.95** | 4.05 |
-| **KVMem 256k 逻辑 / 池 128k，MTP3** | 7.12 | 2048/4096 | 5.21 | **12.90** | 3.10 |
-
-整机占用 = 16 GiB − GPU 剩余（含 CUDA context 等约 0.6 GiB）。**KVMem 用 12.90 GiB
-跑 262,144 的逻辑上下文，全驻留用 12.64 GiB 只能跑 131,072** —— 同样开到 262,144 的话
-光 KV 池就要 8.06 GiB，整机超过 16 GiB，起不来（引擎会明确报差多少字节）。
-设备池那两列是「物理页 / 逻辑页」，比值就是有多少 KV 落在主机内存里。
-
-**长上下文（124k prompt）的 prefill**：驻留-fp8 **1460**、驻留-int8 **1520~1540**、
-KVMem-int8 **1520~1530** tok/s —— 三个任务落在同一档，因为 prefill 只与 token 数有关，
-与任务内容和驻留模式都无关。
-
-### 3.5 它是有损的：窗口大小决定质量
-
-判决性夹具：三个不同主题的**真实文档**拼接成 213,723 token（玛雅 124k + 手枪 62k + 丁丁 29k），
-问题**只由中间那一段**回答——答案块既不在 sink 头、也不在 recent 尾，必须靠中段 top-k 保住。
-
-| 窗口 | 结果 |
-|---|---|
-| 17,408（占 6%） | **丢中段**——模型答"文本里没有 Section B" |
-| 74,752 | 答对 `Type 94 Nambu`（decode 47.0，仍比全驻留快 27%） |
-
-**所以它是"用显存换长上下文速度"的有损工具，不是无损的显存优化。** 窗口开多大取决于
-你的任务把答案放在哪；要长上下文且要求召回中段，窗口得给够。
-
-### 3.6 和 MTP 一起用
-
-**可以同时开**，这条是本分支打通的。draft 层 attend 全历史、留不了窗口，
-它的 KV 跟着 text 一起紧凑化（同预算、同 frontier），页池按逻辑容量开。
-
-原实现用三处 `speculative_backend == None` 把投机排除在换出之外，因为两边的 frontier
-共用一个 `kv_offset`，只压 text 会让 draft 层的 RoPE 位置整体错开。
-三处修复（3 文件 77 行）分别是：MTP 的 KV 也 compact 并断言两边窗口相等；
-prefill 的 compact 预算取 `min(配置窗口, 池余量)`（原代码只用后者，每次都吃到池满）；
-`chunked_kv_prefill` 的判据改用 prompt 原始长度（原判据在紧凑坐标下会翻 false，
-换出后的每个 piece 都不再映射）。
-
-**实测**：213,723 token 真实文本，设备池 2,048 页 / 逻辑 4,096 页（窗口 1,536 页），
-MTP draft 3 —— TTFT **164.0 s**（prefill 1,302.8 tok/s）、decode **88.8 t/s**、
-runtime **5.21 GiB**，答案正确。同一段文本在 2,048 页的池上全驻留是起不来的。
-
----
-
-## 4. 部署
-
-### 4.1 硬件与前置
-
-| 项 | 要求 |
-|---|---|
-| GPU | NVIDIA Ada `sm_89`（RTX 40 系）。本仓库在 **RTX 4070 Ti SUPER 16 GB** 上调优与验证 |
-| 显存 | ≥ 16 GB（权重 6.70 GiB + MTP 0.42 GiB + KV） |
-| 系统 | Linux（本仓库在 Arch 上验证）。**路径必须纯 ASCII** |
-| 工具链 | CUDA 13.x、GCC 15+、CMake ≥ 3.24 |
-
-**把显示器接在核显上（如果主板有）。** 独显跑桌面会抢显存带宽，本机实测差约 **10%**。
-这不是调参，是环境状态。
-
-### 4.2 编译
-
-```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_ARCHITECTURES=89
-cmake --build build -j"$(nproc)"
+./build/apps/ninfer "$NINFER_MODEL" \
+  --prompt '请用一句话介绍你自己。' \
+  --max-context 8192 --prefill-chunk 512 --max-new 64 \
+  --kv-dtype int8 --spec mtp --draft-tokens 7 --lm-head-draft \
+  --greedy --no-thinking
 ```
 
-产物：`build/apps/{ninfer, ninfer-serve, ninfer-perplexity}`。
+该入口显式选择MTP7和optimized proposal head；程序本身未指定 `--spec` 时仍关闭投机解码。固定MTP接受1–15个draft，Serve/API的adaptive或lookup模式上限仍为7；参数支持范围不等于任意工作负载的性能或质量保证。
 
-> **两个已知的编译坑**（都是 `-rdc=true` 下多路 nvcc 并发引起的，与代码无关）：
-> 1. **`TMPDIR` 在 tmpfs 上会导致 GCC 段错误。** 把 `TMPDIR` 指到磁盘：
->    `export TMPDIR=$PWD/tmp-nvcc`
-> 2. 编译偶发报 ICE（`cc1plus` 段错误）。**重试即可**，不是代码问题。
->    并发降到 `-j6` 能显著降低概率。
+HTTP 服务：
 
-**非旗舰卡要传自己的 SM 数**（可选，默认沿用的值对旗舰是对的）：
-
-```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_ARCHITECTURES=89 \
-      -DNINFER_SM_COUNT=66        # 4070 Ti SUPER；4090 传 128、3090 传 82
+```sh
+./build/apps/ninfer-serve "$NINFER_MODEL" \
+  --host 127.0.0.1 --port 8080 --model-id qwen3.8-27b \
+  --max-context 8192 --kv-capacity 8192 --prefill-chunk 512 \
+  --max-concurrency 1 --kv-dtype int8 \
+  --spec mtp --draft-tokens 7 --lm-head-draft \
+  --greedy --no-thinking
 ```
 
-`src/core/device.h` 里按架构写死的是**各架构旗舰**的 SM 数（sm_89 = 128 / 4090，
-sm_86 = 82 / 3090）。同架构的小卡按旗舰编会被当成有那么多 SM 来调度：small_t 因果注意力的
-分片上限是 `kTargetSmCount / KVHeads`，66 SM 的卡按 128 编会排成约两波、尾波空一半。
-**本机实测**（int8 档 + MTP 验证轮 T=6，那个上限生效的场合）：decode **+0.86%~+0.96%**、
-prefill 不变、接受率 −0.4 个点；**bf16 档根本不查那个上限，两臂逐位相同**。
-**不传就是原来的行为**（旗舰一位不变），因为这是「卡的事实」而不是调优旋钮。
-不传时想确认自己卡的值：`nvidia-smi --query-gpu=name` 或引擎启动日志里的 SM 数。
+```sh
+curl -sS http://127.0.0.1:8080/health
 
-### 4.3 模型
-
-模型是 **Ternary Bonsai 2 27B** 的 `.ninfer` 制品。**本仓库不包含、也不重新分发权重**——
-从官方渠道获取，并遵守其许可（可能不是 Apache-2.0）。详见 §8。
-
-### 4.4 跑起来
-
-**命令行**（单次问答）：
-
-```bash
-./build/apps/ninfer <model.ninfer> \
-  --messages prompt.json \
-  --max-context 8192 --max-new 512 \
-  --spec mtp --draft-tokens 3 \
-  --no-thinking
-```
-
-`prompt.json` 是 OpenAI 风格的消息数组：
-
-```json
-[{"role": "user", "content": "你好"}]
-```
-
-> 中文提示**必须**走 `--messages`。走 `--prompt "中文"` 会报 `failed to normalize UTF-8 text as NFC`。
-
-**服务端**（推荐用于多轮对话）：
-
-```bash
-./build/apps/ninfer-serve <model.ninfer> \
-  --host 127.0.0.1 --port 8084 \
-  --kv-dtype rk4v4 --max-context 262144 --kv-capacity auto \
-  --max-concurrency 1 --prefill-chunk 1024 \
-  --spec mtp --draft-tokens 3 --no-thinking
-```
-
-```bash
-curl -s http://127.0.0.1:8084/v1/chat/completions \
+curl -sS http://127.0.0.1:8080/v1/chat/completions \
   -H 'Content-Type: application/json' \
-  -d '{"messages":[{"role":"user","content":"你好"}],"max_tokens":512}' | jq -r '.choices[0].message.content'
+  -d '{"model":"qwen3.8-27b","messages":[{"role":"user","content":"Reply exactly with hello."}],"max_tokens":32,"temperature":0}'
 ```
 
-> **多轮对话优先用 `ninfer-serve` 而不是 `ninfer`。** CLI 侧的前缀缓存是**硬编码关闭**的，
-> 而 serve 默认开启——同一段历史在 CLI 上每轮都会从头 prefill 一遍。
+服务还提供 `/v1/responses`、`/v1/messages`、模型查询与 token 计数接口；`/metrics`、`/slots` 和 `--request-log-jsonl` 用于观察实际请求与容量。CLI 参数见 [CLI 文档](docs/cli.md)，具体可用参数以当前二进制 `--help` 为准。
 
-**接 agent harness：一个能验的例子**
+## 长上下文：有界GPU工作集与显式K15配置
 
-上面两条只证明"服务起来了"。**工具调用 + 多轮**这条链路要单独验，用 agent harness 跑一个具体任务：
+本次长档吞吐实测是32,768-token prefill、128-token decode、逻辑ctx36,864的resident工作负载。更长逻辑上下文通过KVMem运行：以下配置保持32K工作集和36K物理KV池，逻辑context设为212,992。它的K15原六题质量状态为 **`2026-10-21：最终 K15/Graph/sync 长档配置的原 213K 六请求 **6/6 精确正确**，HTTP、流终态和 usage 完整，server 正常退出。`**，通过后才作为发布长档使用；既有K7原题6/6记录另列于质量表。
 
-```bash
-# 终端 1：把服务起起来（§5.1 的推荐配置，但**要去掉 --no-thinking**——见下）
-# 终端 2：
-BONSAI_API_KEY=local dsh --profile headless \
-  "Draw a 2D animation of a pelican riding a bicycle as ONE self-contained HTML \
-   file, inline SVG only, under 120 lines. Output only the code."
+| 参数 | 长配置值与含义 |
+|---|---|
+| 逻辑context | 212,992；冻结原题实际prompt为212,276–212,441 tokens |
+| GPU物理KV池 | 36,864 tokens |
+| KVMem工作集 | 32,768 tokens，generation reserve512 |
+| KV / prefill | INT8、chunk512 |
+| 并发与解码 | C1、固定MTP15、optimized proposal head、CUDA Graph |
+| 搬运模式 | sync |
+| global Host KV | `--host-kv-mib 0`；独立KVMem归档、StateImage和pinned staging仍存在 |
+| 恢复路径 | canonical；original-position实验路径保持关闭 |
+
+<details>
+<summary>已通过原213K六题的长档K15启动命令</summary>
+
+```sh
+mkdir -p .cache/kvmem
+
+env \
+  NINFER_R27_BUNDLE=1 NINFER_R26_BUNDLE=0 NINFER_R28_BUNDLE=0 NINFER_R29_BUNDLE=1 \
+  NINFER_PROMPT_I8_PIPELINE=1 \
+  NINFER_GGUF_MMQ_BF16=1 NINFER_GGUF_IQ2_S_MMQ_BF16=1 \
+  NINFER_GGUF_IQ3_S_MMQ_I64=1 NINFER_GGUF_IQ3_XXS_MMQ_I64=1 \
+  NINFER_KVMEM_SOURCE_LAYER_BATCH=1 NINFER_KVMEM_SOURCE_COPY_BATCH=1 \
+  NINFER_KVMEM_SOURCE_READ_AHEAD=1 \
+  NINFER_KVMEM_ORIGINAL_POSITIONS=0 NINFER_KVMEM_VERIFY_ORIGINAL_STATE=0 \
+  NINFER_KVMEM_COLD_DIR="$PWD/.cache/kvmem" \
+  ./build/apps/ninfer-serve "$NINFER_MODEL" \
+    --host 127.0.0.1 --port 8080 --model-id qwen3.8-27b \
+    --max-context 212992 --kv-device-tokens 36864 --prefill-chunk 512 \
+    --host-kv-mib 0 --max-concurrency 1 --kv-dtype int8 \
+    --kvmem --kvmem-budget 32768 --kvmem-gen-reserve 512 \
+    --kvmem-action-lrfu --kvmem-lrfu-lambda 0.5 --kvmem-lrfu-top-frac 0.3 \
+    --kvmem-transfer-mode sync \
+    --spec mtp --draft-tokens 15 --lm-head-draft --greedy --no-thinking
 ```
 
-harness 侧的模型配置（`~/.dsh/settings.yaml`）指向 `http://127.0.0.1:8080/v1`、model id
-`Ternary-Bonsai-2-27B`，**`contextWindow` 要和 `--max-context` 对齐**——给大了客户端会发超长请求，
-服务器直接拒掉。
+Cold目录设在NVMe挂载点时使用该设备上的文件后备；目录和file capacity指标不代表每次读取都穿透物理SSD。source read-ahead使用两个有界pinned slot，默认0、示例显式启用；它和普通页搬运async分别配置。该命令不提供断电后跨进程恢复会话保证。
 
-**实测**：**3 分 22 秒**结束，过程中发出 **8 次请求**——agent 的工具循环：自己写文件、
-自己 `wc -l` 数行数、自己解析 SVG 验证结构。产出是一个 **58 行、零外部引用、能渲染的单文件 HTML**。
+</details>
 
-> **两条前提，缺了它这个例子不会自己结束**：
-> ① **服务端不要加 `--no-thinking`**——agent 循环靠模型自己收尾，关掉思考链它就只会一遍遍重写同一个文件；
-> ② 采样不要用 `--greedy`（那是给对账用的，会加剧这一点）。
->
-> **为什么用 agent 循环而不是一次性生成**：每一步都以一个工具调用收尾，**思考因此有终点**。
-> 另跑一次对照，把客户端输出上限从 32,768 放开到 199,000：**3 分 27 秒 / 8 步**，
-> 它**并没有想得更多**（思考量反而少 19%），照样收尾并给出成品。
-> **终端条件是"每一步有个必须落地的动作"，不是上限。**
+### Async Page Pipeline 的当前状态
 
-### 4.5 部署到长会话时要注意的
+已实现页事务与解码计算重叠、有界批次拆分、ready/completion事件、pin与owner/generation检查、失败排空和回退。通过 `--kvmem-transfer-mode async` 显式选择；默认仍为 **sync**。
 
-**服务端的前缀缓存对 agent 循环是逐轮推进的**，前提是历史形态被正确识别。
-一个反例：如果调用方每一轮都**丢弃 reasoning**（Hermes 这类 harness 的常见做法），
-而服务端把轮次锚点认错，缓存命中量会**冻结在会话早期**，未命中量随会话线性增长，
-TTFT 从秒级退化到几十秒。已在 `d69ef3d` 修复（锚点改为「最后一条 user **或 tool** 消息之后」），
-但换任何前端时都值得看一眼启动日志里的 `cache N (X%, <路径>)` 那一列：
+2026-10-20的P4成对测试包含18会话/54请求，全部正确完整；深轮async相对同对sync的session wall缩短中位约 **0.54%**，未达到预设10%的默认采用门槛。它证明当时配置的功能与有界生命周期，不支持“超池完全不减速”或“async已带来10%加速”。后续MMQ/MTP/source改动也没有自动更新这份P4结论。详见 [活跃验证记录](docs/maintainer/2026-10-20-kvmem-actkv-live-validation.md)。
 
-| 路径 | 含义 |
-|---|---|
-| `turn closure` / `private endpoint` | 正常，值应逐轮推进 |
-| `shared prefix` | 另一条路径，正常 |
-| **任何路径下值恒定不涨** | 有问题，未命中会累积 |
+## 质量与支持范围
 
----
+| 日期 | 模型与工作负载 | 已有结果 | 范围 |
+|---|---|---|---|
+| 2026-10-21 | Qwen3.8 GSQ、32K工作集、原213K六请求、MTP7/Graph/sync、近期三格式decode profile | **6/6精确正确**，HTTP/terminal/usage完整，server正常退出 | 原冻结事实题及该显式单卡配置；不是任意213K任务的准确率基准 |
+| 2026-10-20 | Qwen3.8 GSQ、32K工作集、原256K六请求；sync与async各一臂 | **12/12正确完整**，实际261,411–261,576 prompt tokens，两臂输出/usage一致、终态在飞0 | 较早功能版本，base/no-Graph，无MTP/DFlash2；没有在当前MTP7或MTP15配置重新认证256K |
+| 2026-10-20 | 小工作集超池、保留分支及短Graph/MTP/DFlash2语义 | 对应固定fixture通过 | 不合并成任意后端/上下文/并发组合通用保证 |
+| 2026-10-20 | 真实图像、双图、短MP4，及Vision+MTP / Vision+DFlash2部分组合 | 原生HTTP请求完成，部分受控图像描述与输入一致 | 小尺寸、短请求功能验收；未建立高分辨率、长视频或长上下文媒体准确率 |
+| 2026-10-21 | 当前发布binary：T16/BF16输出、SiLU-down融合与K15 round/layout；两档整体Engine | **50次Op与K15单元通过；18次整体Graph运行通过，各工作负载9次完整129 IDs一致；短档Graph与既存Eager语义一致** | K15长档原六题 **6/6精确正确**，HTTP/终态/usage完整，server0；256K及媒体未以K15重新认证 |
 
-## 5. 配置
+较早213K失败及修复保留在 [状态重建记录](docs/maintainer/2026-10-20-213k-state-replay-repair.md)；较新的质量与未采用候选见 [活跃验证记录](docs/maintainer/2026-10-20-kvmem-actkv-live-validation.md)。[多图/视频记录](docs/maintainer/2026-10-20-v3-vision-multi-image-video-single-gpu.md) 与 [Vision+投机组合记录](docs/maintainer/2026-10-20-v3-combined-vision-spec-single-gpu.md) 单列媒体边界。
 
-### 5.1 推荐配置与每一项的代价
+## 整体性能对照
 
-```bash
---kv-dtype rk4v4          # 上下文 120k → 262,144；运行时 8.54 → 4.71 GiB
---max-context 262144 --kv-capacity auto
---max-concurrency 1       # 交互延迟优先；**批处理吞吐**见下
---prefill-chunk 1024      # 默认值已是最优（扫过 128~2048）
---spec mtp --draft-tokens 3   # decode +2.3×。**K 的最优点随任务移动**，见 §5.2
---no-thinking             # decode +31%。**用法取舍**：关掉思考链
+以下为2026-10-21本机同一v1.0.0 binary的完整Engine测量。**A是本binary的显式回退配置：六个性能开关全0、MTP7；它不是旧版本或程序默认值。** B为六开关全1、MTP7；C在B上启用 `NINFER_R29_BUNDLE=1` 并选择MTP15。六开关是 `NINFER_GGUF_MMQ_BF16`、`NINFER_GGUF_IQ2_S_MMQ_BF16`、`NINFER_GGUF_IQ3_S_MMQ_I64`、`NINFER_GGUF_IQ3_XXS_MMQ_I64`、`NINFER_PROMPT_I8_PIPELINE`、`NINFER_R27_BUNDLE`；两档均保持R26/R28关闭。
+
+共同条件：同一Qwen3.8 GSQ artifact、RTX4070 Ti SUPER、INT8/chunk512、C1、CUDA Graph、optimized proposal head；每次一个warmup和一个测量，顺序为 **ABC / CBA / ABC**。短、长各9次，共18次完整运行；每档9次生成的完整129 IDs相同。`pp`和`tg`分别按prefill token数与128个decode token归一化，不含加载和warmup。
+
+| 整体工作负载 | 配置 | prefill tok/s | decode tok/s | 对A成对吞吐提升中位数：prefill / decode |
+|---|---|---:|---:|---|
+| pp4096 + tg128，ctx8192 | A：回退K7 | 1882.90 | 186.59 | 基线 |
+| 同上 | **B：短档K7** | **1973.53** | **189.75** | **+5.23% / +0.76%** |
+| 同上 | C：K15 | 1993.98 | 160.94 | +5.77% / −14.69% |
+| pp32768 + tg128，ctx36864 | A：回退K7 | 1683.13 | 173.41 | 基线 |
+| 同上 | B：K7 | 1831.00 | 175.03 | +9.16% / +1.56% |
+| 同上 | **C：长档K15** | **1838.12** | **192.92** | **+9.58% / +11.78%** |
+
+绝对tok/s由每配置的三次时间中位数计算；百分比为三个成对比值的中位数，因此不要求等于表中两个绝对中位数之比。短档B/A的prefill三对均正，decode两正一负；长档B/A和C/A的prefill/decode三对均正。C相对B在短档decode退化 **15.18%**，在长档decode提升 **10.22%**、三对均正，因此保留两个显式入口；本次比较没有建立通用自动切换阈值。
+
+接受工作量也随输入变化：短档K7为17 rounds / 117 drafted / 111 accepted，K15为12 / 164 / 116；长档K7为17 / 113 / 111，K15为9 / 124 / 119。输出相同不代表两种profile执行了相同的草稿工作。
+
+原始秒数、成对值、binary和环境身份见[整体性能数据](docs/releases/v1.0.0/overall-performance.json)与[发布报告](docs/releases/v1.0.0.md)。这是整模型profile比较，不能拆分认领每个开关的贡献。 本轮原213K单臂API TTFT：首题 152.59s，后五题中位 17.71s；仍重放185,836个历史tokens。原213K的TTFT还包含selected-history重建、页与状态恢复和调度；**本轮没有进行配对TTFT或新P4性能测量**，resident吞吐不能直接换算超池TTFT，也不支持设备最优结论。
+
+本地整体入口示例（先采用上文B配置环境）：
+
+```sh
+./build/bench/ninfer_bench --weights "$NINFER_MODEL" \
+  --max-ctx 8192 --prefill-chunk 512 --kv-dtype int8 \
+  --spec mtp --draft-tokens 7 --lm-head-draft \
+  -pg 4096,128 -r 1 --warmup 1 -o json --output-file bench-short.json
+
+# C配置的32K预填工作负载
+NINFER_R29_BUNDLE=1 ./build/bench/ninfer_bench --weights "$NINFER_MODEL" \
+  --max-ctx 36864 --prefill-chunk 512 --kv-dtype int8 \
+  --spec mtp --draft-tokens 15 --lm-head-draft \
+  -pg 32768,128 -r 1 --warmup 1 -o json --output-file bench-long.json
 ```
 
-想要 262k 上下文又不想放弃速度，在 `--kv-dtype rk4v4` 之外再开 KVMem（§3），
-或者用 `int8` + KVMem 换更好的数值。
+## 文档与代码入口
 
-**`--max-concurrency` 有两种口径，别只看一半**：decode 是**真正的批**（权重读被摊掉），
-但 prefill 是**独占**的（一次只服务一条 lane）。所以
-
-| | 单路延迟 | 总吞吐 |
-|---|---|---|
-| `--max-concurrency 1` | ✅ 113 t/s | 1.00× |
-| `2 ~ 3` | 降到 70% / 51% | **约 1.40× / 1.53×** |
-
-注意 **KV 池按并发线性放大**（`max_concurrency × page_count(max_context)`），
-所以 **16 GB 上 `N>1` 与长上下文（>64k）互斥**。
-
-**`--draft-tokens` 的最优点随任务移动**（2026-09-26 实测，真交替 3 轮中位数）：
-
-| 任务 | 每位置存活率 | 最优 K | K=3 | K=5 | K=7 |
-|---|---:|---:|---:|---:|---:|
-| `en-code`（写代码，低可预测性） | ≈0.76 | **5** | 143.4 | **151.0** | 136.6 |
-| 数数 / 结构化输出 | ≈0.95 | **7** | 191.3 | 232.4 | **231.8（+21%）** |
-| 模板复读（上界） | ≈0.995 | **≥7** | 197.0 | 248.4 | **289.3（+47%）** |
-
-**接受率不是常数，它随位置衰减，而衰减速度是任务的属性**，`accepted by pos` 直方图直接
-把它印出来（K=7 时）：
-
-```
-en-code        56,45,28,23,17,11, 7    每位置 ~0.76，第 4 位起就亏
-mtp-count      40,39,39,32,30,22,13    前四位 ~0.97，后面掉
-mtp-template   32,32,32,32,32,32,31    几乎不衰减，接受长度 7.97（上限 8）
-```
-
-所以"draft 更大只会更慢"只对低可预测性任务成立：**同一个二进制上，`en-code` 的最优是 K=5
-而 K=7 反而比 K=3 差，模板复读却在 K=7 上快 47%。** 成本侧是固定的（每个 draft 步
-≈1.94 ms，与任务无关），收益侧是存活概率，交叉点在每位置 ≈0.75。
-
-**K 的上限是 7**（`T=K+1≤8`，再高会掉出 `small_t`，验证轮从 13.3 ms 跳到 40 ms），
-`--draft-tokens` 在这个范围内按任务选。上限写在四个地方，各自是不同类型的东西
-（捕获图的宽度、模型配置、CLI 校验、运行时不变量），彼此手工对齐，改的时候要一起改——
-见 `round_state.h` 里那段注释。
-
-`--greedy` 能让 decode 再快约 12%（接受率 36% → 44%），但它**改变输出分布**——
-**只在做性能对账时用**，不要当成生产默认。
-
-**16 GB 上的取舍**：`--max-context 262144` 配 bf16 KV 起不来，必须配 4-bit KV 或开 KVMem。
-
-`--vision` 的显存代价约 **0.5 GiB**（视觉塔 0.27 + workspace 0.24）。
-另有 media 子系统的**预算上限 3 GiB**（`--media-cache-mib` 1024 + `--media-live-mib` 2048）——
-那是**宿主侧**额度、按需分配、不进显存预留。要省它不必关视觉，调这两个参数即可。
-
-**`--kv-capacity auto` 在 `--max-concurrency 1` 时等价于显式写 `max_context`**——
-它不是"自适应"，只影响"放不下就报错"那条分支。
-
-### 5.2 KVMem 的配置
-
-见 §3.2。三个要点复述：**必须 `--kv-dtype int8`**；
-`--kv-device-tokens` 决定省多少显存；**`--kvmem-budget` 决定质量**（§3.5）。
-
-### 5.3 KV 档怎么选
-
-**不传 `--kv-dtype` 时按 `--max-context` 自动选档：16383 及以下 `bf16`，16384 及以上 `fp8`。**
-阈值不是拍的——下面第一张表就是它的依据。想要别的档显式写 `--kv-dtype` 即可，五档都认。
-
-> **可达上下文随"启动时还剩多少显存"移动，不是模型的常数。** 表里的值是本机（16 GB 卡、
-> 桌面不占独显）实测的上限；`--query-gpu=memory.used` 若已有几百 MiB 被占，这几个数会等比下降。
-> 复现方法：从大往小试 `--max-context`，起不来时会明确报差多少字节
-> （`but only N bytes are available after weights`），从差值除以每 token 字节数就能算出边界。
-> 2026-09-26 复测：`fp8` 请求 233,000 起得来（规划 233,024 / 3,641 页 / runtime 7.66 GiB / 余 1.01 GiB），
-> 234,000 起不来；`int8` 213,000 起得来。**反推每 token 32,994 字节（32.2 KiB）**，与表里那列一致。
-
-| KV 精度 | 实测可达上下文 | 每 token | 说明 |
-|---|---:|---:|---|
-| `bf16` | ~120k | 64 KiB | `--max-context` ≤ 16383 时的默认 |
-| `fp8` | **233,024** | 32.3 KiB | ≥ 16384 时的默认；**长上下文最快** |
-| `int8` | ~213k | 33.0 KiB | 三档里数值最准，但比 `fp8` 慢；**KVMem 只认它** |
-| **`rk4v4`** | **262,144（吃满原生上限）** | 17.0 KiB | 4-bit，运行时 8.54 → **4.71 GiB** |
-
-**实测 decode**（`--spec mtp --draft-tokens 3`，真交替 3 轮取中位数，每一种配置都显式写 `--kv-dtype`，
-所以量的是内核差不是精度差）：
-
-| KV 档 | 30k 提示 | 64k 提示 | 长口径 PPL 代价 |
-|---|---:|---:|---:|
-| `bf16` | 142.9 tok/s | 96.7 tok/s | —（锚） |
-| `int8` | +6.2% | +13.8% | **+0.077%** |
-| **`fp8`** | **+7.1%** | **+16.4%** | +0.143% |
-| `rk4v4` | +6.9% | +13.4% | +0.213% |
-
-（64k 那一轮的 `rk4v4` 接受率是 61.2%，另外三档都是 60.1%——KV 档改的是 attention 的数值，
-轨迹可能分叉，所以它的 +13.4% 略微被偏高地衬托了。
-另：这两个锚测于验证路两处改动（§2.1）之前，绝对值偏低约 1.3%，
-**百分比不受影响**——row block 按形状选、split-K 只在 `n ≤ 6144` 且 K 够深的形状上切，
-两条都与 KV 档无关，**四个 KV 档一视同仁**。）
-
-读法三条：
-
-1. **收益随上下文近线性**（约每 3.7k token 一个百分点），16k 以下进不了单次 decode 测量的
-   run-to-run 噪声——这正是阈值取 16384 的原因。PPL 那一列用的是长口径门
-   （`--context 65536 --stride 32768`，12.4 万 token 语料，3 窗口，bf16 锚 2.099109），
-   **判据 ≤0.30%，四档全过。**
-2. **`rk4v4` 的 KV 字节只有 `fp8` 的一半，decode 却更慢。** 它的 decode 端每层每次 attention
-   多一个 `kv_cache_inverse_rotate_output_kernel`（16 层 ⇒ 图里多 16 个节点），那个固定代价
-   吃掉了带宽收益。⇒ **KV 字节数不是长上下文 decode 的约束。** 早先按"KV 读 = 权重读"的算术
-   把 `rk4v4` 当成 110k 以上的必然选择，那张模型表没有算进这一项，结论因此是错的。
-3. 所以 **`rk4v4` 的定位是容量档，不是速度档**：它让 262,144（吃满原生上限）成为可能——
-   那一行 `bf16`/`fp8`/`int8` 会先 OOM，只有它跑得起来。已实测 **247,646 token 深埋召回
-   答对**。要速度用 `fp8`，要最准用 `int8`。
-
-**服务端侧复核**（`ninfer-serve` + `/v1/chat/completions`，30k 提示，`--max-context 40960`——
-四档共同装得下的深度，`bf16` 是 64 KiB/token，200K 要 12.8 GB 放不进 16 GB 卡。
-真交替 2 轮，**每一种配置都重启服务，所以前缀是冷的**）：
-
-| KV 档 | prefill | TTFT | decode | MTP 接受率 |
-|---|---:|---:|---:|---:|
-| `bf16` | 2.22k / 2.21k | 12.7 / 12.8 s | **146.6 / 146.6** | 94.4% |
-| `int8` | 2.28k / 2.27k | 12.4 / 12.4 s | **157.1 / 157.0** | 94.4% |
-| **`fp8`** | 2.25k / 2.24k | 12.6 / 12.6 s | **157.1 / 157.1** | 94.4% |
-| `rk4v4` | 2.20k / 2.20k | 12.8 / 12.8 s | **156.1 / 155.9** | 94.4% |
-
-**两条**：① **prefill 与 KV 档基本无关**（极差 3.6%）——prefill 是**权重带宽**受限
-（要读 7.12 GiB 权重），KV 写入只占零头，换档不会让长提示更快进上下文。
-② **decode 只有 `bf16` 明显慢**，其余三档约 +7%，`int8` 与 `fp8` 打平、`rk4v4` 落后 0.6%。
-**排序与上面 CLI 那张表一致**，所以那张表的口径是可靠的。
-
-> ⚠️ 两个口径陷阱：**每一种配置都必须冷前缀**（第二次起命中 99.9%，`prefill X tok/s` 那行要么是残量
-> 要么不打）；**深度必须四档都装得下**。
-
-### 5.4 环境变量
-
-| 环境变量 | 默认 | 作用 |
-|---|---|---|
-| `NINFER_TERNARY_S8` | 开 | `=0` 回到 bf16 档（**同二进制 A/B 用这个**） |
-| `NINFER_TERNARY_S8_MIN_TOKENS` | 17 | s8 起效的 T |
-| `NINFER_TERNARY_S8_KSPLIT` | 开 | `=0` 退回逐位相同的那条（§2.2） |
-| `NINFER_TERNARY_GAP` | `auto` | T=9..31 用哪档：`auto`/`small_t`/`s8`/`gemv` |
-| `NINFER_TERNARY_GAP_SMALL_T_MAX` | 16 | `auto` 的分界 |
-| `NINFER_TERNARY_MMA_MIN_TOKENS` | 32 | bf16 MMA 起效的 T |
-| `NINFER_TERNARY_SHORT_TILE_TOKENS` | 64 | 64 宽 / 128 宽 tile 的分界 |
-| `NINFER_TERNARY_VERIFY_CAP` | 8 | 验证轮接受的 T 上限 |
-| `NINFER_TERNARY_SMALL_T_ROWS` | 32 | small_t 的 rows/CTA（16/32/48） |
-| `NINFER_TERNARY_SMALL_T_KSPLIT` | 开 | `=0` 关解码侧 split-K（§2.2） |
-| `NINFER_TERNARY_DECODE` | `small_t` | `=gemv` 回退 |
-| `NINFER_TERNARY_PREFILL` | `mma` | `block`/`ref` 为 A/B 对照 |
-| `NINFER_TERNARY_HADAMARD` | 开 | `=0` 关旋转（**输出无意义**，仅诊断） |
-| `NINFER_TERNARY_S8_DEBUG` | 关 | `=1` 打印**每次调用实际走的档位** |
-| `NINFER_KVMEM` | 关 | `=1` 开启 KVMem（等价于 `--kvmem`） |
-| `NINFER_KVMEM_BUDGET` | 0 | KVMem 常驻窗口的 token 数（0 = 整个 context） |
-| `NINFER_KVMEM_GEN_RESERVE` | 8192 | KVMem 留给 decode 的池余量 |
-
-**改 dispatch 之后第一件事是开探针确认分支真的被走到了**——只看速度看不出走没走对分支。
-这条是本仓库最贵的一课，详见 `.claude/skills/ninfer-perf-tuning/SKILL.md`。
-
----
-
-## 6. 性能数据
-
-### 6.1 读这些数字之前：口径与精度
-
-**跑测的固定条件**（不对齐这些，下面的数字互相不可比）：
-
-| 项 | 取值 |
+| 入口 | 内容 |
 |---|---|
-| KV 精度 | **`bf16`**（三版都认的档位；`rk4v4` 上游三元版的 **CLI 不认**，只有 serve 认） |
-| `--max-context` | 8192（长提示场景另设） |
-| 采样 | **`--greedy`** —— 只为对账用，它改变输出分布，**不是生产默认** |
-| 思考 | **`--no-thinking`** |
-| 生成长度 | prefill 场景 `--max-new 8`；decode 场景 300 token |
-| 轮次 | **真交替 3 轮的中位数**（每轮把三版都跑一遍，避免 GPU 温度漂移整段落在某一版头上） |
-
-> **⚠️ 绝对值有 ±1~2% 的时段漂移，比值没有。** 同一天、同一台机器、同一份夹具、同一个二进制，
-> 间隔 45 分钟的两轮全表测出来上一版的长提示从 1.25k 掉到 1.22k（−2.4%）、
-> decode 从 146.9 掉到 145.4（−1.0%），而**三版同幅下移**，所以表里的百分比稳定、绝对值不稳定。
-> 结论：**拿这张表比版本，不要拿它比时段**；要跟别的时段对账，**当场把两种配置都跑一遍**。
-
-**★ 精度有三条互相独立的轴，先说清楚哪一条在变：**
-
-| 轴 | 三版是否相同 | 说明 |
-|---|---|---|
-| **权重** | **三版相同** | 固定三元 `PQ2_0_G128`，每权重 2.125 bit。**永远不构成变量** |
-| **激活** | **三版不同** ← 唯一在变的那条 | 走哪个 GEMM 档（见下） |
-| **KV 缓存** | **三版相同** | 本节所有表都钉在 `bf16`（见上面固定条件） |
-
-所以"某一版是什么精度"这个问法本身太粗。**会变的只有激活那条轴**，具体是：
-
-| 版本 | 激活走哪条路（`--max-context 8192` 下）|
-|---|---|
-| **上一版** | 只有两条 bf16 路（小 T 的 tile 路 + 大 T 的 MMA 路）。**它那时还没有 s8 档** |
-| **上游三元版** | **prefill 多一条 int8 路**（激活按 token 做 absmax 量化）；decode 仍走 bf16 |
-| **本版** | 同上 |
-
-**那条 int8 路只在 prefill 上生效**——它的门槛是 T ≥ 17（`kTernaryS8MinTokens`），
-而 decode 的验证宽度上界是 16（`kMaximumVerifyTokens`）。**所以 §2.2 那座 decode 表三版其实是同精度的**
-（都走 bf16），不一样的只是轨迹——prefill 的数值差会顺着 KV 传下来，于是接受率那一格会动。
-
-**要同精度比 prefill，三版都关掉 int8：**
-
-```bash
-NINFER_TERNARY_S8=0 <binary> <model> ...      # 上一版没有这个开关，设了也无害
-```
-
-§2.3 的表里因此给出两行：**「各自默认」**（现实部署的样子）与
-**「同为 bf16」**（剥掉激活差异后的纯内核对比）。
-
-### 6.2 速度矩阵：任务 × 上下文 × 思考 × 驻留模式
-
-三种任务在短/长上下文、带/不带思考下各跑一遍，KV 档 fp8 与 int8，
-三种配置并列：**全驻留 fp8**、**全驻留 int8**、**KVMem int8**。
-
-口径：CLI、`--greedy`、`--max-new 256`、`--spec mtp`；短上下文 `--max-context 8192`
-（prompt 69~340 token），长上下文 `--max-context 131072`（prompt ~124k）；
-KVMem 给 `--kv-device-tokens 131072 --kvmem-budget 98304 --host-kv-mib 8192`
-（设备池 2048 页、逻辑 4096 页，**真换出**）。**K 按任务取各自最优点**（见下表脚注）。
-
-**短上下文**
-
-| 任务 | 思考 | K | 驻留-fp8 | 驻留-int8 | KVMem-int8 |
-|---|---|---:|---:|---:|---:|
-| 鹈鹕骑自行车 | 不思考 | 5 | 155.2 | 155.2 | 155.1 |
-| 鹈鹕骑自行车 | 思考 | 3 | 146.8 | 146.5 | 146.6 |
-| 带工具查询（纯 tool_call） | 不思考 | 7 | **232.6** | 232.5 | 232.0 |
-| 带工具查询（纯 tool_call） | 思考 | 7 | 194.8 | 194.2 | 194.8 |
-| 小说撰写 | 思考 | 3 | 101.7 | 107.4 | 107.3 |
-| 小说撰写 | 不思考 | 3 | 89.0 | 85.9 | 85.9 |
-
-**长上下文（prompt ~124k）**
-
-| 任务 | 思考 | K | 驻留-fp8 | 驻留-int8 | KVMem-int8 |
-|---|---|---:|---:|---:|---:|
-| 鹈鹕骑自行车 | 不思考 | 5 | 113.1 | 108.1 | 108.2 |
-| 鹈鹕骑自行车 | 思考 | 3 | 71.1 | 74.6 | 74.7 |
-| 小说撰写 | 思考 | 3 | 78.8 | 77.3 | 77.3 |
-| 小说撰写 | 不思考 | 3 | 57.2 | 58.8 | 58.9 |
-| 带工具查询 | 思考 | 7 | 108.2 | 134.3 | 134.5 |
-| 带工具查询 | 不思考 | 7 | 182.6 | 180.4 | 181.3 |
-
-**prefill**：短上下文 852~1970 tok/s（**随 prompt 长度升——固定开销摊不薄，不能用它衡量引擎**）；
-长上下文三任务同档：**驻留-fp8 1460**、**驻留-int8 1520~1540**、**KVMem-int8 1520~1530**。
-28k 提示补测 **2.30k**，与 §2.3 的 2.18k（28k）、1.81k（62k）以及本文的 1.53k（124k）
-连成一条随长度单调下降的线。
-
-**四条结论**
-
-1. **KVMem 的速度代价是零。** 同 KV 格式的那两列（int8）在**真换出**状态下逐位相同：
-   108.1/108.2、74.6/74.7、77.3/77.3、58.8/58.9、134.3/134.5、180.4/181.3；prefill 同样。
-   短上下文（池装得下、不换出）也一致（155.2/155.1、232.5/232.0）。
-   **它买到的是 16 GB 卡上的 262k 逻辑 context，不是用速度换的。**
-2. **decode 由 MTP 接受率主导**，不是 KV 档也不是驻留模式。长上下文里 fp8 与 int8 的差异
-   都走接受率：工具-思考 108.2 对 134.3（−24%），因为 fp8 量化改变了输出、接受率从 65.5%
-   掉到 49.1%；工具-不思考两者持平（182.6 对 180.4），因为接受率都在 96%。
-3. **长上下文砍掉约三分之一**：工具 232 → 181（−22%），小说 86 → 59（−31%）。
-4. **K 随任务移动**（下表），固定一个 K 会让部分任务跑在次优点上。
-
-| 任务 | 每位置存活率决定的最优 K | K=3 | K=5 | K=7 |
-|---|---:|---:|---:|---:|
-| 鹈鹕骑自行车 | 思考 3 / 不思考 5 | 146.4 | **154.8** | 134.9 |
-| 小说撰写 | 3 | **101.5** | 88.9 | 81.7 |
-| 带工具查询 | **7** | 184.1 | 217.0 | **232.4** |
-
-**一个坑**：带工具查询有两种任务，速度差一倍。**纯 tool_call**（结构化输出，接受率 82~96%）
-K=7 到 232；**"查到结果之后写建议"**（自然语言，接受率 42%）只有 112。为了让输出够长
-（短输出测不稳 decode）而把前者改成后者，会连任务性质一起换掉。
-
-### 6.3 数值
-
-| 配置 | PPL |
-|---|---:|
-| 本机基线（`NINFER_TERNARY_S8=0`） | **9.69192** |
-| 本机默认（int8 档开启） | **9.6934** |
-
-口径：`ninfer-perplexity --text wiki-slice.txt --context 512 --stride 256`（110 窗口 / 28,160 token）。
-
-**split-K 与 T=17..64 这个窗口**（`NINFER_TERNARY_S8_KSPLIT`，默认开）：这个窗口里 token 轴
-只够一个 64 的分片、行轴又填不满卡（`gridX = div_up(n,64) < 198`），于是 s8 沿 K 切片补 CTA，
-在 T=28 上 prefill **+7.1%**。代价是 K 的累加被重结合成 fp32 的分片再求和——**确定，但不逐位相同**：
-`--context 32` 的 PPL 因此 +0.041%，而**上表两个数不受影响**（`--context 512` 的 T=508 早出了窗口，
-G3 前后读到的是同一个值）。
-
-> **它不改 decode 的速度，但会改 decode 的结果。** decode 的验证宽度上界是 16
-> （`kMaximumVerifyTokens`），低于 s8 自己的门槛 17（`kTernaryS8MinTokens`，见
-> `ternary_rowsplit_gemm.cu` 的 `x.ne[1] >= ternary_s8_min_tokens()`），**所以 decode 这一步
-> 根本不走 s8**。变的是 prefill 的数值，于是这一题的输出轨迹可能分叉：`en-code.json` 上分叉了
-> （接受率 67.6% → 66.0%），而同样落在窗口里的 `bash.json`(T=31) 和
-> `gap-sm.json`(T=27) **逐字节相同**。**分叉是任务相关的事件，不是必然。** 退回逐位相同的那条：
-> `NINFER_TERNARY_S8_KSPLIT=0`。
-
-**验证路上的第二处 split-K**（`NINFER_TERNARY_SMALL_T_KSPLIT`，默认开，2026-09-26）：
-它和上面这条**方向相反**——切的是 decode 的 T ≤ 8，而正是 s8 够不到的那一段。
-只对「行网格填不满卡 **且每片还剩 ≥4 个 K 步」的形状切（本模型只有 `5120×17408` 满足，
-4 片、1280 CTA），因为实测**每片只剩 1~2 步的形状反而变慢**（prologue 摊不掉）：
-不分这道门时**整体 −1%**，加了之后 +1.3~1.4%。六夹具 +0.2~1.8%、接受长度无一下降，
-**两种配置的 PPL 逐位相同**（prefill 根本不切，所以上表两个数不受影响）。同样不是逐位相同，
-回退开关是 `NINFER_TERNARY_SMALL_T_KSPLIT=0`。
-
-> **★ 这两个数是 `fp8` KV 的数。** `ninfer-perplexity` 的 KV 显式钉在 `fp8`（源码里写死，
-> 见 `apps/perplexity/main.cpp`），**而 `ninfer` CLI 按 `--max-context` 自动选档**
-> （≤16383 用 `bf16`，≥16384 用 `fp8`，见 §5.3）。两者协议不同、**数不要混**——
-> §2.2 的性能表在 `--max-context 8192` 下跑，是 bf16 KV；这一节是 fp8 KV。
-
-int8 档的偏移是 **+0.0015%**，量级正是 int8 激活量化误差本身。
-
-**KV 轴**（同一口径，五档，2026-09-26 首测）：
-
-| KV 档 | PPL | 相对 `bf16` | 每 token | 说明 |
-|---|---:|---:|---:|---|
-| **`bf16`** | **9.688451** | — | 64.00 KiB | `--max-context` ≤ 16383 时的 CLI 默认。无损基准 |
-| `int8` | 9.691663 | +0.033% | 33.00 KiB | **比 `fp8` 更准**，但 decode 比 `fp8` 慢 |
-| `fp8` | 9.693396 | +0.051% | 32.25 KiB | ≥ 16384 时的 CLI 默认，也是 `ninfer-perplexity` 的默认 |
-| `rk4v4` | 9.702774 | **+0.148%** | **17.00 KiB** | 跑满 262,144 的**唯一**档位，decode 比 `fp8` 慢 |
-| `rk4v4-e8` | 9.726728 | **+0.395%** | 17.00 KiB | **比 `rk4v4` 更差，且容量/速度相同** |
-
-三条结论：
-
-1. **`int8` 比 `fp8` 准**（+0.033% vs +0.051%），字节只多 2.3%。原因是编码方式：
-   `int8-g64` 是每 64 维一个 scale 的 8 位**定点**，而 `fp8-e4m3-r256` 只有 **3 位尾数**、
-   每 256 维才一个 scale。**逐元素精度差约 6 倍。** 但"更准"不等于"更好的默认"：
-   decode 实测 `fp8` 更快（64k 下 +16.4% 对 +13.4%，见 §5.3），所以长上下文的默认是 `fp8`，
-   `int8` 是精度优先时的选择——也是 KVMem 唯一认的档（§3.2）。
-2. **`rk4v4` 的代价是 +0.148%**，落在 KV 档的"软门"（0.05%~1%）低端——作为 16 GB 卡上
-   跑满 262,144 上下文的**唯一**档位，这个代价是站得住的。它是本仓库第一次被量化。
-3. **`rk4v4-e8` 比 `rk4v4` 差 3.5 倍，而容量、速度、每 token 字节完全相同。**
-   原因是它的解码端是个**刻意的半陪集近似**（代码注释原文：*"the D8+0.5 E8 coset is
-   collapsed … **not an exact E8**"*）——E8 的整形增益有一部分被丢掉了。
-   **在当前实现下 `rk4v4-e8` 没有存在理由。**
-
-> ⚠️ **这是 `--context 512` 的短口径。** 逐元素量化误差与上下文长度无关（KV 一次写入、
-> 只读不重量化），所以这张表在数值上有效；但越长上下文注意力越选择性，代价**可能更高**
-> （不是更低）。**长口径已做**（`--context 65536 --stride 32768`，12.4 万 token 语料，3 窗口，
-> bf16 锚 2.099109）：`int8` +0.077% / `fp8` +0.143% / `rk4v4` +0.213%，判据 ≤0.30% 四档全过。
-> **`rk4v4` 长口径是短口径的 1.44 倍**，方向与预期一致。
-
-> ⚠️ **不要拿这个 9.69 去和别处的数字比。** PPL 是协议的产物：换语料、换 context、换 stride 都是另一个数。
-> 上游文档里的金判据是 ≈6.445，那是它自己的协议。对账要跟本机自己的历史基线比。
-
-### 6.4 服务端的两条行为（都会咬人）
-
-**① `reasoning_effort` 的默认值是模型自带的 `xhigh`。**
-`chat_template.cpp:432` 的 `result.reasoning_effort.default_effort = ReasoningEffort::XHigh;`。
-**请求里开思考而不指定档位，就是最高档**——不是调用方设的。要降档得显式传
-`reasoning_effort: low|medium|high`（`request.h:142` 认 none/minimal/low/medium/high/xhigh）。
-
-**② `--default-thinking-budget` 是许可证，不是刹车。**
-思考/正文的切分靠模型吐控制 token（`frontend.cpp:557`）；预算只喂给一个**默认整个不启用**的
-语义追踪器（`semantic.in_reasoning = starts_in_reasoning && thinking.budget.has_value()`，
-注释说明默认不启用是为了不把每个 token 解码两遍），超预算的动作是**抛
-`model output exceeded the licensed thinking budget`——报错，不替模型收尾。**
-⇒ **它不解决"想不停"。**
-
-**给使用者的三条**（都是上面两条的直接推论，不含模型行为）：
-
-| 想要 | 怎么做 |
-|---|---|
-| 思考的档位可控 | 请求里显式传 `reasoning_effort`，别依赖默认值 |
-| 思考有终点 | **走 agent 循环**——每一步以工具调用收尾，思考因此有终点（可直接跑的例子见 §4.4）。`--default-thinking-budget` 是另一条路，但**它会在越界时报错，别把它当"自动收尾"用** |
-| 只要速度 | `--no-thinking`（取舍见 §5.1） |
-
-**"思考有终点"实测**（同一份二进制、同一台机器，服务端 `--max-context 200000 --kv-dtype fp8
---spec mtp --draft-tokens 3`，**不传 `--no-thinking`、不传 `--default-thinking-budget`**
-⇒ 思考不限、档位是默认的 `xhigh`）：
-
-| | 客户端上限 32,768 | **客户端上限放开到 199,000** |
-|---|---|---|
-| 首次拿到可用产出 | 3 分 22 秒 / 7 步 | **3 分 27 秒 / 8 步** |
-| 第 1 步思考 | 56,783 字符 | **34,844 字符** |
-| 思考合计 | 58,689 字符 | **47,487 字符** |
-| 产出 | 58 行单文件 HTML | **49 行单文件 HTML** |
-
-**放开上限之后它并没有想得更多（反而少 19%），照样收尾并产出。**
-⇒ **终端条件是"每一步有个必须落地的动作"，不是输出上限。**
-把上限调大既不是让长思考收敛的办法，也不是它不收敛的原因。
-
----
-
-## 7. 引擎内部：T 分档与常量
-
-### 7.1 档位
-
-三元线性层按 token 数 T 选内核。**T 不是提示长度**——实测规律（七个夹具一致）：
-
-```
-线性层看到的 T = prompt_tokens − 4
-```
-
-当前默认：
-
-| T | 档位 |
-|---|---|
-| 1 | `small_t`（tensor core） |
-| 2..8 | `small_t`（验证轮） |
-| 9..16 | `small_t_tiled`（8 宽 tile，每 8 token 重入一次） |
-| 17 及以上 | `s8`（int8 激活 × int8 权重张量核） |
-| （s8 关闭时）≥32 | `short_mma` / `wide_mma`（bf16） |
-
-改 dispatch 之后**第一件事是开 `NINFER_TERNARY_S8_DEBUG=1` 确认分支真的被走到了**——
-只看速度看不出走没走对分支。
-
-### 7.2 本机实测常量
-
-换卡要全部重测。
-
-| 量 | 值 |
-|---|---|
-| 只读带宽天花板 | 637 GB/s（实测；**单位是 GB/s 还是 GiB/s 尚未钉死**，见下） |
-| 权重每趟 | **6.80 GB = 6.33 GiB**（64 层 6461.8 MB + `output_head` 337.7 MB，逐张量累加；不含 MTP） |
-| `s8` 代价 | T=15 → 44.3 ms，T=28 → 51.3 ms。**不是"近平"**——mma 条数与 T 无关（tile 固定 64 宽），T=15 时 **76% 的 mma 算在零上** |
-| `small_t` 代价 | T=9..16 约 **20.5 ms × ceil(T/8)**；**T=1..8 是完全平的**（T=1 与 T=4 实测 13.75 / 13.3 ms，同一个 kernel、同一份权重） |
-| `small_t` / `s8` 交叉点 | **T=17** |
-| 64 宽 / 128 宽 tile 交叉点 | **T=64** |
-| decode 带宽 | **6.80 GB / 13.75 ms = 494 GB/s**（约占 637 的 78%） |
-| 每个 decode token 的 kernel 数 | **1224 个**（全在一张 CUDA graph 内，帧间间隙 **64 ns**，真空闲仅 3.7%） |
-| decode 轮内预算 | `ternary_small_t_mma_kernel` **420.6 次/轮 × 37.2 µs = 15 646 µs = 79%**；`ternary_rotate_bf16` 274 次 × 3.3 = 905 µs（4.6%）；`recurrent_record` 577 µs；`pq2_mma_s8` 386 µs |
-
-> ⚠️ **上面几行的单位口径不一致，是已知问题。** `637` 这个天花板在有些推导里当 GB/s 用
-> （6.80 GB ÷ 637 = 10.7 ms），在另一些里当 GiB/s 用（6.65 ÷ 637 = 10.4 ms）。两者差 7%。
-> **在钉死之前不要引用百分比。** 一次干净的单 kernel 读数就能定。
-
-**decode 的杠杆全在那 79% 里**，而它已跑到约 73% 有效带宽（7.12 GiB 权重 ÷ 672 GB/s
-= 11.4 ms 地板 vs 实测 15.6 ms）。**砍字节是直接砍地板，比抠 kernel 效率划算。**
-
----
-
-## 8. 谱系与致谢
-
-这项工作完全建立在 **NINFER** 及其周边分支之上。
-
-| 项目 | 贡献 |
-|---|---|
-| **[Neroued/ninfer](https://github.com/Neroued/ninfer)** | **NINFER 规范上游** —— C++20/CUDA 架构、DFlash2、ReplaySSM、Paged KV Cache。Apache-2.0 |
-| [UDPSendToFailed/ninfer-4090](https://github.com/UDPSendToFailed/ninfer-4090) | 最早的 RTX 4090 分支；E8 格 `rk4v4-e8` KV 存储 |
-| [sergiuszm/ninfer-4090](https://github.com/sergiuszm/ninfer-4090) | Ada `sm_89` 内核优化、GDN 协作启动修复 |
-| [natpate/ninfer-windows](https://github.com/natpate/ninfer-windows) | Win32/MSVC 可移植层 |
-| [headpiece747/ninfer-5090-windows](https://github.com/headpiece747/ninfer-5090-windows) | 原生 Windows MSVC 编译基座 |
-| [Don-Chad/ninfer-3090](https://github.com/Don-Chad/ninfer-3090) | Ampere 早期工作 |
-| **`Ambolio/ninfer-4090-windows`**（⚠️ 已不可公开访问） | **本分支源码树的直接基座**（v1.0.8 线）。仓库现已 404 —— 署名保留、链接移除 |
-| **[shensanshu/ninfer-ada-ternary](https://www.modelscope.cn/shensanshu/ninfer-ada-ternary)**（魔搭） | **三元移植本身的出处**：`patches/` 引擎侧改动、`tools/` 打包与验证工具、`docs/` 技术记录 |
-| **[naamfung/zatfung](https://github.com/naamfung/zatfung)** | **KVMem 的来源** —— 宿主端 KV 换出（紧凑打包 + re-RoPE）、窗口化续写、设备预算与逻辑 entitlement 解耦。分叉自本仓库的 `bd71d74`，`src/kvmem/*`、`logical_kv_store.h` 的 KVMem 逻辑与相关文档都出自这条线 |
-
-**方法参考**：三元编解码语义对齐 llama.cpp 生态的 `ggml-quants.c`；折叠 Hadamard 基参考 PrismML 的
-公开运行时与其 `prism.hadamard.*` 元数据契约；张量核 FWT 的设计思路受公开的 HadaCore / TurboQuant 工作启发。
-以上仅为方法参考，本仓代码为独立实现。
-
-### 模型权重
-
-模型是 **Ternary Bonsai 2 27B**，底座 `Qwen/Qwen3.8-27B`，架构未改，权重为三元量化 + Hadamard 旋转基。
-**权重版权归其原作者与发布方所有（PrismML 及其上游 Qwen 体系）——本仓库不包含、也不重新分发任何模型权重。**
-由权重产出的 `.ninfer` 制品属于权重派生品，其再分发义务**以权重原许可为准，与代码许可无关**。
-
-上游的 `NOTICE` 与 `LICENSE` 原样保留。本分支修改过的每个文件都在顶部带上显著声明，
-这是 Apache-2.0 §4(b) 的要求。
-
----
-
-## 附：其它文档
-
-| 文档 | 内容 |
-|---|---|
-| `.claude/skills/ninfer-perf-tuning/SKILL.md` | **调优方法论**：测量纪律、档位探针、A/B 设计、数值门、会静默骗人的坑 |
-| [README.en.md](README.en.md) | 英文版（含上游 NINFER 的完整 README 原文） |
-| `docs/` | 上游的产品指南（CLI、服务、性能、评测、维护者文档） |
-| `bench/fixtures/speed-matrix/` | §6.2 那张表的夹具、原始结果（`results.jsonl`）与复跑脚本 |
+| [Engine架构](docs/maintainer/engine-architecture.md) | 公共Engine、调度、目标与状态分工 |
+| [KVMem容量解耦](docs/kvmem-capacity-decoupling.md) | 逻辑上下文、设备工作集和Host容量的不同含义 |
+| [CLI](docs/cli.md) | 文本、消息、采样及媒体输入 |
+| [GGUF dispatch](src/ops/linear/gguf/gguf_dispatch.cpp) | 向量/矩阵产品、activation量化、BF16输出边界 |
+| [页与不可变K来源](src/kvmem/) | Cold store、source-K恢复、读前及生命周期 |
+| [Qwen family runtime](src/targets/qwen3_6/impl/runtime/) | prefix、canonical重建、GDN状态与投机提交 |
+| [v1.0.0发布报告](docs/releases/v1.0.0.md) | 本次发布范围、整体原值和二进制关联 |
+| [发布质量数据](docs/releases/v1.0.0/quality-summary.json) | 原213K输出、TTFT样本与终态 |
+| [数值资格](docs/releases/v1.0.0/numerical-validation.json) | 十格式、完整head、融合量化及各自参考边界 |
+
+## 来源与许可证
+
+本项目基于 [NInfer](https://github.com/Neroued/ninfer) 的C++/CUDA Engine及相关Ada/Ampere移植，保留 [NOTICE](NOTICE) 中各作者贡献。内核及执行参考包括 [UDPSendToFailed/ninfer-4090](https://github.com/UDPSendToFailed/ninfer-4090)、[sergiuszm/ninfer-4090](https://github.com/sergiuszm/ninfer-4090) 与ninfer-3090系列；量化产品复用仓库固定的 [GGML](https://github.com/ggml-org/llama.cpp) CUDA源码。
+
+KVMem、恢复与异步实现优先参考 [KVMem](https://github.com/kvmem/kvmem)、[ActKV](https://github.com/melis2023/ninfer-kvmem-actkv)、[Strata](https://github.com/Niko1221/Strata)、[Ninfer-KVMem-Async](https://github.com/paicat1/Ninfer-KVMem-Async) 及相关转换项目的已有源码。具体移植保留来源说明，并适配本项目页布局、数值边界和owner/pin/event生命周期；不同项目的性能数据不作为本项目成绩。
+
+仓库主许可证见 [Apache-2.0 LICENSE](LICENSE)。vendored GGML采用其 [MIT许可证](third_party/ggml-quants/LICENSE)，其余第三方与FFmpeg按各自许可和通知分发，见 [NOTICE](NOTICE) 与 [FFmpeg说明](LICENSE-FFMPEG.txt)。模型权重、tokenizer和量化来源另受各自许可证约束。

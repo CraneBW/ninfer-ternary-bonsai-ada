@@ -52,6 +52,9 @@ void validate_options(const EngineOptions& options) {
     default:
         throw std::invalid_argument("Engine kv_capacity mode is invalid");
     }
+    if (options.managed_runtime_capacity_bytes != 0 && !options.managed_weights) {
+        throw std::invalid_argument("Engine managed runtime capacity requires managed_weights");
+    }
     if (options.max_concurrency == 0 || options.max_concurrency > kMaximumConcurrency) {
         throw std::invalid_argument("Engine max_concurrency must be in [1,8]");
     }
@@ -69,7 +72,8 @@ void validate_options(const EngineOptions& options) {
 
 std::size_t runtime_bytes_after_planned_weights(std::uint64_t weight_bytes,
                                                 bool wddm_evictable_budget = false,
-                                                bool managed_weights = false) {
+                                                bool managed_weights = false,
+                                                std::size_t managed_runtime_bytes = 0) {
     std::size_t free_bytes  = 0;
     std::size_t total_bytes = 0;
     CUDA_CHECK(cudaMemGetInfo(&free_bytes, &total_bytes));
@@ -84,7 +88,12 @@ std::size_t runtime_bytes_after_planned_weights(std::uint64_t weight_bytes,
             throw std::invalid_argument(
                 "managed weights require at least 512 MiB initially free device memory");
         }
-        return std::min(kRuntimeBudget, free_bytes / 2);
+        // Adapt the previously isolated full-KV diagnostic's explicit ceiling,
+        // keeping device/display headroom rather than subtracting managed weights.
+        if (managed_runtime_bytes != 0) {
+            return std::min(managed_runtime_bytes, free_bytes - kMinimumFree);
+        }
+        return std::min(kRuntimeBudget, free_bytes - kMinimumFree);
     }
 #if defined(_WIN32)
     // Allow WDDM to evict background apps down to a 512 MiB non-evictable DWM display floor.
@@ -160,7 +169,7 @@ ConstructedTarget construct_registered(const EngineOptions& options, DeviceConte
     const runtime::SequenceCapacityCurve curve = sequence_planner.capacity_curve();
     const std::size_t preflight_runtime_bytes = runtime_bytes_after_planned_weights(
         load_plan.materialization().device_capacity_bytes, options.wddm_evictable_budget,
-        options.managed_weights);
+        options.managed_weights, options.managed_runtime_capacity_bytes);
     (void)runtime::resolve_kv_capacity(options.kv_capacity, curve, preflight_runtime_bytes);
     target_plan_phase.complete();
 

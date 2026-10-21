@@ -11,6 +11,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <future>
+#include <mutex>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -111,6 +113,7 @@ public:
         return active_ * page_bytes_;
     }
     [[nodiscard]] std::size_t occupied_pages() const noexcept { return active_; }
+    [[nodiscard]] std::size_t allocated_bytes() const noexcept { return slots_.size() * page_bytes_; }
 
     // A failed write never publishes a record. Inactive slots are reused to
     // prevent unbounded file growth during repeated KV re-selection.
@@ -153,6 +156,16 @@ public:
         transfer(handle.slot, destination.data(), /*writing=*/false);
     }
 
+    // Adapt KVMem start_prefetch: validate on the owner thread, then read only
+    // the immutable extent. Caller owns the handle and destination until get().
+    [[nodiscard]] std::future<void> prefetch(Handle handle, std::span<std::byte> destination) const {
+        require_size(destination.size());
+        if (!valid(handle)) { throw std::invalid_argument("KVMem prefetch handle is stale"); }
+        return std::async(std::launch::async, [this, slot = handle.slot, destination] {
+            transfer(slot, destination.data(), false);
+        });
+    }
+
     [[nodiscard]] bool valid(Handle handle) const noexcept {
         return handle.valid() && handle.slot < slots_.size() &&
                slots_[handle.slot].active &&
@@ -192,6 +205,8 @@ private:
 
     void transfer(std::uint32_t slot, std::byte* data, bool writing) const {
 #if defined(_WIN32)
+        // Windows uses a shared file cursor; POSIX pread/pwrite use independent offsets.
+        const std::lock_guard lock(io_mutex_);
         constexpr std::uint64_t limit = static_cast<std::uint64_t>(
             std::numeric_limits<std::int64_t>::max());
 #else
@@ -238,6 +253,7 @@ private:
     }
 
 #if defined(_WIN32)
+    mutable std::mutex io_mutex_;
     HANDLE file_ = INVALID_HANDLE_VALUE;
 #else
     int fd_ = -1;

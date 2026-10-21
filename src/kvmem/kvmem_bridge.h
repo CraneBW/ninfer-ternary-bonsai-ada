@@ -11,6 +11,8 @@
 #include <cuda_runtime.h>
 
 #include <cstdint>
+#include <span>
+#include <array>
 #include <cstdio>
 
 namespace ninfer {
@@ -50,14 +52,45 @@ void kvmem_rerope_page(ninfer::DeviceKVPagePool& pool, std::int32_t physical_pag
                        const std::int32_t* src_pos, const std::int32_t* dst_pos,
                        cudaStream_t stream);
 
+// Reuse the existing decode/un-RoPE/RoPE/encode math with immutable source
+// positions (a partial page can have columns born at different window slots).
+void kvmem_rebuild_source_k(ninfer::DeviceKVPagePool& pool, std::int32_t physical_page,
+                            const std::array<std::int32_t, 64>& source_positions,
+                            std::int32_t destination_base, std::uint32_t columns,
+                            cudaStream_t stream);
+
+// Bounded two-page restore metadata. The caller retains its immutable source
+// owners and pinned input buffers until the stream completes, as for the
+// single-page entry. Destination physical pages in a batch must be distinct.
+struct SourcePageRestore {
+    std::int32_t physical;
+    std::array<std::int32_t, 64> positions;
+    std::int32_t destination;
+    std::uint32_t columns;
+};
+
+// Exactly one or two pages, potentially with different valid-column counts.
+// SM89 Main16/H4 and MTP1/H4 use one launch for two pages; the original token
+// math, identity-column skip, and single-page entry remain unchanged. Other
+// supported geometries retain their original single-page launch sequence.
+void kvmem_rebuild_source_k_batch(ninfer::DeviceKVPagePool& pool,
+                                  std::span<const SourcePageRestore> pages,
+                                  cudaStream_t stream);
+
 // Batched variant: re-bakes `n_blocks` moved physical pages across all layer
 // planes of the pool using one H2D metadata upload and one kernel launch per
 // layer. `physical_pages`, `from_bases`, and `to_bases` are HOST arrays of
 // length `n_blocks`, where each moved block `i` transitions from scalar base
 // position `from_bases[i]` to `to_bases[i]`.
+struct KvmemReropeWorkspace {
+    std::span<std::int32_t> host_meta;
+    std::span<std::int32_t> device_meta;
+};
+
 void kvmem_rerope_pages(ninfer::DeviceKVPagePool& pool, const std::int32_t* physical_pages,
                         const std::int32_t* from_bases, const std::int32_t* to_bases,
-                        std::uint32_t n_blocks, cudaStream_t stream);
+                        std::uint32_t n_blocks, KvmemReropeWorkspace workspace,
+                        cudaStream_t stream);
 
 // ---- query-driven retention (K3): persistent retrieval evidence ----
 //

@@ -92,6 +92,19 @@ runtime::PrefillWork scheduled_prefill_work(std::uint32_t begin, std::uint32_t e
     return work;
 }
 
+// Internal query/history replay consumes service units without duplicating
+// public prompt progress. Reserve the full window bound before admission.
+std::size_t query_replay_service_units(const PreparedPromptData& prompt,
+                                       std::uint32_t reuse_base, std::uint32_t prefill_chunk,
+                                       std::uint32_t working_tokens) noexcept {
+    const bool eligible = working_tokens != 0 && prompt.token_ids.size() > working_tokens &&
+        !prompt.has_media() && prompt.query_begin != 0 && prompt.query_begin >= reuse_base &&
+        prompt.query_end > prompt.query_begin &&
+        prompt.token_ids.size() - prompt.query_begin <= prefill_chunk;
+    return eligible ? 1U + (static_cast<std::size_t>(working_tokens) + prefill_chunk - 1U) /
+                              prefill_chunk : 0U;
+}
+
 std::uint64_t projected_service_work(const runtime::RequestPlanSummary& summary,
                                      std::uint32_t reuse_base, std::uint32_t prefill_chunk,
                                      std::size_t prefill_splits,
@@ -277,8 +290,9 @@ RequestBasePlan ProgramImplCore::plan_request(const PreparedPromptData& prompt,
     }
     // The device claim and the logical entitlement are separate quantities. A host-backed
     // address space may sit on a page pool smaller than the context, so the request only
-    // claims the pool and accounts the difference as Host KV bytes; the entitlement itself
-    // stays the logical mapping bound.
+    // claims the pool; ordinary native spilling accounts the difference as global Host KV
+    // bytes. KVMem owns its separate Host/Cold archive. The entitlement itself stays the
+    // logical mapping bound in both cases.
     std::uint32_t root_device_kv_pages = base->text_kv_page_entitlement;
     std::size_t root_host_kv_bytes     = 0;
     if (host_backed_kv) {
@@ -288,14 +302,17 @@ RequestBasePlan ProgramImplCore::plan_request(const PreparedPromptData& prompt,
         // exclusive even when the pool holds both of them beside the shared prefix.
         if (text_kv_addresses->kvmem_enabled() && text_kv_addresses->kvmem_budget_tokens() != 0) {
             device_budget_pages = std::min(
-                device_budget_pages,
-                text_kv_addresses->kvmem_budget_tokens() /
-                    static_cast<std::uint32_t>(kPagedKVPageSize));
+                device_budget_pages, text_kv_addresses->kvmem_device_claim_limit());
         }
         root_device_kv_pages = std::min(base->text_kv_page_entitlement, device_budget_pages);
-        root_host_kv_bytes =
-            static_cast<std::size_t>(base->text_kv_page_entitlement - root_device_kv_pages) *
-            text_host_kv_page_stride;
+        // As in KVMem faf3c225's native archive adapter, logical history is not
+        // a reservation against the independent context-cache Host payload.
+        // Actual retained replicas and Host demotions are still charged below.
+        if (!text_kv_addresses->kvmem_enabled()) {
+            root_host_kv_bytes =
+                static_cast<std::size_t>(base->text_kv_page_entitlement - root_device_kv_pages) *
+                text_host_kv_page_stride;
+        }
     }
     detail::PhysicalDeviceResources root_active{
         .active_lanes     = 1,
@@ -455,7 +472,9 @@ RequestBasePlan ProgramImplCore::plan_request(const PreparedPromptData& prompt,
         .final_added              = root_vector,
     };
     const std::size_t cold_prefill_splits =
-        base->vision_control_plan ? base->vision_control_plan->items.size() : 0ULL;
+        (base->vision_control_plan ? base->vision_control_plan->items.size() : 0ULL) +
+        query_replay_service_units(prompt, 0, prefill_chunk,
+                                   text_kv_addresses->kvmem_budget_tokens());
     base->summary.service_work_quanta =
         projected_service_work(base->summary, 0, prefill_chunk, cold_prefill_splits,
                                base->capture_groups, prompt.identity.rewrite_execution_frontiers);
@@ -593,6 +612,18 @@ std::optional<AdmissionCandidate> ProgramImplCore::inspect_lane(
             plan->reuse_base = selected.frontier;
         }
     }
+    if (original_kv_positions) {
+        if (prompt.has_media() || prompt.rope_delta != 0) {
+            throw std::invalid_argument("original-position KVMem currently requires plain text with zero RoPE delta");
+        }
+        if (prompt.query_begin < plan->reuse_base && prompt.query_end > prompt.query_begin &&
+            (source == nullptr || source->last_query_begin != prompt.query_begin ||
+             source->last_query_end != prompt.query_end || prompt.query_end > plan->reuse_base)) {
+            // prefix_matches already proves every token and position through reuse_base.
+            // A changed/incomplete query must use an earlier complete state or Root.
+            return std::nullopt;
+        }
+    }
     // The reused token ledger is consumed up to `reuse_base`, but the KV of a KVMem-compacted
     // lineage stops at its compacted window. Address, pin and page decisions follow the KV
     // frontier; prompt slicing, matching and position bookkeeping follow the ledger frontier.
@@ -616,14 +647,14 @@ std::optional<AdmissionCandidate> ProgramImplCore::inspect_lane(
         const bool append_ready =
             plan->reuse == ReusePath::PrivateEndpoint && source != nullptr &&
             source->tail_hidden_valid && decoder->mtp_cache() != nullptr &&
-            (plan->reuse_base == 0 || source->mtp_kv_valid >= plan->reuse_base - 1);
+            (plan->kv_frontier == 0 || source->mtp_kv_valid >= plan->kv_frontier - 1);
         const bool checkpoint_ready =
             (is_rewrite_checkpoint_restore(plan->reuse) ||
              plan->reuse == ReusePath::PrivateLongAnchor ||
              plan->reuse == ReusePath::SharedStablePrefix) &&
-            decoder->mtp_cache() != nullptr && plan->reuse_base != 0 &&
-            ((source != nullptr && source->mtp_kv_valid >= plan->reuse_base - 1) ||
-             (shared_source != nullptr && shared_source->backend_frontier >= plan->reuse_base - 1));
+            decoder->mtp_cache() != nullptr && plan->kv_frontier != 0 &&
+            ((source != nullptr && source->mtp_kv_valid >= plan->kv_frontier - 1) ||
+             (shared_source != nullptr && shared_source->backend_frontier >= plan->kv_frontier - 1));
         if (plan->reuse != ReusePath::Root && !append_ready && !checkpoint_ready) {
             throw std::logic_error("published MTP checkpoint is not materializable");
         }
@@ -635,7 +666,7 @@ std::optional<AdmissionCandidate> ProgramImplCore::inspect_lane(
         is_masked_draft_backend(speculative_backend) &&
         (!dflash ||
          (source != nullptr && (!source->kv || (backend_kv_cache() && !source->kv->backend) ||
-                                source->dflash_context_frontier < plan->reuse_base)) ||
+                                source->dflash_context_frontier < plan->kv_frontier)) ||
          (shared_source != nullptr &&
           (!shared_source->kv || (backend_kv_cache() && !shared_source->kv->backend) ||
            shared_source->frontier < plan->reuse_base)))) {
@@ -822,7 +853,9 @@ std::optional<AdmissionCandidate> ProgramImplCore::inspect_lane(
         }
     }
 
-    const std::size_t prefill_splits = plan->vision ? plan->vision->uses.size() : 0ULL;
+    const std::size_t prefill_splits = (plan->vision ? plan->vision->uses.size() : 0ULL) +
+        query_replay_service_units(prompt, plan->reuse_base, prefill_chunk,
+                                   text_kv_addresses->kvmem_budget_tokens());
     plan->summary.service_work_quanta =
         projected_service_work(plan->summary, plan->reuse_base, prefill_chunk, prefill_splits,
                                plan->capture_groups, prompt.identity.rewrite_execution_frontiers);
@@ -951,6 +984,16 @@ std::optional<AdmissionCandidate> ProgramImplCore::inspect_lane(
                 source_kv->backend && backend_frontier != 0 &&
                 partial_tail_cow_required(*backend_kv_addresses, *source_kv->backend,
                                           backend_frontier);
+        }
+        // Match the reference session archive's ownership rule: a retained
+        // branch needs a complete history owner, not only resident page bytes.
+        // Refuse this candidate before any mutation; root/other sources remain
+        // available and the original compressed owner stays intact.
+        if ((plan->text_prefix_fork_required &&
+             !text_kv_addresses->kvmem_can_fork_prefix(source_kv->text)) ||
+            (plan->backend_prefix_fork_required &&
+             !backend_kv_addresses->kvmem_can_fork_prefix(*source_kv->backend))) {
+            return std::nullopt;
         }
         const std::uint32_t main_required = pages_for_tokens(kv_frontier);
         const std::uint32_t main_device =
@@ -1362,7 +1405,9 @@ void ProgramImplCore::select_shared_captures(AdmissionCandidate& candidate,
                          std::tie(right.frontier, right.input_order);
               });
 
-    const std::size_t prefill_splits = plan.vision ? plan.vision->uses.size() : 0ULL;
+    const std::size_t prefill_splits = (plan.vision ? plan.vision->uses.size() : 0ULL) +
+        query_replay_service_units(prompt, plan.reuse_base, prefill_chunk,
+                                   text_kv_addresses->kvmem_budget_tokens());
     plan.summary.service_work_quanta =
         projected_service_work(plan.summary, plan.reuse_base, prefill_chunk, prefill_splits,
                                plan.capture_groups, prompt.identity.rewrite_execution_frontiers);

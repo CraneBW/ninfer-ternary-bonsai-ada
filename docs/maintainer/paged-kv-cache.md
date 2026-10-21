@@ -1,5 +1,60 @@
 # NInfer Paged KV Context Store
 
+KVMem source ownership update: within one conditioning epoch, before moving
+working K, the store preserves
+first-write K codes/scales and per-column birth positions. Cold/threshold
+rebuilds decode this immutable source into the raw-K domain, preserving initial
+INT8 error. This is not a pre-quantization projection mirror. The native codec
+and un-RoPE/RoPE math are reused; V remains in ordinary Host/Cold payloads.
+The source uses one pinned K-page staging buffer per typed store and separate
+ColdKVStore backing selected by `NINFER_KVMEM_COLD_DIR`; it is independent of
+global Host admission and the KVMem archive arena. Default temporary storage
+can be tmpfs. Trace reports its bytes/captures/rebuilds separately.
+Only new committed columns are captured; moved partial tails retain earlier
+birth positions, rollback revokes overwritten source suffixes, and address
+release/truncation reclaim records. Refresh bounds match reference8remaps /
+262144 cumulative position delta. Logical budgets and coupled text/backend
+selection remain unchanged. Details and current limits are in the
+[live validation](2026-10-20-kvmem-actkv-live-validation.md#213k-diagnosis-and-immutable-k-source-2026-10-20-follow-up).
+
+On SM89, PageMajor Main16/H4 source-K rebuilds use one layer-indexed kernel;
+`NINFER_KVMEM_SOURCE_LAYER_BATCH=0` restores the per-layer launches. With CUDA13,
+full64 restores with tight head strides and a nonlegacy stream also submit the
+32 K-code/scale ranges through one `cudaMemcpyBatchAsync` call;
+`NINFER_KVMEM_SOURCE_COPY_BATCH=0` restores the pitched-copy loop. Both eligible
+paths are enabled by default. Partial pages, capture D2H, MTP1 and other layouts
+keep their original paths. Batch API errors propagate. File load, same-stream
+rebuild and the final synchronization still precede reuse of the single pinned
+staging page; neither change adds prefetch or overlaps a page's copy with its
+dependent rebuild. GPU transfers can remain 32 separate segments.
+
+Canonical selected-view replay starts a new conditioning epoch: it retains
+selected logical page identities/device reservations, rolls their owned coverage
+back to zero, revokes old source K/Host/Cold replicas and mean validity, resets
+StateImage, and rebuilds GDN/KV with native prefill. New immutable sources come
+only from that reconstructed epoch. Probe/partial-replay state is not published;
+internal service units are reserved without double-counting public prompt
+progress. This fixes the original213K facts with the same32K budget but adds
+query TTFT; see [the repair report](2026-10-20-213k-state-replay-repair.md).
+
+The performance follow-up caches four complete Host StateImages per lane when
+W>=4096, with bounded original-token identity vectors. Only a matching address
+generation and identical canonical prefix can resume: K is recovered from that
+epoch's first-write source, V keeps identical prefix conditioning, and only the
+suffix revokes coverage/replicas/means. Ordinary writes before a cached frontier
+invalidate it. Misses retain full reconstruction. The fixed Host payload is
+reported separately and does not enlarge the Device working set; see the
+[live tuning result](2026-10-20-kvmem-actkv-live-validation.md#详细性能调优ttftnvme读前sm89-mmq与当前p4).
+
+A resident-page prefix Fork does not inherit the original address's archive or
+source directory. Admission now rejects that candidate for compressed/rebased
+history before mutation, allowing existing root reconstruction while keeping
+the original owner. Sequential Consume/Move retains the address and archive.
+Source live/file-slot/staging gauges, capture/rebuild counters and separate
+model-level history/query replay counters are exposed through KvMemUsage and
+Serve metrics; see [serving](../serving.md). These distinguish the Host cache,
+ordinary archive and backing files without claiming one unified RAM limit.
+
 本文定义 NInfer growing KV 的物理存储与消费合同。它是 typed KV pools、logical pages、
 Device/Host replicas、address spaces、reservations、block tables 和 GPU consumer views 的维护者权威。
 
@@ -388,6 +443,34 @@ reserve destination
 Copy 进行时 source 与 destination 都被 pin。Copy 完成前，destination 不进入 address space 或 execution
 table；唯一有效 source 也不能先释放。
 
+KVMem 的实验性 D2H 流水将大Host事务拆成至多16MiB的子提交；前子批在当前独占compact调用内完成，只有末子批跨Engine边界在飞。
+事务固定 address generation、logical handle、content epoch 和 committed columns；
+每批有独立 source-ready/completion event，源页 pin 和目标 Host allocation 随事务持有。
+移出当前 membership 后，该批继续持有原引用；复制完成并整批校验通过后才发布 Host 槽，
+然后 unpin/release 源页。取消或 address 释放会先排空已提交访问，再丢弃不再需要的目标。
+实际分配只使用真实 available pages；在飞源页不能作为可分配空间。
+
+为避免页流水被全局分配同步阻断，批量 re-RoPE 的 Device 元数据区纳入 persistent layout，
+计入容量规划；text/backend 在独立计算边界顺序复用。每区为
+`3 * logical_page_capacity * sizeof(int32_t)` 字节；每个 store 在启动时预留等大的 pinned
+Host 元数据。Op 不再每次 malloc/free，不新增未计入计划的 Device allocation。
+
+选页确定后，纯Host恢复在transfer stream按至多16MiB子批提交；目标总预留仍按真实Device配额计费。目标采用既有
+`materialize_transfer_destination` / `publish_transfer_destination` / `abort_transfer_destination`
+生命周期，在复制前保持 destination pin，Host 源由恢复事务持有。先等待 compute 上旧 D2H
+读取完成，避免新 H2D 覆盖复用槽；随后可与驻留页 re-RoPE 并行，等待恢复完成，再对恢复页
+重定位、发布当前 membership。无独立工作时必须等待；部分页等不合格批次保留同步路径。
+Cold从选页确定后最多预读两页，复用KVMem future及ActKV任务所有权语义；另有一页换出staging，
+共三页固定pinned缓冲。读取在owner线程先验证record，后台只访问不可变extent；POSIX用pread，
+Windows文件游标互斥。future及GPU读取结束后才释放buffer/record，异常先排空；文件层读前不代表
+每次都产生真实SSD读取。immutable-K的独立单页staging与同步恢复保持不变。
+
+提前换出水位在原 growth reserve 中保留一半余量（按实际 typed payload 限于 16 MiB），
+sync/async 共用此水位和相同工作集，不动保护带。分配只消费真实 available pages；满池时
+若单批承诺释放足够满足需求，先收割再重新预留，不把承诺页直接物化。
+异步专用延迟复制测试采用进程内 `CUDA_MODULE_LOADING=EAGER`，将 CUDA 首次 kernel 装载
+与受控 copy-stream 阻塞隔离；它不是生产环境或其他进程的全局设置。
+
 ### 5.5 Descriptor lifetime
 
 Logical descriptor 不构成第三份 payload。它可以在 Device-only、Host-only 或 Both placements 下继续存在。
@@ -766,3 +849,84 @@ Exact model state 和 backend mathematics 见
 [Qwen3.6-35B-A3B model](qwen3.6-35b-a3b-model.md)；persistent KV codec 和 causal consumer
 numerical contract 由上表中的 growing-cache Ops 定义。路径用于定位当前实现，不把文件或类名本身提升为
 外部接口。
+
+### KVMem speculative capacity note (2026-10-20)
+
+The selected Main history budget is distinct from funded speculative growth.
+When speculation is enabled, Main may claim additional configured generation
+reserve and a page-aligned provisional verification lead, capped by the actual
+physical pool and logical entitlement. Admission uses this same claim limit.
+MTP's independent full-context/provisional pool keeps its own entitlement and
+must not inherit Main's selected-window cap. DFlash2 cyclic KV remains owned by
+StateImage and has no full backend history pool. All allocation still consumes
+real free/reserved pages. A speculative execution unit pins its geometry; if its
+funded tail is exhausted, it fails explicitly rather than shrinking selected
+history or reusing an in-flight page. Final request batches retire before reusable
+checkpoint publication; see the current CLI/serving and live validation scope.
+
+
+### KVMem pre-query lexical restore (2026-10-20)
+
+A fitting input suffix does not imply its evidence is resident. For short-text
+Action-LRFU, when all lexical candidate pages have already been written and an
+exclusive movable window still has a candidate on Host/Cold, Program can use
+the existing prefill compaction before processing the question. Selection leaves
+room for the current input piece within the same claim; sink/mandatory/action/
+recent priorities remain unchanged. H2D completion, rephase and table publication
+still precede consumption. Shared views and fixed rewrite/endpoint geometry are
+not forcibly moved by this optional trigger. Already resident lexical candidates do not trigger this pre-query restore.
+No lexical candidate leaves the separate complete-query semantic path below. `NINFER_KVMEM_TRACE` records
+history/query boundaries and `missing_after`: a protected-out candidate remains
+a recall gap. Round-end selection alone is not evidence that the question saw
+the historical page. Current bounded Qwen3.8 results are in the live validation.
+
+Current-action tool protection stops at the latest user boundary. A tool group
+from an earlier user turn remains ordinary selectable history, rather than
+reserving the new question's window. MTP consumes Main's exact logical page
+selection during prefill compaction, preserving each pool's independent payload
+and accounting. Reuse readiness compares backend coverage to `kv_frontier`, not
+the uncompressed ledger frontier. BeforeSuffix and exact-hit MTP bridges map
+their destination first, then use compacted cache and text RoPE positions and
+publish the matching backend frontier. This follows the existing ring-fork
+map-before-bridge fix with the current window offset applied.
+
+
+### Complete-query retrieval and historical profile (2026-10-20)
+
+Current retrieval is pure mean-key/content cosine; the position prior is no
+longer mixed into production retrieval. `set_retrieval_scores` updates current
+evidence without decaying history. Only the final prompt refresh commits one
+sparse LRFU round to `profile_score`; previews during chunked prefill do not
+repeatedly count the same query. This follows the KVMem selector's separate
+set-current/commit-round contract.
+
+A long text prompt without qualified lexical candidates can split at `query_end`
+and restore selected semantic history before computing the assistant opener.
+The question is committed once, its fork settled, and existing compact/H2D/
+rephase/table publication completes before the opener consumes the new window.
+Ledger slicing stays in original coordinates; Main/backend and DFlash coverage
+stay in compacted coordinates. No hidden query replay or additional GDN update
+is introduced. This optional trigger does not remove fixed-geometry guards or
+relax compaction's ownership/private-window requirements.
+
+Lexical candidates first compare their rarest anchor document frequency, then
+combined weight/hits and newest-on-tie. Older equal matches and their next pages
+are demoted only in soft retrieval/profile fill. Mandatory/system/action/recent
+protection and selected-window size are unchanged; demotion never invents a
+smaller budget. Current quality evidence is recorded separately from transport
+parity in the live validation report.
+
+
+For a resident retained tail, compaction derives the new committed frontier
+from the logical page's actual committed columns. Older tracker positions are
+not authority for written coverage after continuation reuse. Checkpoint
+protection remains strict; a streamed correct label without a terminal event
+is a failed request, not a successful quality acceptance.
+
+Ahead-mapped growth pages with zero committed coverage are not history. Before
+active compaction, the existing `destructive_truncate` rollback removes mappings
+beyond `committed_frontier` and drops their uncommitted ledger suffix. Selection
+can then fill the same history budget from real pages. Without this step a
+recent-band empty page can become an interior hole after append, even when the
+last retained page's own column count is correct. The store-level regression
+maps seven pages, commits five, compacts four and publishes checkpoint coverage.

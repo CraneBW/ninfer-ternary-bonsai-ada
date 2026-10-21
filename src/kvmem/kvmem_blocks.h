@@ -15,6 +15,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <cstdint>
 #include <span>
 #include <stdexcept>
@@ -154,7 +155,9 @@ struct KvWindowPlan {
 // by the retrieval/profile quota top-k (nth_element), leftover by merged score.
 [[nodiscard]] inline KvSelection kvmem_select_blocks(std::span<const KvBlockMeta> blocks,
                                                      const KvSelectConfig& cfg,
-                                                     std::span<const std::uint32_t> mandatory) {
+                                                     std::span<const std::uint32_t> mandatory,
+                                                     std::span<const std::uint32_t> lexical = {},
+                                                     std::span<const std::uint32_t> older_matches = {}) {
     KvSelection out;
     const std::uint32_t n = static_cast<std::uint32_t>(blocks.size());
     if (n == 0) { return out; }
@@ -169,6 +172,12 @@ struct KvWindowPlan {
     const auto [sink_blocks, recent_blocks] = kvmem_resolve_bands(cfg);
 
     std::vector<std::uint8_t> kept(n, 0);
+    std::vector<std::uint8_t> older(n, 0);
+    if (cfg.action_lrfu) {
+        for (const auto id : older_matches) {
+            if (id < n) { older[id] = 1; }
+        }
+    }
     std::uint32_t kept_count = 0;
     const auto keep          = [&](std::uint32_t i) {
         if (i < n && kept[i] == 0) {
@@ -225,6 +234,17 @@ struct KvWindowPlan {
 
     for (std::uint32_t i = 0; i < recent_blocks && kept_count < budget; ++i) { keep(n - 1 - i); }
 
+    // A short query containing several rare historical token IDs can rescue
+    // its exact source page. This is deliberately after the protected prefix,
+    // mandatory/action pages and recent band, and before soft score quotas.
+    // Never displace a protected page or exceed the same fixed device budget.
+    if (cfg.action_lrfu) {
+        for (const std::uint32_t id : lexical) {
+            if (kept_count == budget) { break; }
+            keep(id);
+        }
+    }
+
     const auto take_top = [&](std::uint32_t quota, auto score_fn) {
         if (kept_count >= budget || quota == 0) { return; }
         std::vector<std::uint32_t> candidates;
@@ -237,6 +257,7 @@ struct KvWindowPlan {
             std::min({quota, budget - kept_count, static_cast<std::uint32_t>(candidates.size())});
         const auto better = [&](std::uint32_t a, std::uint32_t b) {
             const auto priority = [&](std::uint32_t i) {
+                if (older[i] != 0) { return -std::numeric_limits<double>::infinity(); }
                 const double score = score_fn(blocks[i]);
                 return cfg.action_lrfu &&
                                blocks[i].stratum == BlockStratum::EphemeralThinking
@@ -411,7 +432,19 @@ public:
         blocks_[id].stratum = stratum;
     }
 
-    // Retain retrieval evidence across scoring passes with time-decayed LRFU.
+    // Previewing partial/current query evidence does not advance LRFU time.
+    void set_retrieval_scores(std::span<const float> current) {
+        if (current.size() != blocks_.size()) {
+            throw std::invalid_argument("kvmem: retrieval score count differs from history");
+        }
+        for (std::size_t i = 0; i < blocks_.size(); ++i) {
+            auto& block = blocks_[i];
+            block.retrieval_score = std::isfinite(current[i]) ? current[i] : 0.0;
+            block.attn_score = block.retrieval_score + block.profile_score;
+        }
+    }
+
+    // Commit one completed query round to time-decayed LRFU history.
     // Retain exactly ceil(top_fraction * positive_count) hits. An inclusive
     // float threshold incorrectly retained *all* ties (common with near-zero
     // or quantized query scores), defeating the requested sparsity at 256K.
@@ -454,15 +487,20 @@ public:
             const double evidence = retained[i] != 0 ? current[i] : 0.0;
             block.lrfu_score = decay * block.lrfu_score + evidence;
             block.last_scored_step = scoring_step_;
-            block.retrieval_score = block.lrfu_score;
-            block.attn_score = block.retrieval_score + block.profile_score;
+            // Current-query retrieval and decayed history are separate quotas,
+            // as in KVMem/ActKV. A previous question must not replace this
+            // question's content evidence with its old hot pages.
+            block.profile_score = block.lrfu_score;
         }
+        set_retrieval_scores(current);
     }
 
     // Preview-only selection (no state change).
     [[nodiscard]] KvSelection preview_select(const KvSelectConfig& cfg,
-                                             std::span<const std::uint32_t> mandatory) const {
-        return kvmem_select_blocks(blocks_, cfg, mandatory);
+                                             std::span<const std::uint32_t> mandatory,
+                                             std::span<const std::uint32_t> lexical = {},
+                                             std::span<const std::uint32_t> older_matches = {}) const {
+        return kvmem_select_blocks(blocks_, cfg, mandatory, lexical, older_matches);
     }
 
     // Commits a selection: computes the stage-in/out diff and the per-block remap

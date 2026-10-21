@@ -144,6 +144,20 @@ std::string ServeMetrics::render(const ninfer::RuntimeStats& stats,
     metric(out, "ninfer:kvmem_stage_out_blocks_total", stats.kvmem.stage_out_blocks);
     metric(out, "ninfer:kvmem_transfer_runs_total", stats.kvmem.transfer_runs);
     metric(out, "ninfer:kvmem_transfer_us_total", stats.kvmem.transfer_us);
+    metric(out, "ninfer:kvmem_async_enabled",
+           static_cast<std::uint64_t>(options.kvmem.async_transfers));
+    metric(out, "ninfer:kvmem_async_submitted_total", stats.kvmem.async_submitted);
+    metric(out, "ninfer:kvmem_async_completed_total", stats.kvmem.async_completed);
+    metric(out, "ninfer:kvmem_async_discarded_total", stats.kvmem.async_discarded);
+    metric(out, "ninfer:kvmem_async_submit_us_total", stats.kvmem.async_submit_us);
+    metric(out, "ninfer:kvmem_async_wait_us_total", stats.kvmem.async_wait_us);
+    metric(out, "ninfer:kvmem_async_bytes_total", stats.kvmem.async_bytes);
+    metric(out, "ninfer:kvmem_async_fallbacks_total", stats.kvmem.async_fallbacks);
+    metric(out, "ninfer:kvmem_async_restore_submitted_total", stats.kvmem.async_restore_submitted);
+    metric(out, "ninfer:kvmem_async_restore_us_total", stats.kvmem.async_restore_us);
+    metric(out, "ninfer:kvmem_inflight_pages", stats.kvmem.inflight_pages);
+    metric(out, "ninfer:kvmem_inflight_bytes",
+           static_cast<std::uint64_t>(stats.kvmem.inflight_bytes));
     metric(out, "ninfer:kvmem_scoreable_blocks_total", stats.kvmem.scoreable_blocks);
     metric(out, "ninfer:kvmem_zero_score_blocks_total", stats.kvmem.zero_score_blocks);
     metric(out, "ninfer:kvmem_window_tokens", static_cast<std::uint64_t>(stats.kvmem.window_tokens));
@@ -152,6 +166,27 @@ std::string ServeMetrics::render(const ninfer::RuntimeStats& stats,
            static_cast<std::uint64_t>(stats.kvmem.host_capacity_bytes));
     metric(out, "ninfer:kvmem_cold_bytes", static_cast<std::uint64_t>(stats.kvmem.cold_bytes));
     metric(out, "ninfer:kvmem_host_to_cold_spills_total", stats.kvmem.host_to_cold_spills);
+    metric(out, "ninfer:kvmem_source_k_bytes", stats.kvmem.source_k_bytes);
+    metric(out, "ninfer:kvmem_source_k_file_capacity_bytes", stats.kvmem.source_k_file_capacity_bytes);
+    metric(out, "ninfer:kvmem_source_k_staging_bytes", stats.kvmem.source_k_staging_bytes);
+    metric(out, "ninfer:kvmem_source_k_captures_total", stats.kvmem.source_k_captures);
+    metric(out, "ninfer:kvmem_source_k_rebuilds_total", stats.kvmem.source_k_rebuilds);
+    metric(out, "ninfer:kvmem_history_replay_tokens_total", stats.kvmem.history_replay_tokens);
+    metric(out, "ninfer:kvmem_query_replay_tokens_total", stats.kvmem.query_replay_tokens);
+    metric(out, "ninfer:kvmem_history_replay_rounds_total", stats.kvmem.history_replay_rounds);
+    metric(out, "ninfer:kvmem_history_reused_tokens_total", stats.kvmem.history_reused_tokens);
+    metric(out, "ninfer:kvmem_replay_checkpoint_capacity_bytes", stats.kvmem.replay_checkpoint_capacity_bytes);
+    metric(out, "ninfer:kvmem_async_split_batches_total", stats.kvmem.async_split_batches);
+    metric(out, "ninfer:kvmem_nvme_prefetch_submitted_total", stats.kvmem.nvme_prefetch_submitted);
+    metric(out, "ninfer:kvmem_nvme_prefetch_completed_total", stats.kvmem.nvme_prefetch_completed);
+    metric(out, "ninfer:kvmem_nvme_prefetch_wait_us_total", stats.kvmem.nvme_prefetch_wait_us);
+    metric(out, "ninfer:physical_prefill_tokens_total", stats.computed_prefill_tokens +
+               stats.kvmem.history_replay_tokens + stats.kvmem.query_replay_tokens);
+    metric(out, "ninfer:host_kv_capacity_bytes", stats.kvmem.host_cache_capacity_bytes);
+    metric(out, "ninfer:managed_runtime_budget_limit_bytes", static_cast<std::uint64_t>(options.managed_weights
+               ? (options.managed_runtime_capacity_bytes != 0
+                    ? options.managed_runtime_capacity_bytes : (1ULL << 30)) : 0U));
+
 
     metric(out, "ninfer:capture_skips_total", stats.capture_skips.total);
     for (std::size_t index = 0; index < stats.capture_skips.by_reason.size(); ++index) {

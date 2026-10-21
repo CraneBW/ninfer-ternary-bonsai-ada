@@ -1,6 +1,7 @@
 // Unit test for the KVMem K0 host decision layer (standalone; build with
 // `builder.exe -test tests/kvmem_blocks_test.cpp`).
 #include "kvmem/kvmem_blocks.h"
+#include "kvmem/kvmem_lexical.h"
 
 #include <algorithm>
 #include <cmath>
@@ -30,6 +31,146 @@ static KvBlockRepository make_chain(std::uint32_t blocks, std::uint32_t block_to
         repo.append(m);
     }
     return repo;
+}
+
+static void test_lexical_history_rescue() {
+    constexpr std::uint32_t page_tokens = 64;
+    std::vector<std::int32_t> tokens(49 * page_tokens, 7);
+    tokens[15 * page_tokens + 24] = 9001;
+    tokens[15 * page_tokens + 25] = 9002;
+    tokens[15 * page_tokens + 26] = 9003;
+    tokens[48 * page_tokens] = 9002;
+    tokens[48 * page_tokens + 1] = 9001;
+    tokens[48 * page_tokens + 2] = 9003;
+    const auto lexical = kvmem_lexical_recall_pages(tokens, 48 * page_tokens,
+                                                     48 * page_tokens + 3);
+    CHECK(lexical == std::vector<std::uint32_t>({15, 16}),
+          "lexical: exact rare-name page and continuation must rank first");
+    CHECK(kvmem_lexical_recall_pages(tokens, 48 * page_tokens, 49 * page_tokens) == lexical,
+          "lexical: a 64-token query still has the same rare-name evidence");
+    auto long_tokens = tokens;
+    long_tokens.resize(48 * page_tokens + 129, 7);
+    CHECK(kvmem_lexical_recall_pages(long_tokens, 48 * page_tokens,
+                                     48 * page_tokens + 128) == lexical,
+          "lexical: 128-token query is within the supported boundary");
+    CHECK(kvmem_lexical_recall_pages(long_tokens, 48 * page_tokens,
+                                     48 * page_tokens + 129).empty(),
+          "lexical: queries beyond 128 tokens must not override semantic scores");
+    auto common_tokens = tokens;
+    std::fill(common_tokens.begin() + 48 * page_tokens, common_tokens.end(), 7);
+    CHECK(kvmem_lexical_recall_pages(common_tokens, 48 * page_tokens,
+                                     49 * page_tokens).empty(),
+          "lexical: common-only query has no historical rare-name evidence");
+    const std::vector<std::int32_t> common_query{7, 7, 7};
+    CHECK(kvmem_lexical_recall_pages(tokens, 48 * page_tokens,
+                                     std::span<const std::int32_t>(common_query)).empty(),
+          "lexical: content-only query must ignore rare serialized framing");
+    std::vector<std::int32_t> deep_tokens(81 * page_tokens, 7);
+    const std::vector<std::int32_t> deep_query{9001, 9002, 9003, 9004,
+                                              9011, 9012, 9013, 9014, 9015, 9016};
+    std::copy_n(deep_query.begin(), 4, deep_tokens.begin() + 49 * page_tokens);
+    for (const auto page : {77u, 78u}) {
+        std::copy(deep_query.begin() + 4, deep_query.end(),
+                  deep_tokens.begin() + page * page_tokens);
+    }
+    CHECK(kvmem_lexical_recall_pages(deep_tokens, 80 * page_tokens,
+                                     std::span<const std::int32_t>(deep_query)) ==
+              std::vector<std::uint32_t>({49, 50}),
+          "lexical: repeated historical question words outranked a unique subject");
+    // Real213K: rare previous-question boilerplate and a distinct entity name
+    // tie in scalar rank. Retain both signatures; only the old identical name
+    // is a demotion candidate, never an unrelated tied fact.
+    auto tied = std::vector<std::int32_t>(81 * page_tokens, 7);
+    const std::vector<std::int32_t> tied_query{9101, 9102, 9201, 9202};
+    tied[20 * page_tokens] = tied[40 * page_tokens] = 9101;
+    tied[20 * page_tokens + 1] = tied[40 * page_tokens + 1] = 9102;
+    tied[78 * page_tokens] = 9201;
+    tied[78 * page_tokens + 1] = 9202;
+    std::vector<std::uint32_t> tied_older;
+    const auto tied_candidates = kvmem_lexical_recall_pages(
+        tied, 80 * page_tokens, std::span<const std::int32_t>(tied_query), page_tokens,
+        &tied_older, 4);
+    CHECK(tied_candidates == std::vector<std::uint32_t>({78, 79, 40, 41}) &&
+              tied_older == std::vector<std::uint32_t>({20, 21}),
+          "lexical: previous-question tie erased distinct evidence or newer version");
+    std::vector<std::int32_t> boundary_tokens(49 * page_tokens, 7);
+    boundary_tokens[15 * page_tokens + 62] = 9001;
+    boundary_tokens[15 * page_tokens + 63] = 9002;
+    boundary_tokens[16 * page_tokens] = 9010; // Value on the following page.
+    boundary_tokens[48 * page_tokens] = 9001;
+    boundary_tokens[48 * page_tokens + 1] = 9002;
+    CHECK(kvmem_lexical_recall_pages(boundary_tokens, 48 * page_tokens,
+                                     48 * page_tokens + 2) == lexical,
+          "lexical: subject at page end must retain the following value page");
+    tokens[15 * page_tokens + 25] = 7;
+    tokens[15 * page_tokens + 26] = 7;
+    CHECK(kvmem_lexical_recall_pages(tokens, 48 * page_tokens,
+                                     48 * page_tokens + 3).empty(),
+          "lexical: a single rare token is not enough to rescue a page");
+
+    KvBlockRepository repo = make_chain(49);
+    repo.protect_system_prefix(page_tokens);
+    repo.protect_action_span(48 * page_tokens, 49 * page_tokens);
+    KvSelectConfig cfg;
+    cfg.block_tokens = page_tokens;
+    cfg.budget_tokens = 8 * page_tokens;
+    cfg.sink_tokens = page_tokens;
+    cfg.recent_tokens = 2 * page_tokens;
+    cfg.action_lrfu = true;
+    const auto selected = repo.preview_select(cfg, {}, lexical);
+    for (std::uint32_t id : {0u, 15u, 16u, 47u, 48u}) {
+        CHECK(std::find(selected.block_ids.begin(), selected.block_ids.end(), id) !=
+                  selected.block_ids.end(),
+              "lexical: selected window lost required block %u", id);
+    }
+    CHECK(selected.block_ids.size() == 8, "lexical: candidate increased the GPU budget");
+    const std::vector<std::uint32_t> duplicate_invalid{15, 15, 9999, 16};
+    CHECK(repo.preview_select(cfg, {}, duplicate_invalid).block_ids == selected.block_ids,
+          "lexical: duplicate or invalid page IDs must not alter selection");
+    auto updates = boundary_tokens;
+    updates[35 * page_tokens + 62] = 9001;
+    updates[35 * page_tokens + 63] = 9002;
+    std::vector<std::uint32_t> older;
+    const auto latest = kvmem_lexical_recall_pages(
+        updates, 48 * page_tokens,
+        std::span<const std::int32_t>(updates).subspan(48 * page_tokens, 2), page_tokens, &older);
+    CHECK(latest == std::vector<std::uint32_t>({35, 36}) &&
+              older == std::vector<std::uint32_t>({15, 16}),
+          "lexical: equal historical matches did not prefer the latest occurrence");
+    repo.add_scores(15, 1000, 1000);
+    const auto updated = repo.preview_select(cfg, {}, latest, older);
+    CHECK(std::find(updated.block_ids.begin(), updated.block_ids.end(), 15U) ==
+              updated.block_ids.end() && updated.block_ids.size() == 8,
+          "lexical: old hot version displaced the current fact or shrank the budget");
+    const std::array<std::uint32_t, 1> protected_old{15};
+    const auto protected_update = repo.preview_select(cfg, protected_old, latest, older);
+    CHECK(std::find(protected_update.block_ids.begin(), protected_update.block_ids.end(), 15U) !=
+              protected_update.block_ids.end(),
+          "lexical: version preference overrode a mandatory page");
+    repo.add_scores(15, -1000, -1000);
+    cfg.action_lrfu = false;
+    CHECK(repo.preview_select(cfg, {}, lexical).block_ids ==
+              repo.preview_select(cfg, {}).block_ids,
+          "lexical: disabled policy must preserve the baseline selection");
+    cfg.action_lrfu = true;
+
+    // When protected prefix + action + recent already fill the budget,
+    // lexical recall is optional and must never evict one of those pages.
+    repo.protect_system_prefix(2 * page_tokens);
+    cfg.budget_tokens = 4 * page_tokens;
+    cfg.recent_tokens = page_tokens;
+    const std::vector<std::uint32_t> mandatory{2};
+    const auto crowded = repo.preview_select(cfg, mandatory, lexical);
+    CHECK(crowded.block_ids.size() == 4 &&
+              std::find(crowded.block_ids.begin(), crowded.block_ids.end(), 0u) !=
+                  crowded.block_ids.end() &&
+              std::find(crowded.block_ids.begin(), crowded.block_ids.end(), 1u) !=
+                  crowded.block_ids.end() &&
+              std::find(crowded.block_ids.begin(), crowded.block_ids.end(), 2u) !=
+                  crowded.block_ids.end() &&
+              std::find(crowded.block_ids.begin(), crowded.block_ids.end(), 48u) !=
+                  crowded.block_ids.end(),
+          "lexical: high-priority pages may not be displaced");
 }
 
 // 1) Everything fits: passthrough selection; first placement is cold/raw.
@@ -200,11 +341,21 @@ static void test_action_lrfu() {
     evidence[6] = 0.0f;
     evidence[7] = 0.2f;
     repo.record_lrfu_scores(evidence, 0.5, 1.0);
-    CHECK(std::fabs(repo.blocks()[6].retrieval_score -
+    CHECK(std::fabs(repo.blocks()[6].profile_score -
                     0.8 * std::exp2(-0.5)) < 1e-5,
           "LRFU did not decay the previous retrieval hit");
+    CHECK(repo.blocks()[6].retrieval_score == 0.0 &&
+              std::fabs(repo.blocks()[7].profile_score - 0.2) < 1e-5,
+          "previous-query heat contaminated current retrieval or lost its history profile");
     CHECK(std::fabs(repo.blocks()[7].retrieval_score - 0.2) < 1e-5,
           "LRFU did not accumulate new retrieval evidence");
+    const double completed_profile = repo.blocks()[6].profile_score;
+    std::vector<float> partial(32, 0.0f);
+    repo.set_retrieval_scores(partial);
+    CHECK(repo.blocks()[6].profile_score == completed_profile &&
+              repo.blocks()[6].retrieval_score == 0.0,
+          "partial-query preview advanced or erased completed LRFU history");
+    repo.set_retrieval_scores(evidence);
 
     repo.protect_action_span(10 * 64, 12 * 64);
     KvSelectConfig cfg;
@@ -345,6 +496,8 @@ static void test_action_lrfu_long_ties() {
 
 int main() {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
+    test_lexical_history_rescue();
+    std::printf("lexical_history_rescue ok\n");
     test_passthrough();
     std::printf("passthrough ok\n");
     test_over_budget();

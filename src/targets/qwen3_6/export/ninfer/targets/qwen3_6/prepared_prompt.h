@@ -155,6 +155,9 @@ struct PreparedPromptData {
     // prompt with a trailing question is dominated by unrelated document text.
     std::uint32_t query_begin = 0;
     std::uint32_t query_end   = 0;
+    // Text-only short-query content, excluding serialized role/control tokens.
+    // Empty for media inputs and queries outside the lexical recall domain.
+    std::vector<TokenId> lexical_query_token_ids;
     // Complete historical assistant reasoning spans, in prompt-token coordinates.
     // Only reasoning that the serializer actually retains is indexed.
     std::vector<std::pair<std::uint32_t, std::uint32_t>> closed_thinking_spans;

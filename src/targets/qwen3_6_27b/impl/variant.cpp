@@ -14,8 +14,10 @@
 #include "ninfer/ops/residual_add.h"
 #include "ninfer/ops/silu_mul.h"
 #include "ops/gdn_input_proj/gdn_projected_conv.h"
+#include "ops/linear/gguf/gguf_dispatch.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <stdexcept>
 
 #define NINFER_QWEN36_VARIANT    ::ninfer::targets::qwen3_6_27b::detail::Variant
@@ -154,6 +156,19 @@ void project_individual_gdn(const Tensor& hidden,
     Tensor packed = projected.view({TextConfig::convolution_dim, tokens});
     Tensor output_gate = z.view({TextConfig::value_dim, tokens});
     const auto project = [&](const Weight& weight, std::int32_t offset) {
+        static const bool packed_gguf = [] {
+            const char* value = std::getenv("NINFER_R28_BUNDLE");
+            return value && value[0] == '1' && value[1] == '\0';
+        }();
+        if (packed_gguf && is_gguf(weight.qtype) && weight.k == 5120 &&
+            TextConfig::hidden == 5120 && TextConfig::key_dim == 2048 &&
+            TextConfig::value_dim == 6144 && TextConfig::convolution_dim == 10240 &&
+            ((weight.n == 2048 && (offset == 0 || offset == 2048)) ||
+             (weight.n == 6144 && offset == 4096))) {
+            ops::detail::gguf_linear_gdn_rows_bf16_dispatch(
+                input, weight, packed, offset, workspace, stream);
+            return;
+        }
         auto scope = workspace.scope();
         Tensor temporary = workspace.alloc(DType::BF16, {weight.n, tokens});
         ops::linear(input, weight, temporary, text_policy(weight), workspace, stream);
@@ -522,6 +537,31 @@ void Variant::post_mixer(const Tensor& hidden, const PostMixerWeights& weights, 
         Tensor up   = workspace.alloc(DType::BF16, {TextConfig::intermediate, hidden.ne[1]});
         ops::linear(hidden, *weights.gate, gate, text_policy(*weights.gate), workspace, stream);
         ops::linear(hidden, *weights.up, up, text_policy(*weights.up), workspace, stream);
+#if defined(NINFER_SM89)
+        static const bool fuse_down_quant = [] {
+            const char* value = std::getenv("NINFER_R29_BUNDLE");
+            return value && value[0] == '1' && value[1] == '\0';
+        }();
+        if (fuse_down_quant && hidden.ne[1] == 512 &&
+            is_gguf(weights.down.qtype) && weights.down.k == 17408 &&
+            weights.down.n == 5120 && weights.down.input_columns == nullptr &&
+            (weights.down.qtype == QType::GGUF_IQ3_S ||
+             weights.down.qtype == QType::GGUF_IQ3_XXS ||
+             weights.down.qtype == QType::GGUF_IQ4_XS ||
+             weights.down.qtype == QType::GGUF_IQ2_XS ||
+             weights.down.qtype == QType::GGUF_IQ2_S ||
+             weights.down.qtype == QType::GGUF_Q2_K ||
+             weights.down.qtype == QType::GGUF_Q4_K)) {
+            // Reserve the original activation range above to keep workspace
+            // addresses stable. Its BF16 values are now rounded in the quantizer.
+            auto projected_scope = workspace.scope();
+            Tensor projected = workspace.alloc(DType::BF16, {weights.down.n, hidden.ne[1]});
+            ops::detail::gguf_linear_silu_mul_down_dispatch(
+                gate, up, weights.down, projected, workspace, stream);
+            ops::residual_add(projected, residual, stream);
+            return;
+        }
+#endif
         ops::silu_mul(gate, up, activation, stream);
     } else {
         ops::linear_swiglu(hidden, weights.gate_up, activation,

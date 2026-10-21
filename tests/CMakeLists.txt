@@ -184,6 +184,10 @@ ninfer_add_test(ninfer_qwen3_8_27b_dflash2_real_test
   SOURCES targets/qwen3_6_27b/test_engine_dflash2_real.cpp
   LIBRARIES ninfer_engine)
 set_tests_properties(ninfer_qwen3_8_27b_dflash2_real_test PROPERTIES SKIP_RETURN_CODE 77)
+ninfer_add_test(ninfer_qwen3_8_kvmem_async_real_test
+  SOURCES targets/qwen3_6_27b/test_engine_kvmem_async_real.cpp
+  LIBRARIES ninfer_engine)
+set_tests_properties(ninfer_qwen3_8_kvmem_async_real_test PROPERTIES SKIP_RETURN_CODE 77)
 ninfer_add_test(ninfer_qwen3_6_27b_load_plan_test
   SOURCES targets/qwen3_6_27b/test_load_plan.cpp
   NEEDS_SOURCE_DIR
@@ -253,6 +257,12 @@ set_target_properties(ninfer_kvmem_rerope_test PROPERTIES CUDA_SEPARABLE_COMPILA
 ninfer_add_op_test(ninfer_kvmem_compact_test
   SOURCES kvmem_compact_test.cu
   LIBRARIES ninfer_ops ninfer_core)
+add_test(NAME ninfer_kvmem_async_compact_test COMMAND ninfer_kvmem_compact_test --async)
+add_test(NAME ninfer_kvmem_async_cancel_test COMMAND ninfer_kvmem_compact_test --async-cancel)
+# Load kernels before the deliberately blocked copy stream: CUDA lazy module
+# loading can otherwise serialize the first launch against that test gate.
+set_tests_properties(ninfer_kvmem_async_compact_test ninfer_kvmem_async_cancel_test PROPERTIES
+  ENVIRONMENT "CUDA_MODULE_LOADING=EAGER")
 ninfer_add_test(ninfer_kvmem_cold_store_test
   SOURCES kvmem_cold_store_test.cpp)
 ninfer_add_op_test(ninfer_kvmem_score_test

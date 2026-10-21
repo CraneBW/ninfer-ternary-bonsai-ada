@@ -60,6 +60,7 @@ struct ServeOptions {
     // process budget reported by cudaMemGetInfo.
     bool wddm_evictable_budget = false;
     bool managed_weights = false;
+    std::size_t managed_runtime_capacity_bytes = 0;
     bool allow_prefix_reuse = true;
     bool enable_thinking =
         true; // default thinking mode for the generation prompt (--no-thinking opts out)

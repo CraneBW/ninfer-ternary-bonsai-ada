@@ -9,9 +9,12 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <climits>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <mutex>
 
 // ggml's GGML_ABORT/GGML_ASSERT land here; only the vendored headers' own invariants reach it.
@@ -27,6 +30,70 @@ extern "C" void ggml_abort(const char* file, int line, const char* fmt, ...) {
 
 namespace ninfer::ops::gguf {
 namespace detail {
+
+// R28: narrow full-K I64 products; false means no launch and old route remains.
+bool try_r28_i64_bf16(GgmlType type, const void* weight, std::int64_t row_bytes,
+                         int rows, int k, const void* activation, int columns,
+                         __nv_bfloat16* out, std::int64_t out_column_stride,
+                         cudaStream_t stream);
+
+// Dedicated IQ3_XXS I64 instance; other matrix configurations stay unchanged.
+bool try_iq3_xxs_i64_bf16(const void* weight, std::int64_t row_bytes, int rows, int k,
+                       const void* activation, int columns, __nv_bfloat16* out,
+                       std::int64_t out_column_stride, cudaStream_t stream);
+
+// Dedicated IQ3_S I64 instance; other matrix configurations stay unchanged.
+bool try_iq3_s_i64_bf16(const void* weight, std::int64_t row_bytes, int rows, int k,
+                       const void* activation, int columns, __nv_bfloat16* out,
+                       std::int64_t out_column_stride, cudaStream_t stream);
+
+bool matrix_bf16_enabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("NINFER_GGUF_MMQ_BF16");
+        if (value == nullptr) { return true; }
+        if (std::strcmp(value, "0") == 0) { return false; }
+        if (std::strcmp(value, "1") == 0) { return true; }
+        throw std::invalid_argument("NINFER_GGUF_MMQ_BF16 must be 0 or 1");
+    }();
+    return enabled;
+}
+
+// Keep the previously qualified formats fixed while measuring IQ2_S on the
+// existing Qwen3.8 GSQ artifact. The global BF16 switch still rolls back all.
+bool matrix_iq2_s_bf16_enabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("NINFER_GGUF_IQ2_S_MMQ_BF16");
+        if (value == nullptr || std::strcmp(value, "0") == 0) { return false; }
+        if (std::strcmp(value, "1") == 0) { return true; }
+        throw std::invalid_argument("NINFER_GGUF_IQ2_S_MMQ_BF16 must be 0 or 1");
+    }();
+    return enabled;
+}
+
+void trace_matrix_output(ggml_type type, int rows, int k, int columns, int I, int J,
+                          int threads, int blocks, bool fixup, bool bf16) {
+    static const int budget = [] {
+        const char* enabled = std::getenv("NINFER_GGUF_MMQ_TRACE");
+        if (enabled == nullptr || std::strcmp(enabled, "1") != 0) { return 0; }
+        const char* value = std::getenv("NINFER_GGUF_MMQ_TRACE_BUDGET");
+        if (value == nullptr) { return 24; }
+        char* end = nullptr;
+        const long parsed = std::strtol(value, &end, 10);
+        if (end == value || *end != '\0' || parsed < 0 || parsed > INT_MAX) {
+            throw std::invalid_argument("NINFER_GGUF_MMQ_TRACE_BUDGET must be in [0, INT_MAX]");
+        }
+        return static_cast<int>(parsed);
+    }();
+    if (budget == 0) { return; }
+    static std::atomic<int> remaining{budget};
+    if (remaining.load(std::memory_order_relaxed) <= 0 ||
+        remaining.fetch_sub(1, std::memory_order_relaxed) <= 0) { return; }
+    std::fprintf(stderr,
+        "[gguf-mmq] type=%d N=%d K=%d T=%d I=%d J=%d threads=%d blocks=%d "
+        "fixup=%d output=%s policy_bf16=%d\n",
+        static_cast<int>(type), rows, k, columns, I, J, threads, blocks, int(fixup),
+        bf16 ? "bf16-direct" : "fp32", int(matrix_bf16_enabled()));
+}
 
 const DeviceFacts& device_facts() {
     static std::array<DeviceFacts, 16> facts{};
@@ -304,6 +371,79 @@ __global__ void quantize_matrix_kernel(const __nv_bfloat16* __restrict__ x,
         const float2 hi   = __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162*>(&words.y));
         xi                = make_float4(lo.x, lo.y, hi.x, hi.y);
     }
+
+    const std::int64_t k_block = i0 / QK8_1_MMQ;
+    const std::int64_t iqs     = i0 % QK8_1_MMQ;
+
+    float amax = fabsf(xi.x);
+    amax       = fmaxf(amax, fabsf(xi.y));
+    amax       = fmaxf(amax, fabsf(xi.z));
+    amax       = fmaxf(amax, fabsf(xi.w));
+#pragma unroll
+    for (int offset = vals_per_scale / 8; offset > 0; offset >>= 1) {
+        amax = fmaxf(amax, __shfl_xor_sync(0xFFFFFFFF, amax, offset, WARP_SIZE));
+    }
+    float sum = 0.0f;
+    if (ds_layout != MMQ_Q8_1_DS_LAYOUT_D4) {
+        sum = xi.x + xi.y + xi.z + xi.w;
+#pragma unroll
+        for (int offset = vals_per_sum / 8; offset > 0; offset >>= 1) {
+            sum += __shfl_xor_sync(0xFFFFFFFF, sum, offset, WARP_SIZE);
+        }
+    }
+    const float d_inv = 127.0f / amax;
+    char4 q;
+    q.x           = roundf(xi.x * d_inv);
+    q.y           = roundf(xi.y * d_inv);
+    q.z           = roundf(xi.z * d_inv);
+    q.w           = roundf(xi.w * d_inv);
+    const float d = 1.0f / d_inv;
+
+    const std::int64_t ib = k_block * columns + column;
+    reinterpret_cast<char4*>(y[ib].qs)[iqs / 4] = q;
+    if (ds_layout == MMQ_Q8_1_DS_LAYOUT_D2S6) {
+        if (iqs % 16 == 0 && iqs < 96) {
+            y[ib].d2s6[2 + iqs / 16] = sum;
+            if (iqs % 64 == 0) { y[ib].d2s6[iqs / 64] = d; }
+        }
+    } else if (iqs % 32 == 0) {
+        if (ds_layout == MMQ_Q8_1_DS_LAYOUT_DS4) {
+            y[ib].ds4[iqs / 32] = make_half2(d, sum);
+        } else {
+            y[ib].d4[iqs / 32] = d;
+        }
+    }
+}
+
+// R29: the original quantizer body below is copied verbatim. Only its
+// four-value input load is replaced by the existing BF16 SiLU/mul producer.
+// Source math: ops/common/math.cuh::silu and ops/kernel/silu_and_mul.cuh.
+// Preserve BF16 RN *before* amax/sum/scale/codes, not just at product output.
+__device__ __forceinline__ float r29_silu_mul_bf16(float gate, float up) {
+    const float value = (gate / (1.0f + expf(-gate))) * up;
+    return __bfloat162float(__float2bfloat16_rn(value));
+}
+
+template <mmq_q8_1_ds_layout ds_layout>
+__global__ void quantize_matrix_silu_mul_kernel(
+    const __nv_bfloat16* __restrict__ gate, const __nv_bfloat16* __restrict__ up,
+    block_q8_1_mmq* __restrict__ y, int k, int columns) {
+    constexpr int vals_per_scale = ds_layout == MMQ_Q8_1_DS_LAYOUT_D2S6 ? 64 : 32;
+    constexpr int vals_per_sum = ds_layout == MMQ_Q8_1_DS_LAYOUT_D2S6 ? 16 : 32;
+    const std::int64_t i0 = (std::int64_t(blockDim.x) * blockIdx.y + threadIdx.x) * 4;
+    if (i0 >= k) { return; }
+    const int column = blockIdx.x;
+    const std::int64_t at = std::int64_t(column) * k + i0;
+    const uint2 gate_words = *reinterpret_cast<const uint2*>(gate + at);
+    const uint2 up_words = *reinterpret_cast<const uint2*>(up + at);
+    const float2 g0 = __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162*>(&gate_words.x));
+    const float2 g1 = __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162*>(&gate_words.y));
+    const float2 u0 = __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162*>(&up_words.x));
+    const float2 u1 = __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162*>(&up_words.y));
+    const float4 xi = make_float4(r29_silu_mul_bf16(g0.x, u0.x),
+                                  r29_silu_mul_bf16(g0.y, u0.y),
+                                  r29_silu_mul_bf16(g1.x, u1.x),
+                                  r29_silu_mul_bf16(g1.y, u1.y));
 
     const std::int64_t k_block = i0 / QK8_1_MMQ;
     const std::int64_t iqs     = i0 % QK8_1_MMQ;
@@ -783,6 +923,48 @@ void quantize_matrix_activation(GgmlType type, const __nv_bfloat16* x, int k, in
     quantize_matrix(type, x, k, k, columns, input_columns, nullptr, 1, out, stream);
 }
 
+// Internal bridge entry: exactly the main MLP down activation shape on Ada.
+// Kept private to gguf_dispatch.cpp and its qualification fixture; no generic
+// public projection/ownership API and no allocation in this function.
+void quantize_matrix_silu_mul_activation(
+    GgmlType type, const __nv_bfloat16* gate, const __nv_bfloat16* up,
+    int k, int columns, void* out, cudaStream_t stream) {
+    if (k != 17408 || columns != 512 || gate == nullptr || up == nullptr || out == nullptr ||
+        detail::device_facts().cc != GGML_CUDA_CC_ADA_LOVELACE) {
+        throw std::invalid_argument("R29 SiLU/down quant: expected SM89 K17408 T512");
+    }
+    const dim3 blocks(columns, k / (4 * detail::kMatrixQuantizeThreads), 1);
+    auto* y = static_cast<block_q8_1_mmq*>(out);
+    const auto layout = mmq_get_q8_1_ds_layout(detail::to_ggml(type));
+    switch (layout) {
+    case MMQ_Q8_1_DS_LAYOUT_D4:
+        detail::quantize_matrix_silu_mul_kernel<MMQ_Q8_1_DS_LAYOUT_D4>
+            <<<blocks, detail::kMatrixQuantizeThreads, 0, stream>>>(gate, up, y, k, columns);
+        break;
+    case MMQ_Q8_1_DS_LAYOUT_DS4:
+        detail::quantize_matrix_silu_mul_kernel<MMQ_Q8_1_DS_LAYOUT_DS4>
+            <<<blocks, detail::kMatrixQuantizeThreads, 0, stream>>>(gate, up, y, k, columns);
+        break;
+    case MMQ_Q8_1_DS_LAYOUT_D2S6:
+        detail::quantize_matrix_silu_mul_kernel<MMQ_Q8_1_DS_LAYOUT_D2S6>
+            <<<blocks, detail::kMatrixQuantizeThreads, 0, stream>>>(gate, up, y, k, columns);
+        break;
+    }
+    detail::check(cudaGetLastError(), "R29 SiLU/down quant launch");
+    static const bool trace = [] {
+        const char* value = std::getenv("NINFER_R29_BUNDLE_TRACE");
+        return value && value[0] == '1' && value[1] == '\0';
+    }();
+    if (trace) {
+        static std::atomic<std::uint64_t> seen{0};
+        const auto bit = std::uint64_t(1) << static_cast<unsigned>(type);
+        if ((seen.fetch_or(bit, std::memory_order_relaxed) & bit) == 0) {
+            std::fprintf(stderr, "[r29-silu-down-quant] type=%d K=17408 T=512 layout=%d bf16_rn=1 kernel=quantize_matrix_silu_mul_kernel\n",
+                         int(type), int(layout));
+        }
+    }
+}
+
 namespace {
 
 // The matrix kernel's K step: an activation covers whole steps.
@@ -876,6 +1058,45 @@ void matrix_product(GgmlType type, const void* weight, std::int64_t row_bytes, i
     }
 #undef NINFER_GGUF_MATRIX_CASE
     throw std::invalid_argument("gguf matrix product: no integer kernel for this block type");
+}
+
+bool try_matrix_product_bf16(GgmlType type, const void* weight, std::int64_t row_bytes,
+                             int rows, int k, const void* activation, int columns,
+                             __nv_bfloat16* out, std::int64_t out_column_stride,
+                             cudaStream_t stream) {
+    if (!detail::matrix_bf16_enabled()) { return false; }
+    if (detail::try_r28_i64_bf16(type, weight, row_bytes, rows, k, activation, columns,
+                                  out, out_column_stride, stream)) {
+        return true;
+    }
+    if (type == GgmlType::IQ3_XXS && detail::try_iq3_xxs_i64_bf16(
+            weight, row_bytes, rows, k, activation, columns, out, out_column_stride, stream)) {
+        return true;
+    }
+    if (type == GgmlType::IQ3_S && detail::try_iq3_s_i64_bf16(
+            weight, row_bytes, rows, k, activation, columns, out, out_column_stride, stream)) {
+        return true;
+    }
+    if (type == GgmlType::IQ2_S && !detail::matrix_iq2_s_bf16_enabled()) { return false; }
+#define NINFER_GGUF_BF16_CASE(NAME)                                                            \
+    case GgmlType::NAME:                                                                       \
+        return detail::matrix_product_bf16_impl<GGML_TYPE_##NAME>(                              \
+            weight, row_bytes, rows, k, activation, columns, out, out_column_stride, stream)
+    switch (type) {
+        NINFER_GGUF_BF16_CASE(IQ3_S);
+        NINFER_GGUF_BF16_CASE(IQ3_XXS);
+        NINFER_GGUF_BF16_CASE(IQ4_XS);
+        NINFER_GGUF_BF16_CASE(IQ2_XS);
+        NINFER_GGUF_BF16_CASE(IQ2_S);
+        NINFER_GGUF_BF16_CASE(Q2_K);
+        NINFER_GGUF_BF16_CASE(Q4_K);
+        // R29 T16 agent: its template enforces flag/SM89/J16/full-K only.
+        NINFER_GGUF_BF16_CASE(Q6_K);
+        NINFER_GGUF_BF16_CASE(IQ2_XXS);
+    default:
+        return false;
+    }
+#undef NINFER_GGUF_BF16_CASE
 }
 
 bool moe_matrix_supported(GgmlType type, int rows, int k, bool tail) {

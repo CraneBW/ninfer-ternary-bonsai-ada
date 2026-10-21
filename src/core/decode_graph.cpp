@@ -124,11 +124,31 @@ void DecodeGraphExecutable::update(const DecodeGraphDefinition& definition) {
 
     cudaGraphExecUpdateResultInfo result{};
     const cudaError_t err = cudaGraphExecUpdate(exec_, definition.graph_, &result);
-    if (err != cudaSuccess || result.result != cudaGraphExecUpdateSuccess) {
-        throw std::runtime_error(
-            "CUDA Graph executable update failed: " + std::string(cudaGetErrorName(err)) +
-            " (update result " + std::to_string(static_cast<int>(result.result)) + ")");
+    if (err == cudaSuccess && result.result == cudaGraphExecUpdateSuccess) { return; }
+
+    // Adapt ninfer-all's topology-change re-instantiation to the existing
+    // definition/executable ownership. A profile may switch from Prompt to
+    // ChunkedSmallT attention and cannot then update the old nodes in place.
+    // Do not treat another update failure or asynchronous CUDA error as this case.
+    if (err == cudaErrorGraphExecUpdateFailure &&
+        result.result == cudaGraphExecUpdateErrorTopologyChanged) {
+        const cudaError_t pending = cudaGetLastError();
+        if (pending != cudaSuccess && pending != cudaErrorGraphExecUpdateFailure) {
+            CUDA_CHECK(pending);
+        }
+        // Keep the original executable if validation/allocation of the new
+        // definition fails. Retire it only after the replacement is complete;
+        // CUDA retains any already enqueued execution until that work completes.
+        DecodeGraphExecutable replacement;
+        replacement.instantiate(definition);
+        const cudaGraphExec_t previous = exec_;
+        exec_                         = replacement.exec_;
+        replacement.exec_             = previous;
+        return;
     }
+    throw std::runtime_error(
+        "CUDA Graph executable update failed: " + std::string(cudaGetErrorName(err)) +
+        " (update result " + std::to_string(static_cast<int>(result.result)) + ")");
 }
 
 void DecodeGraphExecutable::upload(cudaStream_t stream) {

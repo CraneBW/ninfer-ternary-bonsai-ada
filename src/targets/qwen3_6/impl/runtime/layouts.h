@@ -43,6 +43,7 @@ struct PersistentLayout {
     std::optional<TensorLayout> score_hidden;
     TensorLayout token_counts;
     TensorLayout sampling_config;
+    std::optional<TensorLayout> kvmem_rerope_meta;
     std::size_t bytes            = 0;
     std::size_t kv_payload_bytes = 0;
 };

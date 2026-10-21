@@ -12,32 +12,14 @@
 
 namespace ninfer::targets::qwen3_6 {
 
-// 7, not the 5 the reference port shipped, and the ceiling is structural rather than tuned: one
-// round verifies K+1 tokens and the verify path runs on the 8-wide small-t tile, so 7 is the last K
-// whose width (8) still fits it. K=8 would make T=9, which falls off that tile -- measured 13.3 ms
-// per verify round at T=8 against 40 ms at T=9, i.e. the extra draft costs more than it can return.
-//
-// Why raising it at all: the per-position survival rate is a property of the TASK, not of the
-// model, and it varies far more than the 5 assumed. Measured over three fixtures at K=5 (survival
-// per position, fitted T0~15.83 ms and c~1.94 ms per draft):
-//   en-code (code editing)   ~0.76  -> optimum is K=4
-//   mtp-count   (counting)   ~0.95  -> optimum is K=7
-//   mtp-template (repetitive) ~0.995 -> optimum is beyond 7; its histogram reads 43,43,42,42,42,
-//                                       essentially no decay
-// The cost of a draft is fixed (~1.94 ms) and the return is the survival probability, so the
-// crossover sits at s ~= 0.75: below it more K loses, above it more K wins. A single deployment-wide
-// K cannot serve all three, which is why this is a CEILING and --draft-tokens picks within it.
-// Adaptive K needs a captured graph per K because this constant is part of the graph shape; with
-// --adaptive-mtp the program captures one graph per verification width from three up to this
-// ceiling and each round replays verification_view(width) of the same state.
-//
-// This number is written in four places and they are kept in step by hand, because each is a
-// different kind of thing rather than four copies of one: this one is the captured graph's width,
-// kMaximumMtpDraftTokens in the 27b config is the model's own ceiling, the range check in
-// product/speculative_options.h is CLI validation, and the T bound in ops/wrapper/mtp_round.cpp is
-// a runtime invariant. Raise all four together; raising fewer fails loudly at one of those checks
-// rather than producing a wrong answer.
-inline constexpr std::uint32_t kMtpDecodeMaximumDrafts    = 7;
+// R29 extends fixed-window MTP to K15 using the existing T16 GGUF/MMQ path.
+// The former K7 limit selected only the small-T vector kernel. That remains the
+// default profile; K15 is an explicit experiment, not an assumed speedup.
+// All round buffers, partial acceptance, alignment and graph envelopes are still
+// sized from the startup window. Adaptive/lookup windows above 7 stay unsupported.
+// Keep four structural bounds in step: this frame width, the 27b model ceiling,
+// product/speculative_options.h and ops/wrapper/mtp_round.cpp.
+inline constexpr std::uint32_t kMtpDecodeMaximumDrafts    = 15;
 inline constexpr std::uint32_t kMtpDecodeMaximumWidth     = kMtpDecodeMaximumDrafts + 1;
 inline constexpr std::uint32_t kDFlashDecodeMaximumDrafts = 15;
 inline constexpr std::uint32_t kDFlashDecodeMaximumWidth  = kDFlashDecodeMaximumDrafts + 1;
@@ -60,6 +42,9 @@ struct OrdinaryDecodeIngress {
     std::array<std::int32_t, kMaximumConcurrency> state_source_slots{};
     std::array<std::int32_t, kMaximumConcurrency> state_destination_slots{};
     std::array<ops::SamplingConfig, kMaximumConcurrency> sampling{};
+    // Startup-frozen mode; graph capture and replay must use the same setting.
+    std::int32_t original_kv_positions = 0;
+    std::array<std::int32_t, kMaximumConcurrency> sample_positions{};
 };
 
 struct OrdinaryDecodeEgress {
@@ -82,6 +67,10 @@ struct MtpDecodeIngress {
     std::array<std::int32_t, kMaximumConcurrency> state_destination_slots{};
     std::array<std::int32_t, kMaximumConcurrency> rope_deltas{};
     std::array<ops::SamplingConfig, kMaximumConcurrency> sampling{};
+    // Original timeline separates sampling/RNG from compact attention positions.
+    // Adapted from the KVMem NInfer donor; zero preserves the legacy schedule.
+    std::int32_t original_kv_positions = 0;
+    std::array<std::int32_t, kMaximumConcurrency> logical_frontiers{};
 };
 
 struct MtpDecodeEgress {
@@ -199,6 +188,7 @@ struct OrdinaryDecodeState {
     Tensor tokens;
     Tensor cache_positions;
     Tensor rope_positions;
+    Tensor sample_positions;
     Tensor text_kv_table_rows;
     Tensor state_source_slots;
     Tensor state_destination_slots;
@@ -242,6 +232,7 @@ struct MtpDecodeState {
     DeviceSpan egress;
     Tensor anchors;
     Tensor base_frontiers;
+    Tensor logical_frontiers;
     Tensor remaining_budgets;
     Tensor current_extents;
     Tensor target_valid_columns;

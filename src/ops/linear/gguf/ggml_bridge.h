@@ -116,6 +116,12 @@ void matrix_product(GgmlType type, const void* weight, std::int64_t row_bytes, i
                     const void* activation, int columns, float* out,
                     std::int64_t out_column_stride, void* fixup, cudaStream_t stream,
                     bool tail = false);
+// Try the same FP32 accumulation with a final direct BF16 store. False means
+// no launch: the caller must retain its FP32 plane/fixup and final conversion.
+bool try_matrix_product_bf16(GgmlType type, const void* weight, std::int64_t row_bytes,
+                             int rows, int k, const void* activation, int columns,
+                             __nv_bfloat16* out, std::int64_t out_column_stride,
+                             cudaStream_t stream);
 // The 256-value step a padded matrix product covers for rows of `k` values.
 [[nodiscard]] int matrix_padded_k(int k);
 // The activation of a padded product: x BF16 [k, columns] quantized with zeros from k up to

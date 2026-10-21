@@ -437,6 +437,10 @@ struct SequenceState {
     // and the digests stay in prompt space so prefix matching keeps working. Zero unless such
     // a compaction ran on this lineage.
     std::int32_t kv_offset = 0;
+    // Exact attachment of an executed query; only complete matching endpoints may
+    // resume beyond q0 in original-position mode (KVMem faf3c225 protocol).
+    std::uint32_t last_query_begin = 0;
+    std::uint32_t last_query_end = 0;
     // Lowest prompt index this lineage may be resumed from once its KV was compacted into a
     // window: below it the retained tail would expose the new request to tokens the checkpoint
     // state has not seen yet. Zero while the KV still mirrors the whole token prefix.
@@ -520,6 +524,17 @@ struct RequestControl {
         double elapsed_seconds              = 0.0;
         bool prepare_mtp                    = false;
         bool query_captured                 = false;
+        bool query_reselected               = false;
+        bool query_replayed                 = false;
+        std::uint32_t hidden_replay_tokens   = 0;
+        // Request-local q0 only: never advertised as a cross-query MTP endpoint.
+        std::optional<KVAddressSpaceStore::OriginalPrefixCheckpoint> original_text_prefix;
+        std::optional<KVAddressSpaceStore::OriginalPrefixCheckpoint> original_backend_prefix;
+        std::vector<TokenId> original_prefix_tokens;
+        qwen3_6::detail::ResidentPrefixIdentity original_prefix_identity;
+        bool original_query_checkpoint_ready = false;
+        std::vector<TokenId> window_replay_ids;
+        std::uint32_t window_replay_cursor = 0;
         ReusePath reuse                     = ReusePath::Root;
         MtpBridgeMode mtp_bridge            = MtpBridgeMode::None;
     };
@@ -691,6 +706,7 @@ public:
     const bool vision_enabled;
     const bool use_cuda_graph;
     const bool causal_scoring;
+    const bool original_kv_positions;
     const std::size_t kv_payload_bytes;
     const std::size_t graph_allowance_bytes;
     const WorkspacePlan workspace_plan;
@@ -702,6 +718,20 @@ public:
     std::unique_ptr<HostKVArena> host_kv_arena;
     std::unique_ptr<LogicalKVPageStore> text_kv_pages;
     std::unique_ptr<KVAddressSpaceStore> text_kv_addresses;
+    std::uint64_t history_replay_tokens_ = 0;
+    std::uint64_t query_replay_tokens_ = 0;
+    std::uint64_t history_replay_rounds_ = 0;
+    std::uint64_t history_reused_tokens_ = 0;
+    // Fixed startup Host budget; checkpoint contents belong to one address generation.
+    struct ReplayPrefixCache {
+        KVAddressSpaceHandle owner;
+        std::vector<std::uint32_t> positions;
+        std::vector<TokenId> tokens;
+        std::array<qwen3_6::HostStateSlotHandle, 4> slots;
+        std::array<std::uint32_t, 4> frontiers{};
+    };
+    std::unique_ptr<qwen3_6::HostStatePool> replay_state_images_;
+    std::vector<ReplayPrefixCache> replay_prefix_caches_;
     std::unique_ptr<LogicalKVPageStore> backend_kv_pages;
     std::unique_ptr<KVAddressSpaceStore> backend_kv_addresses;
     std::unique_ptr<HostKVExtentStore> host_kv_extents;

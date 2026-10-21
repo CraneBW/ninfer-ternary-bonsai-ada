@@ -9,6 +9,7 @@
 
 #include "core/nvtx.h"
 #include "core/startup.h"
+#include "kvmem/kvmem_lexical.h"
 #include "targets/qwen3_6/impl/runtime/schedule.h"
 #include "ninfer/ops/gdn_replay.h"
 #include "ninfer/ops/linear.h"
@@ -25,6 +26,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <exception>
 #include <iterator>
 #include <limits>
@@ -41,6 +43,15 @@ std::uint32_t normalized_private_capacity(const ContextCacheOptions& options) {
         throw std::logic_error("Qwen3.6 context cache private capacity is not normalized");
     }
     return *options.max_private_continuations;
+}
+
+// Adapted from KVMem native backend faf3c225: a startup identity, never
+// toggled inside an existing archive/StateImage epoch.
+bool original_kv_positions_requested() {
+    const char* value = std::getenv("NINFER_KVMEM_ORIGINAL_POSITIONS");
+    if (!value || std::strcmp(value, "0") == 0) { return false; }
+    if (std::strcmp(value, "1") == 0) { return true; }
+    throw std::invalid_argument("NINFER_KVMEM_ORIGINAL_POSITIONS must be 0 or 1");
 }
 
 using Clock = std::chrono::steady_clock;
@@ -789,6 +800,7 @@ ProgramImplCore::ProgramImplCore(const LoadedModelData& model_in, const Sequence
       kv_storage(plan.kv_storage),
       proposal_head(plan.proposal_head), vision_enabled(plan.features.vision),
       use_cuda_graph(plan.use_cuda_graph), causal_scoring(plan.causal_scoring),
+      original_kv_positions(original_kv_positions_requested()),
       kv_payload_bytes(plan.persistent.kv_payload_bytes),
       graph_allowance_bytes(plan.graph_allowance_bytes), workspace_plan(plan.workspace),
       persistent(plan.persistent.bytes), workspace_storage(plan.workspace.capacity),
@@ -816,6 +828,16 @@ ProgramImplCore::ProgramImplCore(const LoadedModelData& model_in, const Sequence
       context_transfer_timers_{CudaEventTimer(device_in, device_in.transfer_stream),
                                CudaEventTimer(device_in, device_in.transfer_stream),
                                CudaEventTimer(device_in, device_in.transfer_stream)} {
+    if (original_kv_positions &&
+        (!plan.kvmem.enabled || plan.kvmem.budget_tokens < 4096 || max_concurrency != 1 ||
+         (speculative_backend != SpeculativeBackend::None &&
+          speculative_backend != SpeculativeBackend::Mtp) || causal_scoring)) {
+        throw std::invalid_argument(
+            "original-position KVMem requires a single text lane, budget>=4096, None/MTP, and no scoring");
+    }
+    if (original_kv_positions) {
+        std::fprintf(stderr, "KVMEM_ORIGINAL_POSITIONS enabled=1 checkpoint=full_timeline replay=query_only\n");
+    }
     if (model.weights_arena == nullptr) {
         throw std::invalid_argument("Qwen3.6 model view has no owning weight arena");
     }
@@ -870,12 +892,15 @@ ProgramImplCore::ProgramImplCore(const LoadedModelData& model_in, const Sequence
     decoder = std::make_unique<qwen3_6::DecoderState>(backing, plan.persistent.decoder);
     text_host_kv_page_stride =
         plan_host_kv_page_layout(decoder->text_kv.page_pool().geometry()).page_stride;
-    // The address space can name every logical page of the configured context, so the page
-    // store needs a descriptor for each one. A device budget below the context is only valid
-    // when the host tier makes up the difference.
-    const std::uint32_t text_page_descriptors = logical_page_capacity(decoder->text_kv.page_pool());
     const std::uint32_t text_addressable_pages =
         decoder->text_kv.execution_tables().logical_page_capacity();
+    // KVMem/ActKV native backends (faf3c225/182113cd) own their Host/Cold
+    // archive independently of the ordinary context-cache Host payload arena.
+    // Naming a logical page needs only a descriptor, not a pinned payload page.
+    // Ordinary non-KVMem cache demotion retains its real Host capacity checks.
+    const std::uint32_t legacy_text_descriptors = logical_page_capacity(decoder->text_kv.page_pool());
+    const std::uint32_t text_page_descriptors = plan.kvmem.enabled
+        ? std::max(legacy_text_descriptors, text_addressable_pages) : legacy_text_descriptors;
     if (text_page_descriptors < text_addressable_pages) {
         const std::uint32_t device_pages = decoder->text_kv.page_pool().capacity_pages();
         throw std::invalid_argument(
@@ -887,9 +912,25 @@ ProgramImplCore::ProgramImplCore(const LoadedModelData& model_in, const Sequence
     }
     text_kv_pages = std::make_unique<LogicalKVPageStore>(
         decoder->text_kv.page_pool(), text_page_descriptors);
+    DeviceSpan kvmem_rerope_workspace;
+    if (plan.persistent.kvmem_rerope_meta) {
+        const Tensor meta = plan.persistent.kvmem_rerope_meta->bind(backing);
+        kvmem_rerope_workspace = {meta.data, meta.bytes()};
+    }
+    // Fund the configured speculative growth reserve and provisional verify
+    // lead from real pool capacity, without reducing the selected history.
+    const std::uint32_t speculative_claim_pages =
+        plan.speculative_backend == SpeculativeBackend::None ? 0U :
+        static_cast<std::uint32_t>((static_cast<std::uint64_t>(plan.kvmem.gen_reserve_tokens) +
+                                    plan.draft_window + 1U + kPagedKVPageSize - 1U) /
+                                   kPagedKVPageSize);
     text_kv_addresses = std::make_unique<KVAddressSpaceStore>(
         *text_kv_pages, decoder->text_kv.execution_tables(), address_capacity,
-        decoder->text_kv.execution_tables().logical_page_capacity(), plan.kvmem);
+        decoder->text_kv.execution_tables().logical_page_capacity(), plan.kvmem,
+        kvmem_rerope_workspace, speculative_claim_pages);
+    if (plan.kvmem.async_transfers) {
+        text_kv_addresses->enable_kvmem_async_d2h(device);
+    }
     // KVMem K3: the query capture must exist before the decode graphs are
     // captured, because those graphs bake the buffer's address.
     text_kv_addresses->install_kvmem_query(
@@ -899,6 +940,14 @@ ProgramImplCore::ProgramImplCore(const LoadedModelData& model_in, const Sequence
         static_cast<std::uint32_t>(TextConfig::kv_heads));
     state_images =
         std::make_unique<qwen3_6::StateImageDevicePool>(backing, plan.persistent.state_images);
+    if (plan.kvmem.enabled && plan.kvmem.budget_tokens >= 4096) {
+        replay_state_images_ = std::make_unique<qwen3_6::HostStatePool>(
+            state_images->host_layout(), 4U * max_concurrency);
+        replay_prefix_caches_.resize(max_concurrency);
+        for (auto& cache : replay_prefix_caches_) {
+            for (auto& slot : cache.slots) { slot = *replay_state_images_->allocate(); }
+        }
+    }
     const std::uint32_t host_state_slots = *plan.context_cache.host_state_slots;
     if (host_state_slots != 0) {
         const std::uint64_t host_state_bytes =
@@ -948,9 +997,19 @@ ProgramImplCore::ProgramImplCore(const LoadedModelData& model_in, const Sequence
             plan_host_kv_page_layout(backend->page_pool().geometry()).page_stride;
         backend_kv_pages = std::make_unique<LogicalKVPageStore>(
             backend->page_pool(), logical_page_capacity(backend->page_pool()));
+        // As in the existing ring integration, backend capacity is its own
+        // physical claim. MTP includes provisional lead and keeps a full-context
+        // pool; applying Main's selected-window cap undercharges it at activation.
+        KvMemOptions backend_kvmem = plan.kvmem;
+        backend_kvmem.budget_tokens = 0;
+        backend_kvmem.gen_reserve_tokens = 0;
         backend_kv_addresses = std::make_unique<KVAddressSpaceStore>(
             *backend_kv_pages, backend->execution_tables(), address_capacity,
-            backend->execution_tables().logical_page_capacity(), plan.kvmem);
+            backend->execution_tables().logical_page_capacity(), backend_kvmem,
+            kvmem_rerope_workspace);
+        if (plan.kvmem.async_transfers) {
+            backend_kv_addresses->enable_kvmem_async_d2h(device);
+        }
     }
     pressure_text_page_scratch_.resize(text_kv_pages->capacity());
     pressure_text_selected_pages_.reserve(text_kv_pages->capacity());
@@ -1211,6 +1270,7 @@ std::vector<float> ProgramImplCore::causal_score(PreparedPromptData&& prompt,
                 state_slot,
                 0,
                 nullptr};
+            schedule_state.original_kv_positions = original_kv_positions;
             mark_workspace_usage(workspace_plan.text_prefill);
             const schedule::PrefillChunkResult result = schedule::prefill_text_chunk(
                 schedule_state, std::span<const TokenId>(prompt.token_ids), nominal, std::nullopt,
@@ -4198,6 +4258,13 @@ ProgramImplCore::revalidate_materialization(const AdmissionCandidate& plan,
                                          source_state->prefix_identity, details.reuse_base)) {
         return runtime::PreflightStatus::StalePolicyState;
     }
+    if (original_kv_positions &&
+        (prompt.has_media() || prompt.rope_delta != 0 || (prompt.query_begin < details.reuse_base &&
+         prompt.query_end > prompt.query_begin &&
+         (source_state == nullptr || source_state->last_query_begin != prompt.query_begin ||
+          source_state->last_query_end != prompt.query_end || prompt.query_end > details.reuse_base)))) {
+        return runtime::PreflightStatus::StalePolicyState;
+    }
     if (shared_state != nullptr &&
         (!shared_state->identity || shared_state->identity->prefix_identity() == nullptr ||
          !qwen3_6::detail::prefix_matches(prompt, shared_state->identity->ledger(),
@@ -6679,6 +6746,9 @@ void ProgramImplCore::release_continuation_slot_best_effort(std::uint32_t index)
 void ProgramImplCore::retire_continuation_slot(std::uint32_t index) noexcept {
     if (index >= continuation_capacity) { std::terminate(); }
     SequenceState& sequence     = continuation_states[index];
+    for (auto& cache : replay_prefix_caches_) {
+        if (sequence.kv && cache.owner == sequence.kv->text) { cache.frontiers = {}; }
+    }
     sequence.execution_frontier = 0;
     sequence.ledger_frontier    = 0;
     sequence.ledger.clear();
@@ -7270,7 +7340,16 @@ StartResult ProgramImplCore::start_request(MaterializationTransaction& transacti
         actual.device.active_lanes               = 1;
         const detail::PhysicalResources expected = active;
         if (actual != expected) {
-            throw std::logic_error("materialized sequence does not match its active entitlement");
+            // Adapt the existing ninfer-all diagnostic to expose the resource
+            // dimension rather than weakening the exact entitlement check.
+            const auto describe = [](const detail::PhysicalResources& r) {
+                return "state=" + std::to_string(r.device.state_slots) +
+                       " main=" + std::to_string(r.device.main_kv_pages) +
+                       " backend=" + std::to_string(r.device.backend_kv_pages) +
+                       " host=" + std::to_string(r.host.kv_bytes);
+            };
+            throw std::logic_error("materialized sequence does not match its active entitlement (actual " +
+                                   describe(actual) + "; expected " + describe(expected) + ")");
         }
         if (details.reuse != ReusePath::Root) {
             if (transaction.state_restored) {
@@ -7538,7 +7617,7 @@ void ProgramImplCore::require_kvmem_generation_fit(const SequenceState& sequence
     throw std::runtime_error(
         "KVMem cannot map this sequence's KV into the device pool: a speculative batch maps its "
         "draft window ahead of the batch and cannot reclaim while it is being prepared; raise "
-        "--kv-device-tokens or lower --kvmem-budget");
+        "--kvmem-gen-reserve with enough --kv-device-tokens, or shorten the generation");
 }
 
 qwen3_6::SharedPrefixSummary
@@ -8550,9 +8629,19 @@ ActiveCaptureResult ProgramImplCore::publish_active_capture(ActiveCaptureTransac
                                                                 : 0U;
         // The published bundle describes the live (possibly KVMem-compacted) address space, so
         // its coverage is named in window-relative slots, exactly like the prefill piece loop.
-        ensure_sequence_kv_mapped(
-            sequence, kv_tokens(sequence.kv_offset, prefill.prompt_tokens),
-            backend_materialized == 0 ? 0U : kv_tokens(sequence.kv_offset, backend_materialized));
+        const bool chunked_kvmem =
+            text_kv_addresses->kvmem_enabled() &&
+            text_kv_addresses->kvmem_budget_tokens() != 0 &&
+            kv_pages_for_frontier(prefill.prompt_tokens) >
+                text_kv_addresses->kvmem_budget_tokens() / kPagedKVPageSize;
+        // Match start_sequence: publishing an early shared capture must not
+        // materialize the whole long prompt outside the bounded page claim.
+        // The prefill piece loop maps each next extent after making room.
+        if (!chunked_kvmem) {
+            ensure_sequence_kv_mapped(
+                sequence, kv_tokens(sequence.kv_offset, prefill.prompt_tokens),
+                backend_materialized == 0 ? 0U : kv_tokens(sequence.kv_offset, backend_materialized));
+        }
     }
 
     detail::PhysicalResources removed = transaction.capacity_preparation_removed;
@@ -9156,6 +9245,8 @@ runtime::ExecutionTiming ProgramImplCore::append_forced_tokens(
             const std::uint32_t base_ledger_frontier = sequence.ledger_frontier;
             const std::uint32_t base                 = sequence.execution_frontier;
             const std::uint32_t end                  = base + row_stride;
+            const auto logical_base = original_kv_positions ? executed_prompt_tokens(sequence) : base;
+            const auto logical_end = logical_base + row_stride;
             const auto started                       = Clock::now();
 
             if (is_masked_draft_backend(speculative_backend) &&
@@ -9177,7 +9268,7 @@ runtime::ExecutionTiming ProgramImplCore::append_forced_tokens(
             ensure_sequence_kv_mapped(sequence, end, backend_kv_cache() ? end : 0U);
 
             sequence.ledger.insert(sequence.ledger.end(), forced.begin(), forced.end());
-            if (sequence.ledger.size() != static_cast<std::size_t>(end) + 1U) {
+            if (sequence.ledger.size() != static_cast<std::size_t>(logical_end) + 1U) {
                 throw std::logic_error("forced-token continuation ledger has an invalid shape");
             }
 
@@ -9199,9 +9290,9 @@ runtime::ExecutionTiming ProgramImplCore::append_forced_tokens(
                                            cudaMemcpyHostToDevice, device.stream));
             }
 
-            std::uint32_t cursor = base;
-            while (cursor < end) {
-                const std::uint32_t count           = std::min(prefill_chunk, end - cursor);
+            std::uint32_t cursor = logical_base;
+            while (cursor < logical_end) {
+                const std::uint32_t count           = std::min(prefill_chunk, logical_end - cursor);
                 const StateImageSelectors selectors = state_selectors(sequence);
                 schedule::PrefillContext schedule_state{
                     {device, model, work, state_images->linear(),
@@ -9219,6 +9310,8 @@ runtime::ExecutionTiming ProgramImplCore::append_forced_tokens(
                     selectors.destination,
                     0,
                     dflash_host_ingress};
+                schedule_state.original_kv_positions = original_kv_positions;
+                schedule_state.text_kv_offset = original_kv_positions ? sequence.kv_offset : 0;
                 mark_workspace_usage(speculative_backend == SpeculativeBackend::Mtp
                                          ? workspace_plan.mtp_prefill
                                          : workspace_plan.text_prefill);
@@ -9232,9 +9325,9 @@ runtime::ExecutionTiming ProgramImplCore::append_forced_tokens(
                     throw std::logic_error("forced-token prefill made invalid progress");
                 }
                 cursor += result.processed_tokens;
-                sequence.text_kv_valid = cursor;
+                sequence.text_kv_valid = original_kv_positions ? kv_tokens(sequence.kv_offset, cursor) : cursor;
                 if (speculative_backend == SpeculativeBackend::Mtp) {
-                    sequence.mtp_kv_valid = cursor;
+                    sequence.mtp_kv_valid = sequence.text_kv_valid;
                 } else if (is_masked_draft_backend(speculative_backend)) {
                     sequence.dflash_context_frontier = cursor;
                 }
@@ -9512,6 +9605,12 @@ FinishResult ProgramImplCore::finish(SequenceHandle sequence) noexcept {
                 } catch (...) {}
             }
         }
+        // Request completion is a lifetime boundary. Retire the final batch
+        // before publishing a reusable checkpoint; tail wait stays observable.
+        (void)text_kv_addresses->retire_kvmem_transfers(true);
+        if (state.kv->backend) {
+            (void)backend_kv_addresses->retire_kvmem_transfers(true);
+        }
         text_kv_addresses->set_checkpoint_requirement(state.kv->text, state.execution_frontier);
         if (state.kv->backend) {
             backend_kv_addresses->set_checkpoint_requirement(*state.kv->backend,
@@ -9780,6 +9879,13 @@ KvMemUsage ProgramImplCore::kvmem_usage() const noexcept {
     KvMemUsage usage;
     if (text_kv_addresses) { usage = text_kv_addresses->kvmem_usage(); }
     if (backend_kv_addresses) { usage.merge(backend_kv_addresses->kvmem_usage()); }
+    usage.host_cache_capacity_bytes = host_kv_arena ? host_kv_arena->capacity_bytes() : 0U;
+    usage.history_replay_tokens = history_replay_tokens_;
+    usage.query_replay_tokens = query_replay_tokens_;
+    usage.history_replay_rounds = history_replay_rounds_;
+    usage.history_reused_tokens = history_reused_tokens_;
+    usage.replay_checkpoint_capacity_bytes = replay_state_images_
+        ? replay_state_images_->layout().image_bytes * replay_state_images_->capacity() : 0;
     return usage;
 }
 
@@ -10320,6 +10426,8 @@ void ProgramImplCore::start_sequence(std::uint32_t lane, SequenceState& sequence
         }
         install_sampling(sequence, request, request_plan.sampling);
         sequence.rope_delta = staged.prompt.rope_delta;
+        sequence.last_query_begin = staged.prompt.query_begin;
+        sequence.last_query_end = staged.prompt.query_end;
         set_device_i32(io.rope_delta, sequence.rope_delta);
 
         request.timings              = {};
@@ -11407,6 +11515,8 @@ void ProgramImplCore::ordered_reset(SequenceState& sequence) {
     sequence.dflash_context_frontier = 0;
     sequence.kv_offset               = 0;
     sequence.kv_reuse_floor          = 0;
+    sequence.last_query_begin = 0;
+    sequence.last_query_end = 0;
 }
 
 void ProgramImplCore::prepare_graphs() {
@@ -11556,12 +11666,14 @@ void ProgramImplCore::prepare_graphs() {
             }
             *mtp_host_ingress          = {};
             *mtp_host_egress           = {};
+            mtp_host_ingress->original_kv_positions = original_kv_positions;
             const std::uint32_t extent = std::min(verify_window, capacity - frontier - 1U);
             const std::uint32_t width  = verify_window + 1U;
             for (std::uint32_t row = 0; row < batch_size; ++row) {
                 mtp_host_ingress->anchors[row] = 0;
                 mtp_host_ingress->base_frontiers[row] =
                     checked_i32(frontier, "graph representative MTP frontier");
+                mtp_host_ingress->logical_frontiers[row] = checked_i32(frontier, "graph logical MTP frontier");
                 mtp_host_ingress->remaining_budgets[row] =
                     checked_i32(capacity, "graph representative MTP budget");
                 mtp_host_ingress->current_extents[row] = static_cast<std::int32_t>(extent);
@@ -11586,10 +11698,12 @@ void ProgramImplCore::prepare_graphs() {
         if (io.ordinary) {
             *ordinary_host_ingress = {};
             *ordinary_host_egress  = {};
+            ordinary_host_ingress->original_kv_positions = original_kv_positions;
             for (std::uint32_t row = 0; row < batch_size; ++row) {
                 ordinary_host_ingress->tokens[row] = 0;
                 ordinary_host_ingress->cache_positions[row] =
                     checked_i32(frontier, "graph representative ordinary position");
+                ordinary_host_ingress->sample_positions[row] = checked_i32(frontier, "graph logical sample position");
                 ordinary_host_ingress->rope_positions[row] =
                     checked_i32(frontier, "graph representative ordinary RoPE position");
                 ordinary_host_ingress->text_kv_table_rows[row] = static_cast<std::int32_t>(row);
@@ -11947,9 +12061,22 @@ ProgramImplCore::advance_prefill(SequenceState& sequence, RequestControl& reques
                                         .prefix_reuse_path    = staged.reuse};
     std::uint32_t processed_prompt_tokens = 0;
     const auto started                    = Clock::now();
+    // Adapt KVMem's query probe/rewind protocol. A compacted hybrid history
+    // additionally needs a coherent GDN/KV execution of the selected token view.
+    const bool query_probe = text_kv_addresses->kvmem_enabled() &&
+        !staged.query_replayed && sequence.kv &&
+        !staged.prompt.has_media() && !sequence.rewrite_checkpoint.valid &&
+        !sequence.endpoint_valid && staged.prompt.query_begin != 0 &&
+        staged.prompt.query_begin >= staged.base &&
+        staged.prompt.query_end > staged.prompt.query_begin &&
+        staged.prompt_tokens - staged.prompt.query_begin <= prefill_chunk &&
+        text_kv_addresses->kvmem_shared_prefix_pages(sequence.kv->text) == 0 &&
+        text_kv_addresses->kvmem_window_edge(staged.prompt_tokens) != 0;
     try {
         if (staged.next_capture < staged.capture_groups.size() &&
-            staged.capture_groups[staged.next_capture].frontier == staged.cursor) {
+            staged.capture_groups[staged.next_capture].frontier == staged.cursor &&
+            staged.window_replay_ids.empty() &&
+            !(query_probe && staged.cursor >= staged.prompt.query_begin)) {
             // A capture at the reuse base normally only publishes a shared promotion,
             // because nothing has been executed at that frontier yet. A long anchor is
             // the exception: the resident prefix was just restored from exactly that
@@ -11971,6 +12098,12 @@ ProgramImplCore::advance_prefill(SequenceState& sequence, RequestControl& reques
             };
         }
         StateImageSelectors selectors = state_selectors(sequence);
+        if (original_kv_positions && query_probe && staged.cursor == staged.prompt.query_begin &&
+            sequence.state.fork_pending) {
+            state_images->copy_slot(selectors.source, selectors.destination, device.stream);
+            settle_state_fork(sequence);
+            selectors = state_selectors(sequence);
+        }
         Tensor rewrite_capture_hidden;
         Tensor* rewrite_capture_hidden_ptr = nullptr;
         if (staged.next_capture < staged.capture_groups.size()) {
@@ -11994,18 +12127,141 @@ ProgramImplCore::advance_prefill(SequenceState& sequence, RequestControl& reques
             selectors.destination,
             staged.initial_mtp_extent,
             dflash_host_ingress};
+        schedule_state.original_kv_positions = original_kv_positions;
 
+        const auto capture_original_query_prefix = [&](std::uint32_t chunk_tokens) {
+            const auto q0 = staged.prompt.query_begin;
+            if (!original_kv_positions || !query_probe || staged.original_query_checkpoint_ready ||
+                staged.cursor != q0) { return; }
+            const auto binding = state_selectors(sequence);
+            if (!replay_state_images_ || !sequence.kv || sequence.state.fork_pending ||
+                binding.source != binding.destination || q0 == 0 ||
+                sequence.text_kv_valid != kv_tokens(sequence.kv_offset, q0) ||
+                (sequence.kv->backend && sequence.mtp_kv_valid != sequence.text_kv_valid)) {
+                throw std::logic_error("original-position q0 is not a complete exclusive boundary");
+            }
+            if (chunk_tokens != 0) {
+                copy_tail(sequence, prefill_hidden.slice(1, static_cast<std::int32_t>(chunk_tokens) - 1, 1));
+            }
+            // Current immutable prompt is the authority. Save its exact executed identity,
+            // never the query, assistant opener or a later generated token.
+            staged.original_prefix_tokens.assign(staged.prompt.token_ids.begin(),
+                                                   staged.prompt.token_ids.begin() + q0);
+            staged.original_prefix_identity = sequence.prefix_identity;
+            staged.original_prefix_identity.truncate(q0);
+            staged.original_text_prefix = text_kv_addresses->capture_original_prefix(
+                sequence.kv->text, q0, device.stream);
+            if (sequence.kv->backend) {
+                staged.original_backend_prefix = backend_kv_addresses->capture_original_prefix(
+                    *sequence.kv->backend, q0, device.stream);
+            }
+            auto& cache = replay_prefix_caches_[sequence.lane];
+            const auto host = replay_state_images_->writable_view(cache.slots[0]);
+            std::memset(host.data, 0, host.layout->image_bytes);
+            state_images->copy_to_host(binding.destination, host, device.stream);
+            CUDA_CHECK(cudaStreamSynchronize(device.stream));
+            staged.original_query_checkpoint_ready = true;
+            std::fprintf(stderr, "KVMEM_ORIGINAL checkpoint q0=%u cache=%u state_bytes=%zu prefix_exact=1\n",
+                         q0, sequence.text_kv_valid, host.layout->image_bytes);
+        };
+
+        if (!staged.window_replay_ids.empty()) {
+            const auto count = std::min<std::uint32_t>(
+                prefill_chunk, staged.window_replay_ids.size() - staged.window_replay_cursor);
+            schedule_state.text_kv_base = staged.window_replay_cursor;
+            schedule_state.text_kv_offset = 0;
+            schedule_state.rewrite_checkpoint_hidden = nullptr;
+            schedule_state.mtp_proposal_extent = 0;
+            mark_workspace_usage(staged.prepare_mtp ? workspace_plan.mtp_prefill
+                                                    : workspace_plan.text_prefill);
+            if (is_masked_draft_backend(speculative_backend)) {
+                mark_workspace_usage(workspace_plan.dflash_context);
+            }
+            timing.pause();
+            auto result = schedule::prefill_text_chunk(schedule_state, staged.window_replay_ids,
+                                                       count, std::nullopt, false);
+            timing.include(result.timing);
+            timing.resume_post();
+            if (result.processed_tokens != count || result.finalized) {
+                throw std::logic_error("KVMem history replay made invalid progress");
+            }
+            staged.window_replay_cursor += count;
+            history_replay_tokens_ += count;
+            sequence.text_kv_valid = staged.window_replay_cursor;
+            if (sequence.kv->backend) { sequence.mtp_kv_valid = sequence.text_kv_valid; }
+            if (is_masked_draft_backend(speculative_backend)) {
+                sequence.dflash_context_frontier = sequence.text_kv_valid;
+            }
+            sequence.execution_frontier = sequence.text_kv_valid;
+            commit_sequence_kv(sequence, sequence.text_kv_valid, backend_kv_valid(sequence));
+            settle_state_fork(sequence);
+            if (replay_state_images_) {
+                auto& cache = replay_prefix_caches_[sequence.lane];
+                const auto total = static_cast<std::uint32_t>(staged.window_replay_ids.size());
+                const auto span = text_kv_addresses->kvmem_budget_tokens();
+                const std::array<std::uint32_t, 4> boundaries{
+                    (span / 16 / prefill_chunk) * prefill_chunk,
+                    (span / 8 / prefill_chunk) * prefill_chunk,
+                    (span / 4 / prefill_chunk) * prefill_chunk,
+                    (total / prefill_chunk) * prefill_chunk};
+                for (std::size_t i = 0; i < boundaries.size(); ++i) {
+                    if (boundaries[i] != 0 && staged.window_replay_cursor == boundaries[i]) {
+                        // Store only a canonical run, never the preceding compressed probe.
+                        cache.frontiers[i] = 0;
+                        state_images->copy_to_host(state_selectors(sequence).destination,
+                            replay_state_images_->writable_view(cache.slots[i]), device.stream);
+                        CUDA_CHECK(cudaStreamSynchronize(device.stream));
+                        cache.frontiers[i] = boundaries[i];
+                    }
+                }
+            }
+            if (staged.window_replay_cursor == staged.window_replay_ids.size()) {
+                copy_tail(sequence, prefill_hidden.slice(1, static_cast<std::int32_t>(count) - 1, 1));
+                staged.window_replay_ids.clear();
+                ++history_replay_rounds_;
+                if (std::getenv("NINFER_KVMEM_TRACE")) {
+                    std::fprintf(stderr, "KVMEM_TRACE window_replay_done tokens=%u\n",
+                                 staged.window_replay_cursor);
+                }
+                if (staged.next_capture < staged.capture_groups.size() &&
+                    staged.capture_groups[staged.next_capture].frontier == staged.cursor) {
+                    if (++next_capture_offer_id_ == 0) { ++next_capture_offer_id_; }
+                    staged.pending_capture_offer = next_capture_offer_id_;
+                }
+            }
+            staged.elapsed_seconds += std::chrono::duration<double>(Clock::now() - started).count();
+            return runtime::PrefillStepResult{.summary = summary, .timing = timing.finish()};
+        }
+
+        if (replay_state_images_ && !original_kv_positions) {
+            auto& cache = replay_prefix_caches_[sequence.lane];
+            const auto write_begin = kv_tokens(sequence.kv_offset, staged.cursor);
+            if (sequence.kv && cache.owner == sequence.kv->text) {
+                for (auto& frontier : cache.frontiers) {
+                    if (write_begin < frontier) { frontier = 0; }
+                }
+            }
+        }
         if (staged.mtp_bridge == MtpBridgeMode::BeforeSuffix) {
             if (staged.cursor != staged.base || staged.base == 0 ||
                 staged.cursor >= staged.prompt_tokens) {
                 throw std::logic_error("staged MTP bridge is outside the reusable suffix");
             }
+            // Reuse the ring fork's map-before-bridge fix, in this lineage's
+            // compacted slots rather than its original ledger coordinates.
+            const std::uint32_t bridge_frontier = kv_tokens(sequence.kv_offset, staged.base);
+            ensure_sequence_kv_mapped(sequence, bridge_frontier, bridge_frontier);
+            schedule_state.text_kv_offset = sequence.kv_offset;
+            auto bridge_rope = prompt_rope_position(staged.prompt, staged.base - 1);
+            if (!original_kv_positions) {
+                for (auto& position : bridge_rope) { position += sequence.kv_offset; }
+            }
             mark_workspace_usage(workspace_plan.mtp_prefill);
             const Tensor& previous_hidden = sequence.tail_hidden;
             const schedule::MtpBridgeInput bridge{
                 .previous_hidden = &previous_hidden,
-                .position        = checked_i32(staged.base - 1, "MTP bridge position"),
-                .rope_position   = prompt_rope_position(staged.prompt, staged.base - 1),
+                .position        = checked_i32(bridge_frontier - 1, "MTP bridge position"),
+                .rope_position   = bridge_rope,
             };
             if (staged.vision) {
                 schedule::mtp_bridge_multimodal(schedule_state, staged.prompt, *staged.vision,
@@ -12018,13 +12274,37 @@ ProgramImplCore::advance_prefill(SequenceState& sequence, RequestControl& reques
                 schedule::mtp_bridge_and_propose(schedule_state, bridge_token, previous_hidden,
                                                  bridge.position, bridge.rope_position, false);
             }
-            sequence.mtp_kv_valid = staged.base;
+            sequence.mtp_kv_valid = bridge_frontier;
             commit_sequence_kv(sequence, sequence.text_kv_valid, sequence.mtp_kv_valid);
             staged.mtp_bridge = MtpBridgeMode::None;
         }
 
+        capture_original_query_prefix(0);
         if (staged.cursor < staged.prompt_tokens) {
             if (!staged.query_captured) {
+                std::vector<std::uint32_t> older_matches;
+                const std::vector<std::uint32_t> lexical =
+                    !text_kv_addresses->kvmem_enabled() || staged.prompt.has_media()
+                    ? std::vector<std::uint32_t>{}
+                    : ninfer::kvmem::kvmem_lexical_recall_pages(
+                          staged.prompt.token_ids, staged.prompt.query_begin,
+                          std::span<const TokenId>(staged.prompt.lexical_query_token_ids),
+                          static_cast<std::uint32_t>(kPagedKVPageSize), &older_matches, 4);
+                if (sequence.kv) {
+                    text_kv_addresses->set_kvmem_lexical_pages(sequence.kv->text, lexical,
+                                                               older_matches);
+                    if (sequence.kv->backend) {
+                        backend_kv_addresses->set_kvmem_lexical_pages(*sequence.kv->backend,
+                                                                       lexical, older_matches);
+                    }
+                }
+                if (text_kv_addresses->kvmem_enabled() &&
+                    std::getenv("NINFER_KVMEM_TRACE")) {
+                    std::fprintf(stderr, "KVMEM_TRACE lexical query_begin=%u query_end=%u pages=",
+                                 staged.prompt.query_begin, staged.prompt.query_end);
+                    for (const auto id : lexical) { std::fprintf(stderr, "%u,", id); }
+                    std::fprintf(stderr, "\n");
+                }
                 text_kv_addresses->reset_kvmem_query(staged.prompt.query_begin,
                                                      staged.prompt.query_end,
                                                      staged.prompt.action_begin,
@@ -12061,14 +12341,26 @@ ProgramImplCore::advance_prefill(SequenceState& sequence, RequestControl& reques
             const std::uint32_t piece_cap = kvmem_prefill_piece_cap(kvmem_window_pages);
             // Move the window-external pages to Host so the incoming piece fits the pool. The
             // retained window is the configured budget, narrowed only as far as the piece needs.
-            const auto kvmem_offload = [&](std::uint32_t incoming_tokens) {
+            const auto kvmem_offload = [&](std::uint32_t incoming_tokens,
+                                           bool complete_query = false) {
                 if (incoming_tokens == 0 || !sequence.kv) { return; }
-                // The address maps every slot up to the piece's end, so that many pages have to
-                // be device-resident at once. Only when that exceeds the pool is the window
-                // outside the piece's reach offloaded.
+                // Capacity pressure and missing lexical evidence can both
+                // require a new working set before this piece is computed.
                 const std::uint32_t target = kv_pages_for_frontier(
                     kv_tokens(sequence.kv_offset, staged.cursor + incoming_tokens));
-                if (target <= kvmem_window_pages) { return; }
+                // Like the reference KVMem restore-before-query path, make the
+                // selected history visible before computing the question. A
+                // reused window may have room for the suffix without containing
+                // its evidence; capacity pressure alone is not a recall trigger.
+                const bool lexical_restore =
+                    staged.cursor <= staged.prompt.query_begin &&
+                    !sequence.rewrite_checkpoint.valid && !sequence.endpoint_valid &&
+                    text_kv_addresses->kvmem_lexical_restore_needed(sequence.kv->text);
+                const bool semantic_restore = complete_query &&
+                    !sequence.rewrite_checkpoint.valid && !sequence.endpoint_valid;
+                if (target <= kvmem_window_pages && !lexical_restore && !semantic_restore) {
+                    return;
+                }
                 if (sequence.rewrite_checkpoint.valid || sequence.endpoint_valid) {
                     throw std::runtime_error(
                         "KVMem prefill needs to offload KV pages, but this sequence's KV geometry "
@@ -12081,6 +12373,8 @@ ProgramImplCore::advance_prefill(SequenceState& sequence, RequestControl& reques
                         "raise --kvmem-budget or lower --prefill-chunk");
                 }
                 const std::uint32_t logical = text_kv_addresses->mapping_limit(sequence.kv->text);
+                const std::uint32_t backend_logical = sequence.kv->backend
+                    ? backend_kv_addresses->mapping_limit(*sequence.kv->backend) : 0U;
                 // The retained window is the configured budget, narrowed only as far as the
                 // piece needs. Taking the whole room the pool has beyond the piece instead
                 // leaves nothing for a speculative batch, whose draft window is mapped ahead of
@@ -12110,11 +12404,13 @@ ProgramImplCore::advance_prefill(SequenceState& sequence, RequestControl& reques
                 // page pool (sized for the whole logical context), so this costs it the same
                 // re-phasing the text pages get, not a second eviction budget.
                 if (sequence.kv->backend) {
+                    const auto selected =
+                        text_kv_addresses->kvmem_selected_blocks(sequence.kv->text);
                     const std::uint32_t draft_pinned_prefix_pages =
                         backend_kv_addresses->kvmem_shared_prefix_pages(*sequence.kv->backend);
                     const std::uint32_t draft_window = backend_kv_addresses->kvmem_compact(
                         *sequence.kv->backend, budget, device.stream, {}, false,
-                        draft_pinned_prefix_pages);
+                        draft_pinned_prefix_pages, selected);
                     if (draft_window != window) {
                         throw std::runtime_error(
                             "KVMem prefill offload compacted the draft window to a different "
@@ -12122,14 +12418,32 @@ ProgramImplCore::advance_prefill(SequenceState& sequence, RequestControl& reques
                             " draft=" + std::to_string(draft_window));
                     }
                 }
-                // The packed window drops the evicted pages from the address, so the growth
-                // entitlement has to be re-established for the rest of the prefill.
-                text_kv_addresses->resize_entitlement(sequence.kv->text, logical);
+                if (lexical_restore && std::getenv("NINFER_KVMEM_TRACE")) {
+                    std::fprintf(stderr,
+                                 "KVMEM_TRACE lexical_restore cursor=%u query_begin=%u "
+                                 "window=%u incoming=%u missing_after=%d\n",
+                                 staged.cursor, staged.prompt.query_begin, window, incoming_tokens,
+                                 text_kv_addresses->kvmem_lexical_restore_needed(sequence.kv->text)
+                                     ? 1 : 0);
+                }
+                if (semantic_restore && std::getenv("NINFER_KVMEM_TRACE")) {
+                    std::fprintf(stderr,
+                                 "KVMEM_TRACE semantic_restore cursor=%u query_end=%u "
+                                 "window=%u incoming=%u\n",
+                                 staged.cursor, staged.prompt.query_end, window, incoming_tokens);
+                }
+                // Compaction drops mappings from both addresses. Reuse the admission resize
+                // for the whole bundle so the draft tier also retains its provisional growth
+                // beyond the packed window (MTP can cross a page boundary before committing).
+                resize_sequence_kv_entitlement(sequence, logical, backend_logical);
                 sequence.kv_offset =
                     static_cast<std::int32_t>(window) - static_cast<std::int32_t>(staged.cursor);
                 sequence.execution_frontier = window;
                 sequence.text_kv_valid      = window;
                 if (sequence.kv->backend) { sequence.mtp_kv_valid = window; }
+                if (is_masked_draft_backend(speculative_backend)) {
+                    sequence.dflash_context_frontier = window;
+                }
                 const std::uint32_t floor_slots =
                     text_kv_addresses->kvmem_reuse_floor(sequence.kv->text);
                 if (floor_slots != 0 && floor_slots <= window) {
@@ -12168,13 +12482,32 @@ ProgramImplCore::advance_prefill(SequenceState& sequence, RequestControl& reques
                     schedule_state.rewrite_checkpoint_hidden = nullptr;
                 }
 
-                const bool final_candidate = staged.cursor + piece == staged.prompt_tokens;
+                const bool final_candidate = !query_probe &&
+                    staged.cursor + piece == staged.prompt_tokens;
                 const std::optional<std::uint32_t> capture_frontier =
-                    staged.next_capture < staged.capture_groups.size()
+                    staged.next_capture < staged.capture_groups.size() &&
+                            !(query_probe && staged.capture_groups[staged.next_capture].frontier >=
+                                                staged.prompt.query_begin)
                         ? std::optional<std::uint32_t>(
                               staged.capture_groups[staged.next_capture].frontier)
                         : std::nullopt;
                 std::optional<std::uint32_t> split_frontier = capture_frontier;
+                // Probe from an exact recurrent-state boundary, before the current question.
+                if (query_probe && staged.cursor < staged.prompt.query_begin &&
+                    (!split_frontier || staged.prompt.query_begin < *split_frontier)) {
+                    split_frontier = staged.prompt.query_begin;
+                }
+                // Unbounded tool/media suffixes retain the existing semantic boundary path.
+                const bool query_boundary = !query_probe && !staged.query_replayed &&
+                    chunked_kv_prefill && !staged.vision && sequence.kv &&
+                    !text_kv_addresses->kvmem_has_lexical_candidates(sequence.kv->text) &&
+                    staged.prompt.query_begin != 0 &&
+                    staged.prompt.query_end < staged.prompt_tokens &&
+                    !staged.query_reselected;
+                if (query_boundary && staged.cursor < staged.prompt.query_end &&
+                    (!split_frontier || staged.prompt.query_end < *split_frontier)) {
+                    split_frontier = staged.prompt.query_end;
+                }
                 const auto rewrite_split                    = std::upper_bound(
                     staged.prompt.identity.rewrite_execution_frontiers.begin(),
                     staged.prompt.identity.rewrite_execution_frontiers.end(), staged.cursor);
@@ -12204,7 +12537,10 @@ ProgramImplCore::advance_prefill(SequenceState& sequence, RequestControl& reques
                 }
                 if (staged.vision) { staged.vision->release_encoded_media_payloads(); }
                 staged.cursor += result.processed_tokens;
-                processed_prompt_tokens += result.processed_tokens;
+                const auto hidden = std::min(staged.hidden_replay_tokens, result.processed_tokens);
+                staged.hidden_replay_tokens -= hidden;
+                query_replay_tokens_ += hidden;
+                processed_prompt_tokens += result.processed_tokens - hidden;
                 remaining -= result.processed_tokens;
                 final_chunk_tokens     = result.processed_tokens;
                 sequence.text_kv_valid = kv_tokens(sequence.kv_offset, staged.cursor);
@@ -12219,6 +12555,179 @@ ProgramImplCore::advance_prefill(SequenceState& sequence, RequestControl& reques
                 // Prompt transitions are canonical immediately. If this was the first write after
                 // an immutable source, close the Fork before potentially freezing a new rewrite.
                 settle_state_fork(sequence);
+                capture_original_query_prefix(result.processed_tokens);
+                if (query_probe && staged.cursor == staged.prompt_tokens && original_kv_positions) {
+                    // Complete KVMem original-timeline rewind. Full native prefix remains in
+                    // the single-owner Device/Host/Cold directory; no packed-slot re-RoPE.
+                    const auto q0 = staged.prompt.query_begin;
+                    const auto binding = state_selectors(sequence);
+                    if (!staged.original_query_checkpoint_ready || !staged.original_text_prefix ||
+                        binding.source != binding.destination || sequence.state.fork_pending ||
+                        staged.original_prefix_tokens.size() != q0 ||
+                        !std::equal(staged.original_prefix_tokens.begin(), staged.original_prefix_tokens.end(),
+                                    sequence.ledger.begin()) ||
+                        !staged.original_prefix_identity.prefix_equals(sequence.prefix_identity, q0)) {
+                        throw std::logic_error("original-position query lost its exact q0 checkpoint");
+                    }
+                    if (result.finalized) {
+                        throw std::logic_error("original-position probe sampled before rewind");
+                    }
+                    text_kv_addresses->freeze_kvmem_query();
+                    const auto text_entitlement = text_kv_addresses->mapping_limit(sequence.kv->text);
+                    const auto backend_entitlement = sequence.kv->backend
+                        ? backend_kv_addresses->mapping_limit(*sequence.kv->backend) : 0U;
+                    const auto C = text_kv_addresses->rewind_original_prefix(
+                        sequence.kv->text, *staged.original_text_prefix, device.stream);
+                    if (sequence.kv->backend) {
+                        if (!staged.original_backend_prefix ||
+                            backend_kv_addresses->rewind_original_prefix(
+                                *sequence.kv->backend, *staged.original_backend_prefix, device.stream) != C) {
+                            throw std::logic_error("original-position Main/MTP rewind frontiers diverged");
+                        }
+                    }
+                    resize_sequence_kv_entitlement(sequence, text_entitlement, backend_entitlement);
+                    // This lineage's ActiveMutable identity has no published Host shadow.
+                    // The request-local q0 Host image is the only restore source.
+                    if (state_store->role(sequence.state.write) != StateImageRole::ActiveMutable ||
+                        state_store->residency(sequence.state.write) != StateReplicaResidency::DeviceOnly) {
+                        throw std::logic_error("original-position restore needs a private mutable StateImage");
+                    }
+                    auto& cache = replay_prefix_caches_[sequence.lane];
+                    state_images->copy_from_host(replay_state_images_->view(cache.slots[0]),
+                                                 binding.destination, device.stream);
+                    staged.cursor = q0;
+                    staged.query_replayed = true;
+                    staged.query_reselected = true;
+                    staged.hidden_replay_tokens = staged.prompt_tokens - q0;
+                    sequence.kv_offset = static_cast<std::int32_t>(C) - static_cast<std::int32_t>(q0);
+                    sequence.execution_frontier = C;
+                    sequence.text_kv_valid = C;
+                    sequence.mtp_kv_valid = sequence.kv->backend ? C : 0U;
+                    sequence.mtp_draft_count = 0;
+                    sequence.tail_hidden_valid = true;
+                    kvmem_offload(staged.hidden_replay_tokens, true);
+                    CUDA_CHECK(cudaStreamSynchronize(device.stream));
+                    bool state_verified = false;
+                    if (const char* verify = std::getenv("NINFER_KVMEM_VERIFY_ORIGINAL_STATE");
+                        verify && std::strcmp(verify, "1") == 0) {
+                        const auto restored = replay_state_images_->writable_view(cache.slots[1]);
+                        std::memset(restored.data, 0, restored.layout->image_bytes);
+                        state_images->copy_to_host(binding.destination, restored, device.stream);
+                        CUDA_CHECK(cudaStreamSynchronize(device.stream));
+                        if (std::memcmp(restored.data, replay_state_images_->view(cache.slots[0]).data,
+                                        restored.layout->image_bytes) != 0) {
+                            throw std::logic_error("original-position page restore changed full q0 StateImage");
+                        }
+                        state_verified = true;
+                    }
+                    std::fprintf(stderr, "KVMEM_ORIGINAL query_replay q0=%u end=%u cache=%u history_tokens=0 state_verified=%d\n",
+                                 q0, staged.prompt_tokens, sequence.text_kv_valid, state_verified ? 1 : 0);
+                    staged.elapsed_seconds += std::chrono::duration<double>(Clock::now() - started).count();
+                    return runtime::PrefillStepResult{
+                        .summary = summary,
+                        .processed_prompt_tokens = processed_prompt_tokens,
+                        .timing = timing.finish(),
+                    };
+                }
+                if (query_probe && staged.cursor == staged.prompt_tokens) {
+                    if (result.finalized) {
+                        throw std::logic_error("KVMem query probe sampled before replay");
+                    }
+                    const std::uint32_t frontier =
+                        kv_tokens(sequence.kv_offset, staged.prompt.query_begin);
+                    trim_sequence_kv(sequence, frontier, sequence.kv->backend ? frontier : 0U);
+                    const auto binding = state_selectors(sequence);
+                    if (binding.source != binding.destination) {
+                        throw std::logic_error("KVMem query rewind needs a settled StateImage");
+                    }
+                    staged.cursor = staged.prompt.query_begin;
+                    staged.query_replayed = true;
+                    staged.query_reselected = true;
+                    staged.hidden_replay_tokens = staged.prompt_tokens - staged.cursor;
+                    sequence.execution_frontier = frontier;
+                    sequence.text_kv_valid = frontier;
+                    if (sequence.kv->backend) { sequence.mtp_kv_valid = frontier; }
+                    if (is_masked_draft_backend(speculative_backend)) {
+                        sequence.dflash_context_frontier = frontier;
+                    }
+                    sequence.mtp_draft_count = 0;
+                    // Scoring keeps the probe sums; replay cannot add the same Q again.
+                    text_kv_addresses->freeze_kvmem_query();
+                    kvmem_offload(staged.hidden_replay_tokens, true);
+                    if (std::getenv("NINFER_KVMEM_TRACE")) {
+                        std::fprintf(stderr,
+                            "KVMEM_TRACE query_replay begin=%u end=%u tokens=%u window=%u\n",
+                            staged.cursor, staged.prompt.query_end, staged.hidden_replay_tokens,
+                            sequence.text_kv_valid);
+                    }
+                    const auto positions = text_kv_addresses->kvmem_window_token_positions(
+                        sequence.kv->text);
+                    staged.window_replay_ids.reserve(positions.size());
+                    for (const auto position : positions) {
+                        if (position >= staged.cursor) {
+                            throw std::logic_error("KVMem history replay contains query/future tokens");
+                        }
+                        staged.window_replay_ids.push_back(staged.prompt.token_ids[position]);
+                    }
+                    if (staged.window_replay_ids.empty()) {
+                        throw std::logic_error("KVMem history replay has no selected history");
+                    }
+                    std::uint32_t reuse = 0;
+                    std::size_t reuse_slot = 0;
+                    if (replay_state_images_) {
+                        auto& cache = replay_prefix_caches_[sequence.lane];
+                        if (cache.owner == sequence.kv->text) {
+                            std::size_t common = 0;
+                            while (common < positions.size() && common < cache.positions.size() &&
+                                   positions[common] == cache.positions[common] &&
+                                   staged.window_replay_ids[common] == cache.tokens[common]) { ++common; }
+                            for (std::size_t i = 0; i < cache.frontiers.size(); ++i) {
+                                if (cache.frontiers[i] <= common && cache.frontiers[i] < positions.size() && cache.frontiers[i] > reuse) {
+                                    reuse = cache.frontiers[i]; reuse_slot = i;
+                                }
+                            }
+                        }
+                        if (reuse != 0) {
+                            state_images->copy_from_host(replay_state_images_->view(cache.slots[reuse_slot]),
+                                                         binding.destination, device.stream);
+                        }
+                        // Drop stale later snapshots before publishing the new view identity.
+                        for (auto& frontier : cache.frontiers) { if (frontier > reuse) { frontier = 0; } }
+                        cache.owner = sequence.kv->text;
+                        cache.positions = positions;
+                        cache.tokens = staged.window_replay_ids;
+                    }
+                    text_kv_addresses->begin_kvmem_window_replay(sequence.kv->text, reuse, device.stream);
+                    if (sequence.kv->backend) {
+                        backend_kv_addresses->begin_kvmem_window_replay(*sequence.kv->backend, reuse, device.stream);
+                    }
+                    if (reuse == 0) { state_images->zero_slot(binding.destination, device.stream); }
+                    sequence.text_kv_valid = reuse;
+                    sequence.mtp_kv_valid = sequence.kv->backend ? reuse : 0U;
+                    sequence.execution_frontier = reuse;
+                    sequence.dflash_context_frontier = reuse;
+                    sequence.tail_hidden_valid = false;
+                    staged.window_replay_cursor = reuse;
+                    history_reused_tokens_ += reuse;
+                    if (std::getenv("NINFER_KVMEM_TRACE")) {
+                        std::fprintf(stderr, "KVMEM_TRACE canonical_prefix_reuse tokens=%u\n", reuse);
+                    }
+                    staged.elapsed_seconds +=
+                        std::chrono::duration<double>(Clock::now() - started).count();
+                    return runtime::PrefillStepResult{
+                        .summary = summary,
+                        .processed_prompt_tokens = processed_prompt_tokens,
+                        .timing = timing.finish(),
+                    };
+                }
+                if (query_boundary && staged.cursor == staged.prompt.query_end) {
+                    staged.query_reselected = true;
+                    // An early user turn preceding a long tool result may
+                    // still fit in full; there is no history to restore yet.
+                    if (text_kv_addresses->kvmem_window_edge(staged.cursor) != 0) {
+                        kvmem_offload(std::min(piece_cap, staged.prompt_tokens - staged.cursor), true);
+                    }
+                }
                 const bool reached_capture = capture_frontier && staged.cursor == *capture_frontier;
                 if (reached_capture) {
                     if (result.finalized) {
@@ -12286,13 +12795,20 @@ ProgramImplCore::advance_prefill(SequenceState& sequence, RequestControl& reques
                     throw std::logic_error("zero-suffix MTP reuse has no exact-hit bridge");
                 }
                 mark_workspace_usage(workspace_plan.mtp_prefill);
-                const auto bridge_rope =
+                const std::uint32_t bridge_frontier =
+                    kv_tokens(sequence.kv_offset, staged.prompt_tokens);
+                ensure_sequence_kv_mapped(sequence, bridge_frontier, bridge_frontier);
+                schedule_state.text_kv_offset = sequence.kv_offset;
+                auto bridge_rope =
                     prompt_rope_position(staged.prompt, staged.prompt_tokens - 1);
+                if (!original_kv_positions) {
+                for (auto& position : bridge_rope) { position += sequence.kv_offset; }
+            }
                 schedule::mtp_bridge_and_propose(
                     schedule_state, io.token, sequence.tail_hidden,
-                    checked_i32(staged.prompt_tokens - 1, "MTP full-prefix bridge position"),
+                    checked_i32(bridge_frontier - 1, "MTP full-prefix bridge position"),
                     bridge_rope, staged.initial_mtp_extent != 0);
-                sequence.mtp_kv_valid = staged.prompt_tokens;
+                sequence.mtp_kv_valid = bridge_frontier;
                 commit_sequence_kv(sequence, sequence.text_kv_valid, sequence.mtp_kv_valid);
                 staged.mtp_bridge = MtpBridgeMode::None;
             }
@@ -12436,11 +12952,14 @@ ProgramImplCore::decode_ordinary_batch(std::span<const std::uint32_t> lanes,
             SequenceState& sequence            = active_sequence(lanes[row]);
             const RequestControl& request      = requests[lanes[row]];
             const std::uint32_t frontier       = sequence.execution_frontier;
+            ordinary_host_ingress->original_kv_positions = original_kv_positions;
             ordinary_host_ingress->tokens[row] = sequence.ledger.back();
+            const auto logical_frontier = original_kv_positions ? executed_prompt_tokens(sequence) : frontier;
+            ordinary_host_ingress->sample_positions[row] = checked_i32(logical_frontier, "ordinary sample position");
             ordinary_host_ingress->cache_positions[row] =
                 checked_i32(frontier, "ordinary batch position");
             ordinary_host_ingress->rope_positions[row] =
-                checked_i32(frontier, "ordinary batch RoPE position") + sequence.rope_delta;
+                checked_i32(logical_frontier, "ordinary batch RoPE position") + sequence.rope_delta;
             ordinary_host_ingress->text_kv_table_rows[row] =
                 text_kv_addresses->bound_row(sequence.kv->text);
             const StateImageSelectors selectors                 = state_selectors(sequence);
@@ -12608,6 +13127,9 @@ ProgramImplCore::decode_mtp_batch(std::span<const std::uint32_t> lanes,
             const std::uint32_t extent =
                 std::min({sequence.mtp_draft_count, verify_window, max_by_budget,
                           capacity - sequence.execution_frontier - 1});
+            mtp_host_ingress->original_kv_positions = original_kv_positions;
+            const auto logical_frontier = original_kv_positions ? executed_prompt_tokens(sequence) : frontier;
+            mtp_host_ingress->logical_frontiers[row] = checked_i32(logical_frontier, "MTP logical frontier");
             mtp_host_ingress->anchors[row]        = sequence.ledger.back();
             mtp_host_ingress->base_frontiers[row] = checked_i32(frontier, "MTP batch frontier");
             mtp_host_ingress->remaining_budgets[row] =
@@ -12619,7 +13141,7 @@ ProgramImplCore::decode_mtp_batch(std::span<const std::uint32_t> lanes,
                     j < extent ? sequence.mtp_drafts[j] : sequence.ledger.back();
             }
             for (std::uint32_t j = 0; j < width; ++j) {
-                const std::uint32_t position = frontier + std::min(j, extent);
+                const std::uint32_t position = logical_frontier + std::min(j, extent);
                 mtp_host_ingress->target_rope_positions[row * width + j] =
                     checked_i32(position, "MTP batch RoPE position") + sequence.rope_delta;
             }
@@ -12630,7 +13152,8 @@ ProgramImplCore::decode_mtp_batch(std::span<const std::uint32_t> lanes,
             const StateImageSelectors selectors            = state_selectors(sequence);
             mtp_host_ingress->state_source_slots[row]      = selectors.source;
             mtp_host_ingress->state_destination_slots[row] = selectors.destination;
-            mtp_host_ingress->rope_deltas[row]             = sequence.rope_delta;
+            mtp_host_ingress->rope_deltas[row]             = sequence.rope_delta -
+                (original_kv_positions ? sequence.kv_offset : 0);
             mtp_host_ingress->sampling[row]                = request.sampling_host;
             require_kvmem_generation_fit(sequence, frontier + extent + 1);
             ensure_sequence_kv_mapped(sequence, frontier + extent + 1,

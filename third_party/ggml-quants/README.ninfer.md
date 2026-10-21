@@ -19,3 +19,15 @@ The combine-loop barrier in `fattn-mma-f16.cuh` includes the exact condition fro
 [`1bb2b9fcbe85c35c4e3b787e1c868ef05ca702f3`](https://github.com/ggml-org/llama.cpp/commit/1bb2b9fcbe85c35c4e3b787e1c868ef05ca702f3)
 (PR #30103). It synchronizes before reusing the shared combine tile when
 `nbatch_combine != DKQ/2`, including the Turing 512-wide 16/32-column configurations.
+
+NInfer's dedicated IQ3_S I64 translation unit may opt into the
+`NINFER_GGML_MMQ_IQ3_S_I64` compile-time hook in `mmq-config-ampere.cuh`.
+It changes only IQ3_S/J128/non-fallback to I64/128 threads in that translation
+unit; other translation units retain the upstream I128/256-thread entry.
+The original loaders, integer MMA, FP32 fold, and BF16 writer are reused.
+
+NInfer's dedicated IQ3_XXS I64 translation unit may opt into the
+`NINFER_GGML_MMQ_IQ3_XXS_I64` compile-time hook in `mmq-config-ampere.cuh`.
+It changes only IQ3_XXS/J128/non-fallback to I64/128 threads in that translation
+unit; other translation units retain the upstream I128/256-thread entry.
+The original loaders, integer MMA, FP32 fold, and BF16 writer are reused.

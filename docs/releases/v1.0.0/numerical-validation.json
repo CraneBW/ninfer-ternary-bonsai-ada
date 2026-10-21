@@ -1,0 +1,182 @@
+{
+  "state": "PASS_COMBINED_MATH",
+  "t16": {
+    "status": "passed_independent_math_fulloutputs_routes_guards_not_performance",
+    "formats": 10,
+    "cases": 11,
+    "public_op_calls": 22,
+    "independent_constant_oracles": 22,
+    "complete_two_arm_equal_cases": 11,
+    "fullhead_N": 248320,
+    "fullhead_K": 5120,
+    "columns": 16,
+    "IQ1_M": "original8+8"
+  },
+  "fusion": {
+    "status": "passed_independent_constant_quant_fullbytes_projected_residual_routes_not_performance",
+    "public_fixture_processes": 28,
+    "independent_constant_product_cases": 14,
+    "random_fullbyte_product_cases": 14,
+    "complete_compared_bytes": 287443968,
+    "scope": "complete quant codes/scales/sums with guards, projectedBF16 and residualBF16; random byte equality is not an independent random oracle"
+  },
+  "extra": "existing K15 accepted-prefix/guards/frame-layout checks passed; focused Bench range CPU test passed after updating invalid8 to invalid16",
+  "after_math": "Core topology-change replacement only; arithmetic/Ops/GGML/Engine archives unchanged; Graph closes with18 wholeEngine runs and finaloriginal6",
+  "resources": {
+    "state": "COMPILED_RESOURCE_RECORDS_EXTRACTED_CPU_ONLY",
+    "scope": "Only R29 fused activation-quantizer specializations and Q4_K/J16 BF16 product, with original float/J16 product contrast. No GPU, build, NCU, occupancy, spill-traffic or performance inference.",
+    "tool": "/opt/cuda/bin/cuobjdump",
+    "objects": {
+      "ggml_bridge": {
+        "path": "build/src/CMakeFiles/ninfer_ggml_quants.dir/ops/linear/gguf/ggml_bridge.cu.o",
+        "sha256": "d5c24c5a91f2ae286c135d5bcd20dee6b419abfa97f8b38457da821bd8ba9b42",
+        "size": 1042968,
+        "mtime_ns": 1792561532545864484,
+        "command": [
+          "/opt/cuda/bin/cuobjdump",
+          "--dump-resource-usage",
+          "build/src/CMakeFiles/ninfer_ggml_quants.dir/ops/linear/gguf/ggml_bridge.cu.o"
+        ],
+        "exit_code": 0,
+        "compiled_architectures": [
+          "sm_89"
+        ]
+      },
+      "ggml_mmq_q4_k": {
+        "path": "build/src/CMakeFiles/ninfer_ggml_quants.dir/ops/linear/gguf/ggml_mmq_q4_k.cu.o",
+        "sha256": "c9761c701b9b76f15fed54ef52543f8b3158c9ebf0011cb3b52ea33b11bce35b",
+        "size": 1008408,
+        "mtime_ns": 1792561563714441974,
+        "command": [
+          "/opt/cuda/bin/cuobjdump",
+          "--dump-resource-usage",
+          "build/src/CMakeFiles/ninfer_ggml_quants.dir/ops/linear/gguf/ggml_mmq_q4_k.cu.o"
+        ],
+        "exit_code": 0,
+        "compiled_architectures": [
+          "sm_89"
+        ]
+      }
+    },
+    "records": [
+      {
+        "role": "R29_fused_silu_mul_matrix_quantizer",
+        "object": "ggml_bridge",
+        "function_mangled": "_ZN6ninfer3ops4gguf6detail47_GLOBAL__N__e2bbacc7_14_ggml_bridge_cu_2e04f1f231quantize_matrix_silu_mul_kernelIL18mmq_q8_1_ds_layout2EEEvPK13__nv_bfloat16S8_P14block_q8_1_mmqii",
+        "function_demangled": "void ninfer::ops::gguf::detail::(anonymous namespace)::quantize_matrix_silu_mul_kernel<(mmq_q8_1_ds_layout)2>(__nv_bfloat16 const*, __nv_bfloat16 const*, block_q8_1_mmq*, int, int)",
+        "resource_line": "REG:26 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:384 TEXTURE:0 SURFACE:0 SAMPLER:0",
+        "registers_per_thread": 26,
+        "stack_bytes": 0,
+        "static_shared_bytes": 0,
+        "local_bytes": 0,
+        "constant_bytes": {
+          "0": 384
+        },
+        "texture": 0,
+        "surface": 0,
+        "sampler": 0,
+        "ds_layout_enum": 2
+      },
+      {
+        "role": "R29_fused_silu_mul_matrix_quantizer",
+        "object": "ggml_bridge",
+        "function_mangled": "_ZN6ninfer3ops4gguf6detail47_GLOBAL__N__e2bbacc7_14_ggml_bridge_cu_2e04f1f231quantize_matrix_silu_mul_kernelIL18mmq_q8_1_ds_layout1EEEvPK13__nv_bfloat16S8_P14block_q8_1_mmqii",
+        "function_demangled": "void ninfer::ops::gguf::detail::(anonymous namespace)::quantize_matrix_silu_mul_kernel<(mmq_q8_1_ds_layout)1>(__nv_bfloat16 const*, __nv_bfloat16 const*, block_q8_1_mmq*, int, int)",
+        "resource_line": "REG:26 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:384 TEXTURE:0 SURFACE:0 SAMPLER:0",
+        "registers_per_thread": 26,
+        "stack_bytes": 0,
+        "static_shared_bytes": 0,
+        "local_bytes": 0,
+        "constant_bytes": {
+          "0": 384
+        },
+        "texture": 0,
+        "surface": 0,
+        "sampler": 0,
+        "ds_layout_enum": 1
+      },
+      {
+        "role": "R29_fused_silu_mul_matrix_quantizer",
+        "object": "ggml_bridge",
+        "function_mangled": "_ZN6ninfer3ops4gguf6detail47_GLOBAL__N__e2bbacc7_14_ggml_bridge_cu_2e04f1f231quantize_matrix_silu_mul_kernelIL18mmq_q8_1_ds_layout0EEEvPK13__nv_bfloat16S8_P14block_q8_1_mmqii",
+        "function_demangled": "void ninfer::ops::gguf::detail::(anonymous namespace)::quantize_matrix_silu_mul_kernel<(mmq_q8_1_ds_layout)0>(__nv_bfloat16 const*, __nv_bfloat16 const*, block_q8_1_mmq*, int, int)",
+        "resource_line": "REG:26 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:384 TEXTURE:0 SURFACE:0 SAMPLER:0",
+        "registers_per_thread": 26,
+        "stack_bytes": 0,
+        "static_shared_bytes": 0,
+        "local_bytes": 0,
+        "constant_bytes": {
+          "0": 384
+        },
+        "texture": 0,
+        "surface": 0,
+        "sampler": 0,
+        "ds_layout_enum": 0
+      },
+      {
+        "role": "R29_Q4_K_J16_BF16_fullhead_product",
+        "object": "ggml_mmq_q4_k",
+        "function_mangled": "_Z9mul_mat_qIL9ggml_type12ELi16ELb0EL9ggml_prec30E13__nv_bfloat16EvPKcPKiS6_S6_PT3_PfPKf5uint3iiiiiSC_SC_iiiSC_SC_iiiSC_",
+        "function_demangled": "void mul_mat_q<(ggml_type)12, 16, false, (ggml_prec)30, __nv_bfloat16>(char const*, int const*, int const*, int const*, __nv_bfloat16*, float*, float const*, uint3, int, int, int, int, int, uint3, uint3, int, int, int, uint3, uint3, int, int, int, uint3)",
+        "resource_line": "REG:106 STACK:40 SHARED:0 LOCAL:0 CONSTANT[0]:524 TEXTURE:0 SURFACE:0 SAMPLER:0",
+        "registers_per_thread": 106,
+        "stack_bytes": 40,
+        "static_shared_bytes": 0,
+        "local_bytes": 0,
+        "constant_bytes": {
+          "0": 524
+        },
+        "texture": 0,
+        "surface": 0,
+        "sampler": 0
+      },
+      {
+        "role": "original_Q4_K_J16_float_product_contrast",
+        "object": "ggml_mmq_q4_k",
+        "function_mangled": "_Z9mul_mat_qIL9ggml_type12ELi16ELb0EL9ggml_prec30EfEvPKcPKiS5_S5_PT3_PfPKf5uint3iiiiiSB_SB_iiiSB_SB_iiiSB_",
+        "function_demangled": "void mul_mat_q<(ggml_type)12, 16, false, (ggml_prec)30, float>(char const*, int const*, int const*, int const*, float*, float*, float const*, uint3, int, int, int, int, int, uint3, uint3, int, int, int, uint3, uint3, int, int, int, uint3)",
+        "resource_line": "REG:112 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:524 TEXTURE:0 SURFACE:0 SAMPLER:0",
+        "registers_per_thread": 112,
+        "stack_bytes": 0,
+        "static_shared_bytes": 0,
+        "local_bytes": 0,
+        "constant_bytes": {
+          "0": 524
+        },
+        "texture": 0,
+        "surface": 0,
+        "sampler": 0
+      }
+    ],
+    "dynamic_shared_source_formulas": {
+      "fused_quantizer": {
+        "bytes": 0,
+        "basis": "existing launch uses only grid/block, no dynamic shared argument; cuobjdump static SHARED also 0"
+      },
+      "Q4_K_J16_fullhead": {
+        "bytes": 42048,
+        "evidence_kind": "SOURCE_FORMULA_NOT_CUOBJDUMP_DYNAMIC_MEASUREMENT",
+        "formula": "J*4 + I*sram_stride(Q8_1)*4 + ceil(J*sizeof(block_q8_1_mmq)/(threads*4))*(threads*4)",
+        "substitution": "16*4 + 128*76*4 + ceil((16*144)/(256*4))*(256*4) = 64+38912+3072 = 42048",
+        "I": 128,
+        "J": 16,
+        "threads": 256,
+        "sram_stride_ints": 76,
+        "block_q8_1_mmq_bytes": 144,
+        "fullhead_shape": {
+          "N": 248320,
+          "K": 5120,
+          "T": 16,
+          "blocks": 1940,
+          "fixup": false
+        }
+      }
+    },
+    "limitations": [
+      "REG/STACK/SHARED/LOCAL/CONSTANT are exact static cuobjdump records, not runtime occupancy or memory transaction counts.",
+      "LOCAL:0 and nonzero STACK may coexist; neither proves absence of runtime stack/local traffic.",
+      "J16 BF16 has 106 registers and 40-byte stack versus float J16 112 registers and 0-byte stack; no speed claim follows."
+    ]
+  },
+  "resources_scope": "compiled resources, not runtime occupancy/spill measurements"
+}

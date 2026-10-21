@@ -1,12 +1,15 @@
 #pragma once
 
 // Host side of ggml's integer tensor-core matrix kernel (mmq.cuh launch_mul_mat_q), without ggml's
-// backend context: the caller owns the activation, the FP32 output and the stream-k fixup plane.
+// backend context: the caller owns activation, output and stream-k fixup storage.
 
 #include "ggml_bridge_internal.cuh"
 
 #include <climits>
+#include <cstdio>
+#include <cstdlib>
 #include <mutex>
+#include <type_traits>
 
 namespace ninfer::ops::gguf::detail {
 
@@ -64,15 +67,20 @@ std::size_t matrix_fixup_bytes_impl(int rows, int columns) {
     return launch.fixup ? std::size_t(launch.blocks) * launch.J * launch.I * sizeof(float) : 0;
 }
 
-template <ggml_type type, int J>
+template <ggml_type type, int J, typename Dst = float>
 void launch_matrix(const MatrixLaunch& launch, const char* weight, int stride_row_blocks, int rows,
-                   int k, const int* activation, int columns, float* out,
+                   int k, const int* activation, int columns, Dst* out,
                    std::int64_t out_column_stride, float* fixup, cudaStream_t stream) {
+    if constexpr (!std::is_same_v<Dst, float>) {
+        if (launch.fixup || launch.blocks != launch.row_tiles * launch.column_tiles) {
+            throw std::invalid_argument("gguf direct BF16: each tile must have complete K accumulation");
+        }
+    }
     static std::once_flag raised[16];
     int device = 0;
     check(cudaGetDevice(&device), "device");
     std::call_once(raised[device & 15], [&] {
-        check(cudaFuncSetAttribute(mul_mat_q<type, J, false>,
+        check(cudaFuncSetAttribute(mul_mat_q<type, J, false, GGML_PREC_Q8, Dst>,
                                    cudaFuncAttributeMaxDynamicSharedMemorySize,
                                    static_cast<int>(launch.shared)),
               "matrix shared memory");
@@ -84,29 +92,113 @@ void launch_matrix(const MatrixLaunch& launch, const char* weight, int stride_ro
     const dim3 block_dims(WARP_SIZE, launch.threads / WARP_SIZE, 1);
     const int stride        = static_cast<int>(out_column_stride);
     if (!launch.stream_k) {
-        mul_mat_q<type, J, false>
+        mul_mat_q<type, J, false, GGML_PREC_Q8, Dst>
             <<<dim3(launch.row_tiles, launch.column_tiles, 1), block_dims, launch.shared, stream>>>(
                 weight, activation, nullptr, nullptr, out, nullptr, nullptr, blocks_fd, rows,
                 columns, stride_row_blocks, columns, stride, one_fd, one_fd, 0, 0, 0, one_fd,
                 one_fd, 0, 0, 0, ntx_fd);
         check(cudaGetLastError(), "matrix product launch");
+        trace_matrix_output(type, rows, k, columns, launch.I, J, launch.threads,
+                            launch.blocks, false, !std::is_same_v<Dst, float>);
         return;
     }
     if (launch.fixup && fixup == nullptr) {
         throw std::invalid_argument("gguf matrix product: this launch needs a fixup plane");
     }
-    mul_mat_q<type, J, false><<<dim3(launch.blocks, 1, 1), block_dims, launch.shared, stream>>>(
+    mul_mat_q<type, J, false, GGML_PREC_Q8, Dst>
+        <<<dim3(launch.blocks, 1, 1), block_dims, launch.shared, stream>>>(
         weight, activation, nullptr, nullptr, out, launch.fixup ? fixup : nullptr, nullptr,
         blocks_fd, rows, columns, stride_row_blocks, columns, stride, one_fd, one_fd, 0, 0, 0,
         one_fd, one_fd, 0, 0, 0, ntx_fd);
     check(cudaGetLastError(), "matrix product launch");
-    if (!launch.fixup) { return; }
-    const dim3 fixup_blocks(launch.blocks, launch.I / WARP_SIZE, 1);
-    const dim3 fixup_dims(block_dims.x, block_dims.y / 2, 1);
-    mul_mat_q_stream_k_fixup<type, J, false><<<fixup_blocks, fixup_dims, 0, stream>>>(
-        nullptr, nullptr, out, fixup, blocks_fd, rows, columns, stride, one_fd, 0, one_fd, 0,
-        ntx_fd);
-    check(cudaGetLastError(), "matrix fixup launch");
+    trace_matrix_output(type, rows, k, columns, launch.I, J, launch.threads,
+                        launch.blocks, launch.fixup, !std::is_same_v<Dst, float>);
+    if constexpr (std::is_same_v<Dst, float>) {
+        if (!launch.fixup) { return; }
+        const dim3 fixup_blocks(launch.blocks, launch.I / WARP_SIZE, 1);
+        const dim3 fixup_dims(block_dims.x, block_dims.y / 2, 1);
+        mul_mat_q_stream_k_fixup<type, J, false><<<fixup_blocks, fixup_dims, 0, stream>>>(
+            nullptr, nullptr, out, fixup, blocks_fd, rows, columns, stride, one_fd, 0, one_fd, 0,
+            ntx_fd);
+        check(cudaGetLastError(), "matrix fixup launch");
+    }
+}
+
+// R29 reuses the existing GGML J16 MMA product and R4 final BF16 writer.
+// The flag is frozen per process before graph capture; no tiling, quantization,
+// partial-K accumulation or public BF16 materialization point is changed here.
+inline bool r29_mmq_j16_bf16_enabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("NINFER_R29_BUNDLE");
+        if (!value || value[0] == '\0' || (value[0] == '0' && value[1] == '\0')) { return false; }
+        if (value[0] == '1' && value[1] == '\0') { return true; }
+        throw std::invalid_argument("NINFER_R29_BUNDLE must be 0 or 1");
+    }();
+    return enabled;
+}
+
+template <ggml_type type>
+bool matrix_product_bf16_impl(const void* weight, std::int64_t row_bytes, int rows, int k,
+                              const void* activation, int columns, __nv_bfloat16* out,
+                              std::int64_t out_column_stride, cudaStream_t stream) {
+    // All and only the represented real GSQ MMQ formats. IQ1_M keeps its
+    // pre-existing vector 8+8 fallback. Newly admitted Q6_K/IQ2_XXS never use
+    // the legacy J128 route below, including at T512 and when this flag is 0.
+    if constexpr (type == GGML_TYPE_IQ3_S || type == GGML_TYPE_IQ3_XXS ||
+                  type == GGML_TYPE_IQ4_XS || type == GGML_TYPE_IQ2_XS ||
+                  type == GGML_TYPE_IQ2_S || type == GGML_TYPE_IQ2_XXS ||
+                  type == GGML_TYPE_Q2_K || type == GGML_TYPE_Q4_K ||
+                  type == GGML_TYPE_Q6_K) {
+        if (columns == 16 && r29_mmq_j16_bf16_enabled()) {
+            if (device_facts().cc != GGML_CUDA_CC_ADA_LOVELACE ||
+                rows % 128 != 0 || k % 256 != 0) { return false; }
+            constexpr int qk = ggml_cuda_type_traits<type>::qk;
+            constexpr int bytes = ggml_cuda_type_traits<type>::bs;
+            if (row_bytes % bytes != 0 ||
+                row_bytes < std::int64_t(k / qk) * bytes) { return false; }
+            const MatrixLaunch launch = select_matrix_launch<type>(rows, columns);
+            if (launch.J != 16 || launch.fixup ||
+                launch.blocks != launch.row_tiles * launch.column_tiles) { return false; }
+            launch_matrix<type, 16, __nv_bfloat16>(
+                launch, static_cast<const char*>(weight),
+                static_cast<int>(row_bytes / bytes), rows, k,
+                static_cast<const int*>(activation), columns, out,
+                out_column_stride, nullptr, stream);
+            static const bool trace = [] {
+                const char* value = std::getenv("NINFER_R29_BUNDLE_TRACE");
+                return value && value[0] == '1' && value[1] == '\0';
+            }();
+            if (trace) {
+                std::fprintf(stderr,
+                    "[r29-mmq-j16-bf16] type=%d N=%d K=%d T=%d I=%d J=16 threads=%d blocks=%d shared=%zu fixup=0 output=bf16-direct column_stride=%lld\n",
+                    int(type), rows, k, columns, launch.I, launch.threads,
+                    launch.blocks, launch.shared, static_cast<long long>(out_column_stride));
+            }
+            return true;
+        }
+    }
+    // Reuse the existing GGML FP32 accumulation and ninfer-3090's final BF16
+    // epilogue idea. Only these represented formats use this MMA writer here;
+    // partial/fixup products, FP32 outputs and all MoE products keep their route.
+    if constexpr (type == GGML_TYPE_IQ3_S || type == GGML_TYPE_IQ3_XXS ||
+                  type == GGML_TYPE_IQ4_XS || type == GGML_TYPE_IQ2_XS ||
+                  type == GGML_TYPE_Q2_K || type == GGML_TYPE_Q4_K ||
+                  type == GGML_TYPE_IQ2_S) {
+        if (device_facts().cc != GGML_CUDA_CC_ADA_LOVELACE || rows % 128 != 0 || k % 256 != 0) {
+            return false;
+        }
+        constexpr int qk = ggml_cuda_type_traits<type>::qk;
+        constexpr int bytes = ggml_cuda_type_traits<type>::bs;
+        if (row_bytes % bytes != 0 || row_bytes < std::int64_t(k / qk) * bytes) { return false; }
+        const MatrixLaunch launch = select_matrix_launch<type>(rows, columns);
+        if (launch.J != 128 || launch.fixup ||
+            launch.blocks != launch.row_tiles * launch.column_tiles) { return false; }
+        launch_matrix<type, 128, __nv_bfloat16>(launch, static_cast<const char*>(weight),
+            static_cast<int>(row_bytes / bytes), rows, k, static_cast<const int*>(activation),
+            columns, out, out_column_stride, nullptr, stream);
+        return true;
+    }
+    return false;
 }
 
 template <ggml_type type>
@@ -297,6 +389,9 @@ void moe_matrix_product_impl(const void* const* experts, std::int64_t row_bytes,
     template void ninfer::ops::gguf::detail::matrix_product_impl<TYPE>(                            \
         const void*, std::int64_t, int, int, const void*, int, float*, std::int64_t, void*,        \
         cudaStream_t, bool);                                                                       \
+    template bool ninfer::ops::gguf::detail::matrix_product_bf16_impl<TYPE>(                         \
+        const void*, std::int64_t, int, int, const void*, int, __nv_bfloat16*, std::int64_t,          \
+        cudaStream_t);                                                                            \
     template bool ninfer::ops::gguf::detail::moe_matrix_fits_impl<TYPE>(int, int, bool);           \
     template void ninfer::ops::gguf::detail::moe_matrix_product_impl<TYPE>(                        \
         const void* const*, std::int64_t, int, int, const ninfer::ops::gguf::MoeRouting&, int,     \

@@ -26,6 +26,10 @@ struct DeviceFacts {
 
 [[nodiscard]] const DeviceFacts& device_facts();
 
+// Bounded host probe after an actual launch; disabled by default.
+void trace_matrix_output(ggml_type type, int rows, int k, int columns, int I, int J,
+                          int threads, int blocks, bool fixup, bool bf16);
+
 inline void check(cudaError_t status, const char* what) {
     if (status != cudaSuccess) {
         throw std::runtime_error(std::string("gguf ") + what + ": " + cudaGetErrorString(status));
@@ -155,5 +159,10 @@ void matrix_product_impl(const void* weight, std::int64_t row_bytes, int rows, i
                          const void* activation, int columns, float* out,
                          std::int64_t out_column_stride, void* fixup, cudaStream_t stream,
                          bool tail);
+
+template <ggml_type type>
+bool matrix_product_bf16_impl(const void* weight, std::int64_t row_bytes, int rows, int k,
+                              const void* activation, int columns, __nv_bfloat16* out,
+                              std::int64_t out_column_stride, cudaStream_t stream);
 
 } // namespace ninfer::ops::gguf::detail

@@ -65,6 +65,9 @@ struct PrefillContext {
     // Cache-slot and RoPE shift of a KVMem-compacted lineage: the first new token is written at
     // `text_kv_base + text_kv_offset` instead of `text_kv_base`.
     std::int32_t text_kv_offset = 0;
+    // KVMem original-timeline mode: KV slots use the offset; RoPE keeps prompt positions.
+    // Adapted from kvmem/kvmem faf3c225, backends/patches/ninfer-kvmem.patch.
+    bool original_kv_positions = false;
 };
 
 struct OrdinaryBatchContext {

@@ -22,3 +22,9 @@ _bench/
 _probe/
 .github/
 tmp-nvcc/
+
+# Keep model weights and local CUDA profiler captures out of source releases.
+*.gguf
+*.safetensors
+*.ncu-rep
+*.nsys-rep

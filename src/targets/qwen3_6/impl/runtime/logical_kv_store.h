@@ -1,11 +1,13 @@
 #pragma once
 
 #include "core/arena.h"
+#include "core/device.h"
 #include "core/host_kv_arena.h"
 #include "core/paged_kv_cache.h"
 #include "kvmem/kvmem_blocks.h"
 #include "kvmem/kvmem_bridge.h"
 #include "kvmem/kvmem_cold_store.h"
+#include "kvmem/kvmem_source_k.h"
 #include "kvmem/kvmem_retrieval.h"
 #include "ninfer/types.h"
 
@@ -17,6 +19,7 @@
 #include <cstddef>
 #include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <exception>
 #include <limits>
 #include <optional>
@@ -852,6 +855,87 @@ private:
 };
 
 class KVAddressSpaceStore {
+    static constexpr std::size_t kAsyncBatchBytes = 16ULL << 20;
+    struct PendingDemote {
+        struct Page {
+            std::uint32_t block = 0;
+            LogicalKVPageHandle logical;
+            std::uint64_t epoch = 0;
+            std::uint32_t columns = 0;
+            HostKVAllocation destination;
+            bool pinned = false;
+        };
+
+        PendingDemote(LogicalKVPageStore& owner, const DeviceContext& device,
+                       KVAddressSpaceHandle handle)
+            : store(&owner), address(handle), stream(device.transfer_stream),
+              source_ready(device), completion(device) {}
+
+        ~PendingDemote() {
+            // The copy may have been partially queued before a submission
+            // error. Its storage remains owned until every queued access lands.
+            if (submitted) {
+                if (recorded) {
+                    completion.synchronize();
+                } else if (cudaStreamSynchronize(stream) != cudaSuccess) {
+                    std::terminate();
+                }
+            }
+            for (auto& page : pages) {
+                if (page.pinned) { store->unpin_source(page.logical); }
+                if (detached && !store->release_reference(page.logical, false)) {
+                    std::terminate();
+                }
+            }
+        }
+
+        LogicalKVPageStore* store;
+        KVAddressSpaceHandle address;
+        cudaStream_t stream;
+        CudaCompletionEvent source_ready;
+        CudaCompletionEvent completion;
+        std::vector<Page> pages;
+        bool submitted = false;
+        bool recorded = false;
+        bool detached = false;
+    };
+
+    // Restores stay private to this scheduling boundary. Their Device targets
+    // are destination-pinned, and their Host sources remain owned until the
+    // copy completes. Only the final rephase/publication may expose them.
+    struct PendingRestore {
+        struct Page {
+            std::uint32_t block;
+            LogicalKVPageHandle logical;
+            HostKVAllocation source;
+        };
+        PendingRestore(LogicalKVPageStore& owner, DeviceKVPageReservation& claim,
+                       std::vector<HostKVAllocation>& hosts, const DeviceContext& device)
+            : store(&owner), reservation(&claim), sources(&hosts),
+              stream(device.transfer_stream), source_ready(device), completion(device) {}
+        ~PendingRestore() {
+            if (submitted) {
+                if (recorded) { completion.synchronize(); }
+                else if (cudaStreamSynchronize(stream) != cudaSuccess) { std::terminate(); }
+            }
+            for (auto& page : pages) {
+                store->abort_transfer_destination(page.logical, *reservation);
+                if (page.source.valid()) {
+                    (*sources)[page.block] = std::move(page.source);
+                }
+            }
+        }
+        LogicalKVPageStore* store;
+        DeviceKVPageReservation* reservation;
+        std::vector<HostKVAllocation>* sources;
+        cudaStream_t stream;
+        CudaCompletionEvent source_ready;
+        CudaCompletionEvent completion;
+        std::vector<Page> pages;
+        bool submitted = false;
+        bool recorded = false;
+    };
+
 public:
     // kvmem_compact keeps a sink, a recent tail and a middle quota, so its window cannot be
     // narrower than one page per band.
@@ -861,9 +945,25 @@ public:
     // otherwise a budget of 4K..5K tokens would refuse to plan at all.
     static constexpr std::uint32_t kAutoBandFloorTokens = 1024 + 4096;
 
+    // Native original-position prefix identity, not a StateImage. The caller
+    // captures/restores the matching GDN/hidden state separately at logical q0.
+    struct OriginalPrefixCheckpoint {
+        KVAddressSpaceHandle address;
+        std::uint32_t logical_frontier = 0;
+        std::uint64_t lineage_epoch = 0;
+        std::vector<std::uint64_t> prefix_revisions;
+        std::vector<float> partial_mean;
+        std::uint32_t partial_mean_tokens = 0;
+    };
+
+    [[nodiscard]] bool kvmem_original_positions() const noexcept {
+        return kvmem_original_positions_;
+    }
+
     KVAddressSpaceStore(LogicalKVPageStore& pages, KVExecutionTablePool& tables,
                         std::uint32_t address_capacity, std::uint32_t page_capacity,
-                        KvMemOptions kvmem = {})
+                        KvMemOptions kvmem = {}, DeviceSpan rerope_workspace = {},
+                        std::uint32_t extra_device_pages = 0)
         : pages_(&pages), tables_(&tables), page_capacity_(page_capacity),
           addresses_(address_capacity), free_(address_capacity),
           memberships_(checked_membership_cells(address_capacity, page_capacity)),
@@ -877,6 +977,19 @@ public:
         // frontier commit. Purely observational -- no engine state is redirected.
         if (kvmem.enabled) {
             kvmem_enabled_ = true;
+            if (const char* value = std::getenv("NINFER_KVMEM_ORIGINAL_POSITIONS")) {
+                if (std::strcmp(value, "1") == 0) { kvmem_original_positions_ = true; }
+                else if (std::strcmp(value, "0") != 0) {
+                    throw std::invalid_argument("NINFER_KVMEM_ORIGINAL_POSITIONS must be 0 or 1");
+                }
+            }
+            kvmem_extra_device_pages_ = std::min(extra_device_pages,
+                                               pages.physical_pool().capacity_pages());
+            kvmem_host_layout_ = plan_host_kv_page_layout(pages.physical_pool().geometry());
+            if (!kvmem_original_positions_) {
+                kvmem_source_k_ = std::make_unique<ninfer::kvmem::ImmutableKStore>(
+                    pages.physical_pool().geometry());
+            }
             kvmem_action_lrfu_ = kvmem.action_lrfu;
             kvmem_lrfu_lambda_ = kvmem.lrfu_lambda;
             kvmem_lrfu_top_fraction_ = kvmem.lrfu_top_fraction;
@@ -916,9 +1029,20 @@ public:
             kvmem_block_pages_.resize(address_capacity);
             kvmem_block_hosts_.resize(address_capacity);
             kvmem_block_cold_.resize(address_capacity);
+            kvmem_source_records_.resize(address_capacity);
+            kvmem_native_records_.resize(address_capacity);
             kvmem_reuse_floors_.resize(address_capacity);
             kvmem_mean_k_.resize(address_capacity);
             kvmem_mean_k_tokens_.resize(address_capacity);
+            kvmem_lexical_pages_.resize(address_capacity);
+            kvmem_older_matches_.resize(address_capacity);
+            const std::size_t metadata_bytes =
+                static_cast<std::size_t>(page_capacity_) * 3 * sizeof(std::int32_t);
+            if (rerope_workspace.data == nullptr || rerope_workspace.bytes < metadata_bytes) {
+                throw std::invalid_argument("KVMem needs its planned rephase metadata workspace");
+            }
+            kvmem_rerope_host_ = std::make_unique<PinnedHostBuffer>(metadata_bytes);
+            kvmem_rerope_device_ = rerope_workspace;
         }
         for (std::uint32_t index = 0; index < address_capacity; ++index) {
             free_[index] = address_capacity - 1U - index;
@@ -930,6 +1054,55 @@ public:
     KVAddressSpaceStore& operator=(const KVAddressSpaceStore&) = delete;
     KVAddressSpaceStore(KVAddressSpaceStore&&)                 = delete;
     KVAddressSpaceStore& operator=(KVAddressSpaceStore&&)      = delete;
+
+    ~KVAddressSpaceStore() { kvmem_pending_demote_.reset(); }
+
+    // The Program owns the stream and outlives this store. One bounded batch
+    // per typed pool is enabled first; the synchronous path remains available.
+    void enable_kvmem_async_d2h(const DeviceContext& device) {
+        if (!kvmem_enabled_ || device.transfer_stream == nullptr) {
+            throw std::invalid_argument("async KVMem needs an enabled store and transfer stream");
+        }
+        ensure_kvmem_host_arena(pages_->physical_pool());
+        kvmem_async_device_ = &device;
+    }
+
+    [[nodiscard]] std::uint32_t kvmem_inflight_pages() const noexcept {
+        return kvmem_pending_demote_
+                   ? static_cast<std::uint32_t>(kvmem_pending_demote_->pages.size()) : 0U;
+    }
+
+    bool retire_kvmem_transfers(bool wait = false) {
+        if (!kvmem_pending_demote_) { return true; }
+        auto& pending = *kvmem_pending_demote_;
+        const bool ready = pending.completion.ready();
+        if (!wait && !ready) { return false; }
+        const auto wait_start = std::chrono::steady_clock::now();
+        pending.completion.synchronize();
+        if (!ready) {
+            kvmem_async_wait_us_ += static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - wait_start).count());
+        }
+        const Address& address = require(pending.address);
+        const std::size_t index = static_cast<std::size_t>(&address - addresses_.data());
+        auto& hosts = kvmem_block_hosts_[index];
+        // Validate the complete batch before publishing any destination.
+        for (const auto& page : pending.pages) {
+            if (!pages_->valid(page.logical) ||
+                pages_->content_epoch(page.logical) != page.epoch ||
+                pages_->committed_columns(page.logical) != page.columns ||
+                page.block >= hosts.size() || hosts[page.block].valid()) {
+                throw std::logic_error("KVMem async demote is no longer publishable");
+            }
+        }
+        for (auto& page : pending.pages) {
+            hosts[page.block] = std::move(page.destination);
+        }
+        ++kvmem_async_completed_;
+        kvmem_pending_demote_.reset();
+        return true;
+    }
 
     [[nodiscard]] std::uint32_t capacity() const noexcept {
         return static_cast<std::uint32_t>(addresses_.size());
@@ -1537,11 +1710,20 @@ public:
     }
 
     void resize_entitlement(KVAddressSpaceHandle handle, std::uint32_t entitlement) {
+        (void)retire_kvmem_transfers();
         Address& address = require_active(handle);
         if (entitlement < address.page_count || entitlement > page_capacity_) {
             throw std::invalid_argument("KV entitlement is smaller than mapped pages");
         }
         const std::uint32_t device_claim = device_claim_pages(entitlement);
+        const std::uint32_t desired =
+            device_claim > address.page_count ? device_claim - address.page_count : 0U;
+        if (desired > address.reservation.pages() &&
+            desired - address.reservation.pages() > pages_->physical_pool().available_pages() &&
+            desired - address.reservation.pages() <=
+                pages_->physical_pool().available_pages() + kvmem_inflight_pages()) {
+            (void)retire_kvmem_transfers(true);
+        }
         address.logical_entitlement = entitlement > device_claim ? entitlement : 0U;
         pages_->physical_pool().resize_reservation(
             address.reservation,
@@ -1664,8 +1846,9 @@ public:
         }
         address.committed_frontier = frontier;
         if (kvmem_enabled_) {
-            kvmem_plan_passthrough(static_cast<std::size_t>(&address - addresses_.data()),
-                                   address);
+            const auto index = static_cast<std::size_t>(&address - addresses_.data());
+            kvmem_plan_passthrough(index, address);
+            if (kvmem_original_positions_) { commit_original_native_columns(index, address); }
         }
     }
 
@@ -1834,13 +2017,29 @@ public:
         return device_claim_pages(mapping_limit(handle));
     }
 
-    // A generation append must reclaim before it crosses the *reserved* claim,
-    // not when it crosses the physical pool's capacity. The latter can exceed
-    // the claim by several pages when KVMem shares one pool among requests.
+    [[nodiscard]] std::uint32_t kvmem_device_claim_limit() const noexcept {
+        return device_claim_pages(page_capacity_);
+    }
+
+    // Start with some existing growth entitlement still unused. The lead is
+    // shared by sync/async, so switching transfer mode cannot change selection.
+    // It is bounded in typed payload bytes, never borrowed from protected bands.
+    [[nodiscard]] std::uint32_t kvmem_reclaim_watermark_pages(KVAddressSpaceHandle handle) const {
+        const std::uint32_t claim = kvmem_device_claim_pages(handle);
+        const std::uint32_t reserve = kvmem_gen_reserve_ / kPagedKVPageSize;
+        if (reserve + kMinimumWindowPages > claim) { return claim; }
+        const auto stride = kvmem_host_layout_.page_stride;
+        const std::uint32_t lead = static_cast<std::uint32_t>(
+            std::min<std::size_t>(reserve / 2, kAsyncBatchBytes / stride));
+        return claim - lead;
+    }
+
+    // Allocation still uses the actual claim and real free pages. A promise
+    // merely avoids duplicate demotion; resize_entitlement harvests it first.
     [[nodiscard]] bool kvmem_generation_reclaim_due(KVAddressSpaceHandle handle,
                                                      std::uint32_t next_frontier_tokens) const {
         return kvmem_enabled_ && kvmem_gen_reserve_ != 0 &&
-               pages_for_tokens(next_frontier_tokens) > kvmem_device_claim_pages(handle);
+               pages_for_tokens(next_frontier_tokens) > kvmem_reclaim_watermark_pages(handle);
     }
 
     // Leading pages this address shares with another view (a retained shared prefix or a
@@ -1944,6 +2143,12 @@ public:
 
     [[nodiscard]] bool release(KVAddressSpaceHandle handle) noexcept {
         if (!can_release(handle)) { return false; }
+        if (kvmem_pending_demote_ && kvmem_pending_demote_->address == handle) {
+            // The address is being discarded: drain without publishing an
+            // otherwise unnecessary Host replica, then release its held refs.
+            kvmem_pending_demote_.reset();
+            ++kvmem_async_discarded_;
+        }
         Address& address = addresses_[handle.index_];
         for (std::uint32_t page = 0; page < address.page_count; ++page) {
             if (!pages_->release_reference(membership(address, page), false)) { std::terminate(); }
@@ -1963,9 +2168,16 @@ public:
                 if (cold.valid()) { (void)kvmem_cold_file_->release(cold); }
             }
             kvmem_block_cold_[index].clear();
+            for (auto& source : kvmem_source_records_[index]) {
+                if (kvmem_source_k_) { kvmem_source_k_->release(source); }
+            }
+            kvmem_source_records_[index].clear();
+            kvmem_native_records_[index].clear();
             kvmem_reuse_floors_[index] = 0;
             kvmem_mean_k_[index].clear();
             kvmem_mean_k_tokens_[index].clear();
+            kvmem_lexical_pages_[index].clear();
+            kvmem_older_matches_[index].clear();
         }
         rebuild_checkpoint_protection();
         return true;
@@ -1985,6 +2197,10 @@ private:
         std::optional<KVExecutionRowLease> row;
         bool occupied = false;
         bool active   = false;
+        // An epoch covers one original execution branch. Ordinary append and
+        // native owner migration preserve it; a destructive rewind revokes it.
+        std::uint64_t original_epoch = 1;
+        std::uint64_t next_native_revision = 1;
     };
 
     [[nodiscard]] static std::size_t checked_membership_cells(std::uint32_t addresses,
@@ -2084,7 +2300,9 @@ private:
     [[nodiscard]] std::uint32_t device_claim_pages(std::uint32_t entitlement) const noexcept {
         std::uint32_t claim = std::min(entitlement, pages_->physical_pool().capacity_pages());
         if (kvmem_enabled_ && kvmem_budget_ != 0) {
-            claim = std::min(claim, kvmem_budget_ / static_cast<std::uint32_t>(kPagedKVPageSize));
+            claim = static_cast<std::uint32_t>(std::min<std::uint64_t>(
+                claim, kvmem_budget_ / static_cast<std::uint32_t>(kPagedKVPageSize) +
+                           static_cast<std::uint64_t>(kvmem_extra_device_pages_)));
         }
         return claim;
     }
@@ -2117,12 +2335,12 @@ private:
         return *kvmem_cold_file_;
     }
 
-    // A single separately pinned page is enough for direct GPU<->NVMe transfers
-    // even when the bounded Host cache has no vacant allocation at all.
+    // Two read-ahead pages plus one outgoing staging page remain independently
+    // bounded even when the ordinary Host cache has no vacant allocation.
     [[nodiscard]] HostKVAllocation kvmem_cold_buffer() {
         if (!kvmem_cold_staging_) {
             kvmem_cold_staging_ = std::make_unique<HostKVArena>(
-                kvmem_host_layout_.page_stride,
+                3 * kvmem_host_layout_.page_stride,
                 std::vector<HostKVPageLayout>{kvmem_host_layout_});
         }
         auto buffer = kvmem_cold_staging_->allocate(kvmem_host_layout_, 1);
@@ -2220,6 +2438,37 @@ private:
         auto& repo        = kvmem_repos_[index];
         auto& block_pages = kvmem_block_pages_[index];
         auto& block_hosts = kvmem_block_hosts_[index];
+        // Rollback can replace columns of the retained partial tail. Preserve
+        // only its surviving immutable prefix; the next append captures the
+        // new columns with their own birth positions.
+        auto& sources = kvmem_source_records_[index];
+        bool original_changed = false;
+        if (kvmem_original_positions_) {
+            auto& native = kvmem_native_records_[index];
+            for (const auto& block : repo.blocks()) {
+                if (block.tier != ninfer::kvmem::KvTier::Gpu || block.id >= native.size()) {
+                    continue;
+                }
+                const auto columns = block.baked_pos >= 0 && block.baked_pos < slot_frontier
+                    ? std::min<std::uint32_t>(kPagedKVPageSize, slot_frontier - block.baked_pos)
+                    : 0U;
+                if (columns < native[block.id].columns) {
+                    native[block.id].columns = columns;
+                    original_changed = true;
+                    // A clipped mean is not the mean of its surviving prefix.
+                    if (block.id < kvmem_mean_k_tokens_[index].size()) {
+                        kvmem_mean_k_tokens_[index][block.id] = 0;
+                    }
+                }
+            }
+        }
+        for (std::uint32_t id = 0; id < std::min<std::size_t>(sources.size(), repo.block_count()); ++id) {
+            if (repo.tier_of(id) != ninfer::kvmem::KvTier::Gpu) { continue; }
+            const auto baked = repo.baked_pos_of(id);
+            const auto columns = baked >= 0 && baked < slot_frontier
+                ? std::min<std::uint32_t>(kPagedKVPageSize, slot_frontier - baked) : 0U;
+            sources[id].columns = std::min(sources[id].columns, columns);
+        }
         std::uint32_t keep = repo.block_count();
         for (std::uint32_t id = keep; id != 0; --id) {
             const std::uint32_t candidate = id - 1;
@@ -2228,6 +2477,7 @@ private:
             if (baked < 0 || static_cast<std::uint32_t>(baked) < slot_frontier) { break; }
             keep = candidate;
         }
+        if (original_changed) { ++addresses_[index].original_epoch; }
         if (keep == repo.block_count()) { return; }
         for (std::uint32_t id = keep; id < repo.block_count(); ++id) {
             if (block_pages.size() > id) { block_pages[id] = {}; }
@@ -2236,10 +2486,13 @@ private:
                 kvmem_block_cold_[index][id].valid()) {
                 (void)kvmem_cold_file_->release(kvmem_block_cold_[index][id]);
             }
+            if (sources.size() > id && kvmem_source_k_) { kvmem_source_k_->release(sources[id]); }
         }
         block_pages.resize(keep);
         block_hosts.resize(keep);
         kvmem_block_cold_[index].resize(keep);
+        sources.resize(std::min<std::size_t>(sources.size(), keep));
+        if (kvmem_original_positions_) { kvmem_native_records_[index].resize(keep); }
         if (kvmem_mean_k_.size() > index) {
             kvmem_mean_k_[index].resize(static_cast<std::size_t>(keep) * kvmem_mean_k_stride_);
             kvmem_mean_k_tokens_[index].resize(keep);
@@ -2310,7 +2563,8 @@ private:
     // keeps its host mean-K after it is parked, so a middle block evicted by an
     // earlier chunk can still be selected by the final question; the reference
     // scorer's evidence never depended on the block staying on the device.
-    void kvmem_score_window(std::size_t index, DeviceKVPagePool& pool, cudaStream_t stream) {
+    void kvmem_score_window(std::size_t index, DeviceKVPagePool& pool, cudaStream_t stream,
+                            bool commit_query = false) {
         const ninfer::kvmem::KvmemQueryCapture* query = kvmem_query_capture();
         if (query == nullptr || query->layers == 0 || query->kv_heads == 0 ||
             kvmem_mean_k_stride_ == 0 || index >= kvmem_mean_k_.size()) {
@@ -2340,8 +2594,9 @@ private:
                 kvmem_mean_k_tokens_[index][id] = 0;
                 continue;
             }
-            const std::uint32_t written =
-                std::min(page_tokens, frontier - static_cast<std::uint32_t>(baked));
+            const std::uint32_t written = kvmem_original_positions_
+                ? kvmem_native_records_[index].at(id).columns
+                : std::min(page_tokens, frontier - static_cast<std::uint32_t>(baked));
             if (written == 0) {
                 kvmem_mean_k_tokens_[index][id] = 0;
                 continue;
@@ -2350,7 +2605,10 @@ private:
             export_ids.push_back(id);
             export_pages.push_back(
                 pool.physical_index_of(pages_->physical(kvmem_block_pages_[index][id])));
-            export_baked.push_back(static_cast<std::int32_t>(baked));
+            // In original mode baked_pos is only the packed cache placement.
+            // Native K retains the logical RoPE it had at its first write.
+            export_baked.push_back(static_cast<std::int32_t>(kvmem_original_positions_
+                ? repo.blocks()[id].token_begin : baked));
             export_tokens.push_back(written);
         }
         if (!export_ids.empty()) {
@@ -2389,7 +2647,7 @@ private:
         try {
             const ninfer::kvmem::MeanKeyQueryView view{kvmem_query_host_.data(), query->layers,
                                                        query->head_dim, query->q_heads,
-                                                       query->kv_heads, kvmem_action_lrfu_};
+                                                       query->kv_heads, false};
             scores = ninfer::kvmem::mean_key_scores(
                 n, kvmem_mean_k_[index].data(), kvmem_mean_k_tokens_[index].data(), view);
         } catch (const std::exception& error) {
@@ -2400,10 +2658,12 @@ private:
             repo.protect_system_prefix(kvmem_system_prefix_end_);
             repo.protect_action_span(kvmem_action_begin_, kvmem_action_end_);
             repo.set_closed_thinking_spans(kvmem_closed_thinking_spans_);
-            repo.record_lrfu_scores(scores, kvmem_lrfu_lambda_, kvmem_lrfu_top_fraction_);
+            if (commit_query) {
+                repo.record_lrfu_scores(scores, kvmem_lrfu_lambda_, kvmem_lrfu_top_fraction_);
+            }
         }
+        repo.set_retrieval_scores(scores);
         for (std::uint32_t id = 0; id < n; ++id) {
-            if (!kvmem_action_lrfu_) { repo.add_scores(id, scores[id], 0.0); }
             if (kvmem_mean_k_tokens_[index][id] == 0) { continue; }
             ++kvmem_scoreable_blocks_;
             if (scores[id] == 0.0F) { ++kvmem_zero_score_blocks_; }
@@ -2419,17 +2679,14 @@ private:
     }
 
 public:
-    // KVMem K3b: score the blocks that still hold a device page against the request's captured
-    // query, without moving any page. A chunked prefill compacts while it fills the prompt, so the
-    // window that generation attends was packed before the final chunk carried the query span;
-    // without this pass the ledger would keep the zero evidence of a query that did not exist yet.
-    // The next compaction -- generation reclaim or the next turn -- then ranks the window with the
-    // query this request actually asked.
+    // Commit one completed-prompt history round without moving pages. Compaction previews
+    // (including complete-query reselection before the assistant opener) update current
+    // retrieval only; they must not repeatedly count the same query in the LRFU profile.
     void kvmem_refresh_scores(KVAddressSpaceHandle handle, cudaStream_t stream = nullptr) {
         if (!kvmem_enabled_ || !kvmem_query_.valid()) { return; }
         Address& address        = require(handle);
         const std::size_t index = static_cast<std::size_t>(&address - addresses_.data());
-        kvmem_score_window(index, pages_->physical_pool(), stream);
+        kvmem_score_window(index, pages_->physical_pool(), stream, true);
     }
 
     // KVMem K1b: compact one address's KV into a budget-driven working window.
@@ -2439,15 +2696,31 @@ public:
     // views). Returns the new window token count, or 0 when nothing needed
     // compacting. Evicted blocks keep their bytes in this store's KVMem host
     // arena or the anonymous NVMe backing; a re-selected block is restored from there
-    // and re-phased to its new window slot. NOTE: a restored block carries one
-    // extra int8 quantization (the host copy holds the old-phased page, not a
-    // raw-K mirror -- removing that extra step is K2-full work).
+    // and re-phased to its new window slot. Cold/threshold rebuilds decode the
+    // immutable first-write K, never a repeatedly quantized working copy.
     std::uint32_t kvmem_compact(KVAddressSpaceHandle handle, std::uint32_t budget_tokens,
                                 cudaStream_t stream = nullptr,
                                 std::vector<std::uint32_t> mandatory_ids = {},
-                                bool sink_only = false, std::uint32_t pinned_prefix_pages = 0) {
+                                bool sink_only = false, std::uint32_t pinned_prefix_pages = 0,
+                                std::span<const std::uint32_t> coupled_selection = {}) {
         if (!kvmem_enabled_) { return 0; }
+        (void)retire_kvmem_transfers(true);
         Address& address = require(handle);
+        if (kvmem_original_positions_ && address.original_epoch == 0) {
+            throw std::logic_error("original KV compaction requires fresh prefill after a failed rewind");
+        }
+        // A reused prefill can map growth ahead of its committed frontier.
+        // Those empty pages are reservations, not historical evidence. Reuse
+        // the normal rollback path before selecting recent pages, otherwise an
+        // empty tail can be packed as a full interior page on the next append.
+        if (address.active && address.page_count > pages_for_tokens(address.committed_frontier)) {
+            if (std::getenv("NINFER_KVMEM_TRACE")) {
+                std::fprintf(stderr,
+                             "KVMEM_TRACE trim_unwritten mapped=%u committed=%u\n",
+                             address.page_count, address.committed_frontier);
+            }
+            destructive_truncate(handle, address.committed_frontier);
+        }
         const std::size_t index = static_cast<std::size_t>(&address - addresses_.data());
         // Active addresses are allowed: the serve path compacts at request
         // completion while the execution row is still bound (before the
@@ -2459,7 +2732,8 @@ public:
         budget_tokens -= budget_tokens % kPagedKVPageSize;
         const std::uint64_t ledger_tokens =
             static_cast<std::uint64_t>(repo.block_count()) * kPagedKVPageSize;
-        if (budget_tokens == 0 || ledger_tokens <= budget_tokens) { return 0; }
+        if (budget_tokens == 0 || (ledger_tokens <= budget_tokens &&
+            (!kvmem_original_positions_ || coupled_selection.empty()))) { return 0; }
         if (pinned_prefix_pages > address.page_count) {
             throw std::invalid_argument("KVMem pinned prefix exceeds the mapped KV pages");
         }
@@ -2485,6 +2759,22 @@ public:
         const std::uint32_t pinned_blocks = pinned_prefix_pages;
         const std::uint32_t budget_blocks = budget_tokens / kPagedKVPageSize;
         DeviceKVPagePool& pool = pages_->physical_pool();
+        // Capture before set_selection mutates baked positions, and before any
+        // working K can be re-phased or evicted. Only committed new columns
+        // enter the immutable source. One pinned K page bounds staging RAM.
+        if (!kvmem_original_positions_ && !kvmem_source_k_) {
+            kvmem_source_k_ = std::make_unique<ninfer::kvmem::ImmutableKStore>(pool.geometry());
+        }
+        auto& sources = kvmem_source_records_[index];
+        if (!kvmem_original_positions_) { sources.resize(repo.block_count()); }
+        for (std::uint32_t id = 0; !kvmem_original_positions_ && id < repo.block_count(); ++id) {
+            if (repo.tier_of(id) != ninfer::kvmem::KvTier::Gpu ||
+                !block_pages[id].valid()) { continue; }
+            const auto columns = pages_->committed_columns(block_pages[id]);
+            kvmem_source_k_->capture(sources[id], pool,
+                pool.physical_index_of(pages_->physical(block_pages[id])),
+                static_cast<std::int32_t>(repo.baked_pos_of(id)), columns, stream);
+        }
         if (pinned_blocks > repo.block_count()) {
             throw std::logic_error("KVMem pinned prefix exceeds the block ledger");
         }
@@ -2506,8 +2796,21 @@ public:
         cfg.block_tokens  = kPagedKVPageSize;
         cfg.budget_tokens = budget_tokens;
         cfg.action_lrfu   = kvmem_action_lrfu_;
+        // Match the reference KVMem/ActKV immutable-source refresh bounds.
+        cfg.raw_refresh_remaps = 8;
+        cfg.raw_refresh_abs_delta = 262144;
         ninfer::kvmem::KvSelection sel;
-        if (sink_only) {
+        if (!coupled_selection.empty()) {
+            // Main owns retrieval. MTP consumes the exact same logical history
+            // at the same packed slots, while retaining its own typed storage.
+            if (coupled_selection.size() > budget_blocks ||
+                !std::is_sorted(coupled_selection.begin(), coupled_selection.end()) ||
+                std::adjacent_find(coupled_selection.begin(), coupled_selection.end()) !=
+                    coupled_selection.end() || coupled_selection.back() >= repo.block_count()) {
+                throw std::invalid_argument("KVMem coupled selection has invalid geometry");
+            }
+            sel.block_ids.assign(coupled_selection.begin(), coupled_selection.end());
+        } else if (sink_only) {
             // Round-boundary mode: keep the oldest head, evict the tail. The
             // selection is direct (bands cannot express "no recent"); the next
             // round re-prefills everything after the head, and K3 will replace
@@ -2547,7 +2850,9 @@ public:
                     std::max<std::uint32_t>(1, budget_blocks / 4) * kPagedKVPageSize;
             }
             kvmem_score_window(index, pool, stream);
-            sel = repo.preview_select(cfg, std::move(mandatory_ids));  // K3 ranks the middle
+            sel = repo.preview_select(cfg, mandatory_ids,
+                                      kvmem_lexical_pages_[index],
+                                      kvmem_older_matches_[index]); // K3 ranks the middle
         }
         if (pinned_blocks != 0) {
             for (std::uint32_t id = 0; id < pinned_blocks; ++id) {
@@ -2577,13 +2882,31 @@ public:
         std::uint32_t kv_window           = window_tokens;
         if (!plan.remaps.empty()) {
             const ninfer::kvmem::KvRemap& tail = plan.remaps.back();
-            if (issue_frontier > static_cast<std::uint32_t>(tail.from_base)) {
-                const std::uint32_t valid =
-                    std::min(issue_frontier - static_cast<std::uint32_t>(tail.from_base),
-                             tail.n_tokens);
+            const auto logical = block_pages[tail.block_id];
+            // Tracker placement can be older than a resumed address's tail
+            // coverage. The logical page is authoritative for written columns;
+            // declaring its unwritten tail committed makes checkpoint protection
+            // fail after the answer has already been streamed.
+            const std::uint32_t valid = logical.valid()
+                ? pages_->committed_columns(logical)
+                : (kvmem_original_positions_ ? kvmem_native_records_[index].at(tail.block_id).columns
+                : (sources[tail.block_id].columns != 0
+                       ? sources[tail.block_id].columns
+                : (tail.from_base >= 0 &&
+                           issue_frontier > static_cast<std::uint32_t>(tail.from_base)
+                       ? std::min(issue_frontier - static_cast<std::uint32_t>(tail.from_base),
+                                  tail.n_tokens)
+                       : tail.n_tokens)));
+            if (valid != 0) {
                 const std::uint32_t packed = static_cast<std::uint32_t>(
                     tail.to_base + static_cast<std::int64_t>(valid));
                 if (packed < window_tokens) { kv_window = packed; }
+            }
+            if (std::getenv("NINFER_KVMEM_TRACE")) {
+                std::fprintf(stderr,
+                             "KVMEM_TRACE tail_coverage id=%u from=%lld issue=%u valid=%u "
+                             "window=%u\n", tail.block_id, static_cast<long long>(tail.from_base),
+                             issue_frontier, valid, kv_window);
             }
         }
         if (pages_for_tokens(kv_window) != window_pages) {
@@ -2608,30 +2931,7 @@ public:
             }
         }
 
-        // ---- host arena (lazy) ----
-        if (!kvmem_host_arena_) {
-            kvmem_host_layout_ = plan_host_kv_page_layout(pool.geometry());
-            // Preserve the existing Host cache capacity by default. Operators
-            // can opt into a smaller warm tier; overflow then spills the
-            // exact KV pages to cold storage.
-            const std::size_t stride = kvmem_host_layout_.page_stride;
-            std::size_t host_pages = page_capacity_;
-            bool limited_host_tier = false;
-            if (const char* setting = std::getenv("NINFER_KVMEM_HOST_PAGES")) {
-                char* end = nullptr;
-                errno = 0;
-                const unsigned long long requested = std::strtoull(setting, &end, 10);
-                if (errno != 0 || end == setting || *end != '\0' || requested == 0) {
-                    throw std::invalid_argument("NINFER_KVMEM_HOST_PAGES must be positive");
-                }
-                host_pages = std::min<std::size_t>(page_capacity_, requested);
-                limited_host_tier = true;
-            }
-            const std::size_t capacity =
-                stride * host_pages + (limited_host_tier ? 0 : (std::size_t{1} << 20));
-            kvmem_host_arena_ = std::make_unique<HostKVArena>(
-                capacity, std::vector<HostKVPageLayout>{kvmem_host_layout_});
-        }
+        ensure_kvmem_host_arena(pool);
 
         // ---- 1) stage out: park evicted pages in the host arena ----
         // One copy per evicted block used to cost one cudaMemcpy2DAsync per plane per page
@@ -2644,6 +2944,36 @@ public:
         // merge wherever they happen to sit back to back.
         const auto transfer_start = std::chrono::steady_clock::now();
         std::uint64_t transfer_runs = 0;
+        std::unique_ptr<PendingDemote> async_demote;
+        struct ColdRead {
+            std::uint32_t id;
+            HostKVAllocation buffer;
+            // Destroy future first, including unwinding: never free bytes still used by I/O.
+            std::future<void> ready;
+        };
+        std::vector<std::uint32_t> cold_read_ids;
+        std::vector<ColdRead> cold_reads;
+        std::size_t next_cold_read = 0;
+        const auto start_cold_read = [&] {
+            if (next_cold_read == cold_read_ids.size()) { return; }
+            const auto id = cold_read_ids[next_cold_read++];
+            auto buffer = kvmem_cold_buffer();
+            auto view = kvmem_cold_staging_->writable_view(buffer);
+            auto future = kvmem_cold_file_->prefetch(kvmem_block_cold_[index][id],
+                std::span<std::byte>(view.data(), kvmem_host_layout_.page_stride));
+            cold_reads.push_back({id, std::move(buffer), std::move(future)});
+            ++kvmem_nvme_prefetch_submitted_;
+        };
+        if (kvmem_async_device_) {
+            for (auto id : plan.stage_in) {
+                if (id < kvmem_block_cold_[index].size() && kvmem_block_cold_[index][id].valid()) {
+                    cold_read_ids.push_back(id);
+                }
+            }
+            cold_reads.reserve(2);
+            start_cold_read(); start_cold_read();
+        }
+
         if (!plan.stage_out.empty()) {
             struct Evicted {
                 std::int32_t physical = 0;
@@ -2715,7 +3045,64 @@ public:
                 handles.push_back(evicted[i].handle);
                 views.push_back(kvmem_host_arena_->writable_view(slots[i]));
             }
-            if (!handles.empty()) { transfer_runs += pool.copy_to_host_pages(handles, views, stream); }
+            bool async_eligible = kvmem_async_device_ != nullptr && stream != nullptr &&
+                                  plan.stage_in.empty() &&
+                                  handles.size() == evicted.size() &&
+                                  kvmem_host_layout_.page_stride <= kAsyncBatchBytes;
+            for (const auto& item : evicted) {
+                const auto logical = block_pages[item.id];
+                async_eligible = async_eligible &&
+                    pages_->committed_columns(logical) == kPagedKVPageSize &&
+                    pages_->source_pins(logical) == 0;
+            }
+            if (!async_eligible && kvmem_async_device_ != nullptr) {
+                ++kvmem_async_fallbacks_;
+            }
+            if (async_eligible) {
+                const auto batch_pages = kAsyncBatchBytes / kvmem_host_layout_.page_stride;
+                for (std::size_t begin = 0; begin < handles.size(); begin += batch_pages) {
+                    const auto size = std::min(batch_pages, handles.size() - begin);
+                    auto batch = std::make_unique<PendingDemote>(
+                        *pages_, *kvmem_async_device_, handle);
+                    batch->pages.reserve(size);
+                    for (std::size_t j = begin; j < begin + size; ++j) {
+                        const auto logical = block_pages[evicted[j].id];
+                        batch->pages.push_back({evicted[j].id, logical,
+                            pages_->content_epoch(logical), pages_->committed_columns(logical),
+                            std::move(slots[j]), false});
+                        pages_->pin_source(logical);
+                        batch->pages.back().pinned = true;
+                    }
+                    batch->source_ready.record(stream);
+                    batch->source_ready.wait(batch->stream);
+                    batch->submitted = true;
+                    transfer_runs += pool.copy_to_host_pages(
+                        std::span(handles).subspan(begin, size),
+                        std::span(views).subspan(begin, size), batch->stream);
+                    batch->completion.record(batch->stream);
+                    batch->recorded = true;
+                    ++kvmem_async_submitted_;
+                    kvmem_async_bytes_ += size * kvmem_host_layout_.page_stride;
+                    if (begin + size == handles.size()) {
+                        async_demote = std::move(batch);
+                    } else {
+                        // At most 16MiB remains queued/pinned at any time. Complete
+                        // earlier sub-batches; only the tail overlaps subsequent compute.
+                        const auto wait_start = std::chrono::steady_clock::now();
+                        batch->completion.synchronize();
+                        kvmem_async_wait_us_ += static_cast<std::uint64_t>(
+                            std::chrono::duration_cast<std::chrono::microseconds>(
+                                std::chrono::steady_clock::now() - wait_start).count());
+                        for (auto& page : batch->pages) {
+                            block_hosts[page.block] = std::move(page.destination);
+                        }
+                        ++kvmem_async_completed_;
+                        ++kvmem_async_split_batches_;
+                    }
+                }
+            } else if (!handles.empty()) {
+                transfer_runs += pool.copy_to_host_pages(handles, views, stream);
+            }
             auto& cold_records = kvmem_block_cold_[index];
             if (cold_records.size() < repo.block_count()) {
                 cold_records.resize(repo.block_count());
@@ -2725,7 +3112,12 @@ public:
                 if (cold_records[id].valid()) {
                     throw std::logic_error("KVMem evicted block already has NVMe backing");
                 }
-                if (slots[i].valid()) {
+                if (async_demote && std::any_of(async_demote->pages.begin(), async_demote->pages.end(),
+                        [id](const auto& page) { return page.block == id; })) {
+                    continue; // This tail sub-batch remains unpublished until retirement.
+                } else if (block_hosts[id].valid()) {
+                    continue; // An earlier sub-batch is already complete.
+                } else if (slots[i].valid()) {
                     block_hosts[id] = std::move(slots[i]);
                 } else {
                     cold_records[id] =
@@ -2739,6 +3131,8 @@ public:
         // a stage-in reservation taken first would find nothing free. The parked Host copy owns
         // the block from here on, and a selected block never appears in stage_out.
         for (const std::uint32_t id : plan.stage_out) {
+            if (async_demote && std::any_of(async_demote->pages.begin(), async_demote->pages.end(),
+                    [id](const auto& page) { return page.block == id; })) { continue; }
             const LogicalKVPageHandle logical = block_pages[id];
             // The block leaves the address's window on this step, so its active reference goes
             // with it; without that the page keeps a reference and its device storage is never
@@ -2750,6 +3144,52 @@ public:
             block_pages[id] = LogicalKVPageHandle{};
         }
 
+        // pass 1 is independent resident work; pass 2 consumes completed restores.
+        const auto rephase = [&](int pass) {
+            if (kvmem_original_positions_) { return; }
+            if (!plan.remaps.empty()) {
+                std::vector<std::int32_t> rerope_pages;
+                std::vector<std::int32_t> rerope_from;
+                std::vector<std::int32_t> rerope_to;
+                std::vector<ninfer::kvmem::ImmutableKStore::RestoreRequest> source_restores;
+                source_restores.reserve(plan.remaps.size());
+                rerope_pages.reserve(plan.remaps.size());
+                rerope_from.reserve(plan.remaps.size());
+                rerope_to.reserve(plan.remaps.size());
+                for (const ninfer::kvmem::KvRemap& rm : plan.remaps) {
+                    const bool restored = std::find(plan.stage_in.begin(), plan.stage_in.end(),
+                                                    rm.block_id) != plan.stage_in.end();
+                    if (rm.skip || (pass == 1 && restored) || (pass == 2 && !restored)) { continue; }
+                    if (rm.raw_refresh) {
+                        source_restores.push_back({&sources[rm.block_id],
+                            pool.physical_index_of(pages_->physical(block_pages[rm.block_id])),
+                            static_cast<std::int32_t>(rm.to_base)});
+                        continue;
+                    }
+                    if (block_pages.size() <= rm.block_id) { block_pages.resize(rm.block_id + 1); }
+                    rerope_pages.push_back(
+                        pool.physical_index_of(pages_->physical(block_pages[rm.block_id])));
+                    rerope_from.push_back(static_cast<std::int32_t>(rm.from_base));
+                    rerope_to.push_back(static_cast<std::int32_t>(rm.to_base));
+                }
+                if (!source_restores.empty()) {
+                    kvmem_source_k_->restore_many(source_restores, pool, stream);
+                }
+                if (!rerope_pages.empty()) {
+                    ninfer::kvmem::kvmem_rerope_pages(
+                        pool, rerope_pages.data(), rerope_from.data(), rerope_to.data(),
+                        static_cast<std::uint32_t>(rerope_pages.size()),
+                        {{static_cast<std::int32_t*>(kvmem_rerope_host_->data()),
+                          static_cast<std::size_t>(page_capacity_) * 3},
+                     {static_cast<std::int32_t*>(kvmem_rerope_device_.data),
+                          static_cast<std::size_t>(page_capacity_) * 3}}, stream);
+                }
+            }
+
+        };
+
+        bool restore_was_async = false;
+        std::uint64_t restore_wait_us = 0;
         // ---- 2) stage in: fresh pages for cold selected blocks ----
         // Materializing in ascending parked-host-address order pairs adjacent host slots (such as
         // blocks evicted together in an earlier compaction) with consecutive physical device pages
@@ -2797,38 +3237,128 @@ public:
             views.reserve(ordered.size());
             handles.reserve(ordered.size());
             restored_ids.reserve(ordered.size());
+            const bool async_restore = kvmem_async_device_ != nullptr && stream != nullptr &&
+                kvmem_host_layout_.page_stride <= kAsyncBatchBytes &&
+                std::all_of(ordered.begin(), ordered.end(), [&](std::uint32_t id) {
+                    return block_hosts[id].valid() && (kvmem_original_positions_
+                        ? kvmem_native_records_[index].at(id).columns : sources[id].columns)
+                            == kPagedKVPageSize;
+                });
+            std::unique_ptr<PendingRestore> restore;
+            if (async_restore) {
+                restore = std::make_unique<PendingRestore>(
+                    *pages_, *stage_in_reservation, block_hosts, *kvmem_async_device_);
+                restore->pages.reserve(required);
+            }
             for (const std::uint32_t id : ordered) {
-                LogicalKVPageHandle logical = pages_->materialize(*stage_in_reservation);
-                block_pages[id]             = logical;
-                if (block_hosts[id].valid()) {
-                    views.push_back(kvmem_host_arena_->view(block_hosts[id]));
+                LogicalKVPageHandle logical = async_restore
+                    ? pages_->materialize_transfer_destination(*stage_in_reservation, kPagedKVPageSize)
+                    : pages_->materialize(*stage_in_reservation);
+                if (restore) {
+                    restore->pages.push_back({id, logical, std::move(block_hosts[id])});
+                    views.push_back(kvmem_host_arena_->view(restore->pages.back().source));
                     handles.push_back(pages_->physical(logical));
-                    restored_ids.push_back(id);
-                } else if (kvmem_block_cold_[index].size() > id &&
-                           kvmem_block_cold_[index][id].valid()) {
-                    cold_restores.emplace_back(id, pages_->physical(logical));
-                } else if (repo.tier_of(id) == ninfer::kvmem::KvTier::Nvme) {
-                    throw std::logic_error("KVMem NVMe block has no cold page record");
+                } else {
+                    block_pages[id] = logical;
+                    if (block_hosts[id].valid()) {
+                        views.push_back(kvmem_host_arena_->view(block_hosts[id]));
+                        handles.push_back(pages_->physical(logical));
+                        restored_ids.push_back(id);
+                    } else if (kvmem_block_cold_[index].size() > id &&
+                               kvmem_block_cold_[index][id].valid()) {
+                        cold_restores.emplace_back(id, pages_->physical(logical));
+                    } else {
+                        throw std::logic_error("KVMem selected block has no valid Host/Cold source");
+                    }
+                    pages_->commit_coverage(logical, kvmem_original_positions_
+                        ? kvmem_native_records_[index].at(id).columns : sources[id].columns);
+                    if (address.active) { pages_->retain_active_reference(logical); }
                 }
-                pages_->commit_coverage(logical, kPagedKVPageSize);
-                // A restored page joins the window of a LIVE address the same way a grown page
-                // does, so it carries that address's active reference too: without it the next
-                // deactivate finds a window page with no active reference and refuses.
-                if (address.active) { pages_->retain_active_reference(logical); }
             }
-            if (!views.empty()) {
-                transfer_runs += pool.copy_from_host_pages(views, handles, stream);
+            if (restore) {
+                const auto submit_start = std::chrono::steady_clock::now();
+                // Some targets may reuse pages whose D2H was queued above on
+                // compute. Do not overwrite them until those reads have ended.
+                restore->source_ready.record(stream);
+                restore->source_ready.wait(restore->stream);
+                restore->submitted = true;
+                const auto batch_pages = kAsyncBatchBytes / kvmem_host_layout_.page_stride;
+                for (std::size_t begin = 0; begin < handles.size(); begin += batch_pages) {
+                    const auto size = std::min(batch_pages, handles.size() - begin);
+                    // A partial later submission must drain the stream, not
+                    // mistake the previous sub-batch's event for its completion.
+                    restore->recorded = false;
+                    transfer_runs += pool.copy_from_host_pages(
+                        std::span(views).subspan(begin, size),
+                        std::span(handles).subspan(begin, size), restore->stream);
+                    restore->completion.record(restore->stream);
+                    restore->recorded = true;
+                    if (begin + size < handles.size()) {
+                        const auto wait_start = std::chrono::steady_clock::now();
+                        restore->completion.synchronize();
+                        kvmem_async_wait_us_ += static_cast<std::uint64_t>(
+                            std::chrono::duration_cast<std::chrono::microseconds>(
+                                std::chrono::steady_clock::now() - wait_start).count());
+                        ++kvmem_async_submitted_;
+                        ++kvmem_async_completed_;
+                        ++kvmem_async_split_batches_;
+                    }
+                }
+                kvmem_async_submit_us_ += static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<std::chrono::microseconds>(
+                        std::chrono::steady_clock::now() - submit_start).count());
+                ++kvmem_async_submitted_;
+                kvmem_async_bytes_ += required * kvmem_host_layout_.page_stride;
+                ++kvmem_async_restore_submitted_;
+                // These pages are disjoint from every H2D target. Their rephase
+                // can run while the copy stream restores the selected history.
+                rephase(1);
+                const bool ready = restore->completion.ready();
+                const auto wait_start = std::chrono::steady_clock::now();
+                restore->completion.synchronize();
+                if (!ready) {
+                    restore_wait_us = static_cast<std::uint64_t>(
+                        std::chrono::duration_cast<std::chrono::microseconds>(
+                            std::chrono::steady_clock::now() - wait_start).count());
+                    kvmem_async_wait_us_ += restore_wait_us;
+                }
+                for (auto& page : restore->pages) {
+                    pages_->publish_transfer_destination(page.logical, true);
+                    if (address.active) { pages_->retain_active_reference(page.logical); }
+                    block_pages[page.block] = page.logical;
+                    page.source.release();
+                }
+                restore->pages.clear();
+                ++kvmem_async_completed_;
+                restore_was_async = true;
+            } else {
+                if (kvmem_async_device_ != nullptr) { ++kvmem_async_fallbacks_; }
+                if (!views.empty()) {
+                    transfer_runs += pool.copy_from_host_pages(views, handles, stream);
+                }
+                if (transfer_runs != 0) { KVMEM_CUDA_CHECK(cudaStreamSynchronize(stream)); }
+                for (const std::uint32_t id : restored_ids) { block_hosts[id].release(); }
             }
-            if (transfer_runs != 0) {
-                KVMEM_CUDA_CHECK(cudaStreamSynchronize(stream));
-            }
-            for (const std::uint32_t id : restored_ids) { block_hosts[id].release(); }
             for (const auto [id, device] : cold_restores) {
-                HostKVAllocation buffer = kvmem_cold_buffer();
-                const auto writable = kvmem_cold_staging_->writable_view(buffer);
+                HostKVAllocation buffer;
                 const auto record = kvmem_block_cold_[index][id];
-                kvmem_cold_file_->load(
-                    record, std::span<std::byte>(writable.data(), kvmem_host_layout_.page_stride));
+                auto read = std::find_if(cold_reads.begin(), cold_reads.end(),
+                                        [id](const auto& item) { return item.id == id; });
+                if (read != cold_reads.end()) {
+                    const auto wait_start = std::chrono::steady_clock::now();
+                    read->ready.get();
+                    kvmem_nvme_prefetch_wait_us_ += static_cast<std::uint64_t>(
+                        std::chrono::duration_cast<std::chrono::microseconds>(
+                            std::chrono::steady_clock::now() - wait_start).count());
+                    buffer = std::move(read->buffer);
+                    cold_reads.erase(read);
+                    ++kvmem_nvme_prefetch_completed_;
+                } else {
+                    buffer = kvmem_cold_buffer();
+                    const auto writable = kvmem_cold_staging_->writable_view(buffer);
+                    kvmem_cold_file_->load(record,
+                        std::span<std::byte>(writable.data(), kvmem_host_layout_.page_stride));
+                }
                 const std::array<HostKVAllocationConstView, 1> source{
                     kvmem_cold_staging_->view(buffer)};
                 const std::array<DeviceKVPageHandle, 1> destination{device};
@@ -2836,8 +3366,10 @@ public:
                 kvmem_cold_sync(stream);
                 (void)kvmem_cold_file_->release(record);
                 kvmem_block_cold_[index][id] = {};
+                buffer.release();
+                start_cold_read();
             }
-        } else if (transfer_runs != 0) {
+        } else if (transfer_runs != 0 && !async_demote) {
             KVMEM_CUDA_CHECK(cudaStreamSynchronize(stream));
         }
         const auto transfer_us = static_cast<std::uint64_t>(
@@ -2845,35 +3377,8 @@ public:
                 std::chrono::steady_clock::now() - transfer_start)
                 .count());
 
-        // ---- 3) re-phase every moved block from its baked slot to the new one ----
-        if (!plan.remaps.empty()) {
-            std::vector<std::int32_t> rerope_pages;
-            std::vector<std::int32_t> rerope_from;
-            std::vector<std::int32_t> rerope_to;
-            rerope_pages.reserve(plan.remaps.size());
-            rerope_from.reserve(plan.remaps.size());
-            rerope_to.reserve(plan.remaps.size());
-            for (const ninfer::kvmem::KvRemap& rm : plan.remaps) {
-                if (rm.skip) { continue; }
-                if (rm.raw_refresh) {
-                    // K1b: the host copy holds the old-phased page (not raw K),
-                    // so a restored block re-phases exactly like a resident one;
-                    // the drift thresholds then only reset their counters. The
-                    // raw-K mirror that makes this a true rebuild is K2-full.
-                    repo.reset_drift(rm.block_id);
-                }
-                if (block_pages.size() <= rm.block_id) { block_pages.resize(rm.block_id + 1); }
-                rerope_pages.push_back(
-                    pool.physical_index_of(pages_->physical(block_pages[rm.block_id])));
-                rerope_from.push_back(static_cast<std::int32_t>(rm.from_base));
-                rerope_to.push_back(static_cast<std::int32_t>(rm.to_base));
-            }
-            if (!rerope_pages.empty()) {
-                ninfer::kvmem::kvmem_rerope_pages(
-                    pool, rerope_pages.data(), rerope_from.data(), rerope_to.data(),
-                    static_cast<std::uint32_t>(rerope_pages.size()), stream);
-            }
-        }
+        // ---- 3) finish relocation before publishing any restored page ----
+        rephase(restore_was_async ? 2 : 0);
 
         // ---- 4) rewire the window and shrink the address ----
         const std::uint32_t old_page_count = address.page_count;
@@ -2890,7 +3395,22 @@ public:
         }
         address.page_count         = window_pages;
         address.committed_frontier = kv_window;
+        if (async_demote) {
+            // The membership rewrite transfers these refs to the batch. Mark
+            // that ownership before the potentially failing table upload so
+            // error cleanup cannot strand a removed source reference.
+            for (const auto& page : async_demote->pages) {
+                if (pages_->active_address_references(page.logical) != 0) {
+                    pages_->release_active_reference(page.logical);
+                }
+                block_pages[page.block] = {};
+            }
+            async_demote->detached = true;
+        }
         if (address.active) { publish_membership(address, stream); }
+        if (async_demote) {
+            kvmem_pending_demote_ = std::move(async_demote);
+        }
 
         // ---- 5) ledger tiers ----
         // The tracker keeps its ledger order: evicted blocks retain Host or NVMe copies,
@@ -2910,7 +3430,13 @@ public:
         kvmem_stage_out_blocks_ += plan.stage_out.size();
         kvmem_stage_in_blocks_ += plan.stage_in.size();
         kvmem_transfer_runs_ += transfer_runs;
-        kvmem_transfer_us_ += transfer_us;
+        if (kvmem_pending_demote_) {
+            kvmem_async_submit_us_ += transfer_us;
+        } else if (restore_was_async) {
+            kvmem_async_restore_us_ += transfer_us;
+        } else {
+            kvmem_transfer_us_ += transfer_us;
+        }
         kvmem_window_tokens_ = kv_window;
         ++kvmem_compactions_;
         if (std::getenv("NINFER_KVMEM_TRACE") != nullptr) {
@@ -2929,6 +3455,10 @@ public:
                          kvmem_cold_bytes(), cold_blocks, cold_thinking,
                          kvmem_host_capacity_bytes(),
                          static_cast<unsigned long long>(kvmem_host_to_cold_spills_));
+            std::fprintf(stderr, "KVMEM_TRACE source_k bytes=%zu captures=%llu rebuilds=%llu\n",
+                         kvmem_source_k_ ? kvmem_source_k_->occupied_bytes() : std::size_t{0},
+                         static_cast<unsigned long long>(kvmem_source_k_ ? kvmem_source_k_->captures() : 0),
+                         static_cast<unsigned long long>(kvmem_source_k_ ? kvmem_source_k_->restores() : 0));
         }
         if (const char* env = std::getenv("KVMEM_RESELECT"); env != nullptr && env[0] != '\0' &&
             env[0] != '0') {
@@ -3022,6 +3552,341 @@ public:
         return kvmem_budget_ < kv_tokens ? kvmem_budget_ : 0U;
     }
 
+    // Per-address, short-query lexical fallback. Never shared across request
+    // addresses or retained after address release. The selector admits these
+    // only after sink, mandatory, action and recent pages have been reserved.
+    void set_kvmem_lexical_pages(KVAddressSpaceHandle handle,
+                                 std::span<const std::uint32_t> pages,
+                                 std::span<const std::uint32_t> older_matches = {}) {
+        if (!kvmem_enabled_) { return; }
+        Address& address = require(handle);
+        const auto index = static_cast<std::size_t>(&address - addresses_.data());
+        auto& stored = kvmem_lexical_pages_[index];
+        if (kvmem_action_lrfu_) {
+            stored.assign(pages.begin(), pages.end());
+            kvmem_older_matches_[index].assign(older_matches.begin(), older_matches.end());
+        } else {
+            stored.clear();
+            kvmem_older_matches_[index].clear();
+        }
+    }
+
+    [[nodiscard]] std::vector<std::uint32_t>
+    kvmem_selected_blocks(KVAddressSpaceHandle handle) const {
+        const Address& address = require(handle);
+        const auto index = static_cast<std::size_t>(&address - addresses_.data());
+        std::vector<std::uint32_t> selected;
+        if (kvmem_enabled_) {
+            for (const auto& block : kvmem_repos_[index].blocks()) {
+                if (block.in_working_set) { selected.push_back(block.id); }
+            }
+        }
+        return selected;
+    }
+
+    // Canonical reconstruction reads exactly the selected original token ranges,
+    // in their packed execution order. Never treat a physical slot as a ledger id.
+    [[nodiscard]] std::vector<std::uint32_t>
+    kvmem_window_token_positions(KVAddressSpaceHandle handle) const {
+        const Address& address = require(handle);
+        const auto index = static_cast<std::size_t>(&address - addresses_.data());
+        std::vector<std::uint32_t> positions(
+            address.committed_frontier, std::numeric_limits<std::uint32_t>::max());
+        for (const auto& block : kvmem_repos_[index].blocks()) {
+            if (block.tier != ninfer::kvmem::KvTier::Gpu || block.baked_pos < 0 ||
+                static_cast<std::uint64_t>(block.baked_pos) >= positions.size()) { continue; }
+            const auto begin = static_cast<std::uint32_t>(block.baked_pos);
+            const auto count = std::min<std::uint32_t>(kPagedKVPageSize, positions.size() - begin);
+            for (std::uint32_t col = 0; col < count; ++col) {
+                positions[begin + col] = static_cast<std::uint32_t>(block.token_begin + col);
+            }
+        }
+        return positions;
+    }
+
+    // Adapted from KVMem faf3c22582adf9d99ff072c543ea30ca03a8e2ca,
+    // backends/patches/ninfer-kvmem.patch: capture_memory_checkpoint and
+    // restore_memory_prefix. Native K/V codes AND scales remain authoritative;
+    // unlike the donor's durable duplicate archive, this bounded port keeps
+    // exactly one native owner per original page across Device/Host/Cold.
+    [[nodiscard]] OriginalPrefixCheckpoint capture_original_prefix(
+        KVAddressSpaceHandle handle, std::uint32_t logical_frontier,
+        cudaStream_t stream = nullptr) {
+        (void)retire_kvmem_transfers(true);
+        Address& address = require_active(handle);
+        if (!kvmem_original_positions_ || address.original_epoch == 0) {
+            throw std::logic_error("original KV prefix capture requires a live original-position mode");
+        }
+        const auto index = static_cast<std::size_t>(&address - addresses_.data());
+        const auto& repo = kvmem_repos_[index];
+        const auto& native = kvmem_native_records_[index];
+        const auto count = pages_for_tokens(logical_frontier);
+        if (count > repo.block_count() || count > native.size()) {
+            throw std::logic_error("original KV prefix is not fully archived");
+        }
+        std::uint64_t written_frontier = 0;
+        for (const auto& block : repo.blocks()) {
+            if (block.id < native.size() && native[block.id].columns != 0) {
+                written_frontier = std::max(written_frontier,
+                    block.token_begin + native[block.id].columns);
+            }
+        }
+        if (written_frontier != logical_frontier) {
+            throw std::logic_error("original KV checkpoint must be captured at its execution frontier");
+        }
+        OriginalPrefixCheckpoint checkpoint;
+        checkpoint.address = handle;
+        checkpoint.logical_frontier = logical_frontier;
+        checkpoint.lineage_epoch = address.original_epoch;
+        checkpoint.prefix_revisions.reserve(count);
+        for (std::uint32_t id = 0; id < count; ++id) {
+            const auto columns = std::min<std::uint32_t>(kPagedKVPageSize,
+                logical_frontier - id * kPagedKVPageSize);
+            require_original_native_owner(index, id, columns);
+            checkpoint.prefix_revisions.push_back(native[id].revision);
+        }
+        const auto tail_columns = logical_frontier % kPagedKVPageSize;
+        if (tail_columns != 0 && kvmem_mean_k_stride_ != 0) {
+            const auto id = count - 1U;
+            auto& means = kvmem_mean_k_[index];
+            auto& tokens = kvmem_mean_k_tokens_[index];
+            means.resize(std::max(means.size(), static_cast<std::size_t>(count) * kvmem_mean_k_stride_));
+            tokens.resize(std::max(tokens.size(), static_cast<std::size_t>(count)), 0);
+            if (tokens[id] != tail_columns && repo.tier_of(id) == ninfer::kvmem::KvTier::Gpu) {
+                const std::int32_t page = pages_->physical_pool().physical_index_of(
+                    pages_->physical(kvmem_block_pages_[index][id]));
+                const auto position = static_cast<std::int32_t>(repo.blocks()[id].token_begin);
+                ninfer::kvmem::kvmem_export_mean_k(pages_->physical_pool(), &page, &position,
+                    &tail_columns, 1, means.data() + static_cast<std::size_t>(id) * kvmem_mean_k_stride_, stream);
+                tokens[id] = tail_columns;
+            }
+            // An invalid/nonresident tail mean stays explicitly invalid. Once
+            // materialized, the ordinary scorer recomputes it from native K.
+            if (tokens[id] == tail_columns) {
+                checkpoint.partial_mean.assign(
+                    means.begin() + static_cast<std::size_t>(id) * kvmem_mean_k_stride_,
+                    means.begin() + static_cast<std::size_t>(id + 1U) * kvmem_mean_k_stride_);
+                checkpoint.partial_mean_tokens = tail_columns;
+            }
+        }
+        return checkpoint;
+    }
+
+    [[nodiscard]] std::uint32_t rewind_original_prefix(
+        KVAddressSpaceHandle handle, const OriginalPrefixCheckpoint& checkpoint,
+        cudaStream_t stream = nullptr) {
+        (void)retire_kvmem_transfers(true);
+        Address& address = require_active(handle);
+        if (!kvmem_original_positions_ || address.original_epoch == 0 ||
+            checkpoint.address != handle || checkpoint.lineage_epoch != address.original_epoch) {
+            throw std::logic_error("original KV rewind rejected a stale address or execution branch");
+        }
+        const auto index = static_cast<std::size_t>(&address - addresses_.data());
+        auto& repo = kvmem_repos_[index];
+        auto& native = kvmem_native_records_[index];
+        const auto frontier = checkpoint.logical_frontier;
+        const auto count = pages_for_tokens(frontier);
+        if (checkpoint.prefix_revisions.size() != count || count > native.size() ||
+            count > repo.block_count() ||
+            (checkpoint.partial_mean.empty() && checkpoint.partial_mean_tokens != 0) ||
+            (!checkpoint.partial_mean.empty() &&
+             (checkpoint.partial_mean.size() != kvmem_mean_k_stride_ ||
+              checkpoint.partial_mean_tokens != frontier % kPagedKVPageSize))) {
+            throw std::logic_error("original KV checkpoint has invalid prefix coverage");
+        }
+        // Check every original page, including parked Host/NVMe pages, before
+        // any destructive mapping change. Ownership may migrate after capture;
+        // page identity, first-write revision and surviving columns may not.
+        for (std::uint32_t id = 0; id < count; ++id) {
+            const auto columns = std::min<std::uint32_t>(kPagedKVPageSize,
+                frontier - id * kPagedKVPageSize);
+            require_original_native_owner(index, id, columns);
+            if (native[id].revision != checkpoint.prefix_revisions[id]) {
+                throw std::logic_error("original KV prefix belongs to a replaced first-write page");
+            }
+        }
+        try {
+            // A probe can compact again. Derive the cut from the CURRENT map,
+            // never from q0 plus an offset saved before that compaction. Keep
+            // the partial original append page as the final packed slot.
+            std::vector<std::uint32_t> selected;
+            for (const auto& block : repo.blocks()) {
+                if (block.id < count && block.tier == ninfer::kvmem::KvTier::Gpu) {
+                    selected.push_back(block.id);
+                }
+            }
+            const auto tail_columns = frontier % kPagedKVPageSize;
+            if (tail_columns != 0 && (selected.empty() || selected.back() != count - 1U)) {
+                selected.push_back(count - 1U);
+                // Reuse the existing native Host/Cold -> Device transfer and
+                // ownership publication. No source-K reconstruction is needed.
+                const auto restored = kvmem_compact(handle,
+                    static_cast<std::uint32_t>(selected.size()) * kPagedKVPageSize,
+                    stream, {}, true, 0, selected);
+                if (restored == 0) {
+                    throw std::logic_error("original KV rewind could not restore its partial append page");
+                }
+            }
+            std::uint32_t packed_frontier = 0;
+            for (const auto& block : repo.blocks()) {
+                if (block.id >= count || block.tier != ninfer::kvmem::KvTier::Gpu) { continue; }
+                const auto columns = std::min<std::uint32_t>(kPagedKVPageSize,
+                    frontier - static_cast<std::uint32_t>(block.token_begin));
+                if (block.baked_pos != static_cast<std::int64_t>(packed_frontier)) {
+                    throw std::logic_error("original KV rewind found a non-prefix packed selection");
+                }
+                packed_frontier += columns;
+            }
+            destructive_truncate(handle, packed_frontier);
+            // The generic packed truncate only drops a trailing resident run.
+            // Revoke ALL original future owners, even ones the probe offloaded.
+            for (std::uint32_t id = count; id < repo.block_count(); ++id) {
+                if (id < kvmem_block_hosts_[index].size()) {
+                    kvmem_block_hosts_[index][id].release();
+                }
+                if (id < kvmem_block_cold_[index].size() && kvmem_block_cold_[index][id].valid()) {
+                    if (!kvmem_cold_file_->release(kvmem_block_cold_[index][id])) {
+                        throw std::logic_error("original KV future Cold owner became stale");
+                    }
+                }
+            }
+            kvmem_block_pages_[index].resize(count);
+            kvmem_block_hosts_[index].resize(count);
+            kvmem_block_cold_[index].resize(count);
+            native.resize(count);
+            if (tail_columns != 0) { native.back().columns = tail_columns; }
+            repo.truncate(count);
+            kvmem_mean_k_[index].resize(static_cast<std::size_t>(count) * kvmem_mean_k_stride_);
+            kvmem_mean_k_tokens_[index].resize(count, 0);
+            if (tail_columns != 0) {
+                kvmem_mean_k_tokens_[index].back() = checkpoint.partial_mean_tokens;
+                if (!checkpoint.partial_mean.empty()) {
+                    std::copy(checkpoint.partial_mean.begin(), checkpoint.partial_mean.end(),
+                        kvmem_mean_k_[index].begin() +
+                            static_cast<std::size_t>(count - 1U) * kvmem_mean_k_stride_);
+                }
+            }
+            const auto clip_candidates = [count](auto& ids) {
+                ids.erase(std::remove_if(ids.begin(), ids.end(),
+                    [count](std::uint32_t id) { return id >= count; }), ids.end());
+            };
+            clip_candidates(kvmem_lexical_pages_[index]);
+            clip_candidates(kvmem_older_matches_[index]);
+            kvmem_reuse_floors_[index] = 0;
+            ++address.original_epoch; // Revoke checkpoints above the restored q0.
+            if (address.original_epoch == 0) { ++address.original_epoch; }
+            return packed_frontier;
+        } catch (...) {
+            // Native copies and directory changes are not a transactional COW
+            // archive. A partially destructive failure requires a fresh session.
+            address.original_epoch = 0;
+            throw;
+        }
+    }
+
+    // Reuse the normal per-page rollback contract without dropping selected page
+    // identities or their device reservation. Rebuilt K/V belongs to a new
+    // conditioning epoch, so its old means/source replicas must not resurrect.
+    void begin_kvmem_window_replay(KVAddressSpaceHandle handle, std::uint32_t prefix = 0,
+                                   cudaStream_t stream = nullptr) {
+        if (kvmem_original_positions_) {
+            throw std::logic_error("canonical window replay cannot overwrite original-position KV");
+        }
+        (void)retire_kvmem_transfers(true);
+        Address& address = require_active(handle);
+        const auto index = static_cast<std::size_t>(&address - addresses_.data());
+        if (prefix % kPagedKVPageSize != 0 || prefix > address.committed_frontier) {
+            throw std::logic_error("KVMem replay prefix has invalid coverage");
+        }
+        for (std::uint32_t slot = prefix / kPagedKVPageSize; slot < address.page_count; ++slot) {
+            if (!pages_->can_destructive_truncate(membership(address, slot), 0)) {
+                throw std::logic_error("KVMem window replay cannot overwrite protected KV");
+            }
+        }
+        for (std::uint32_t slot = prefix / kPagedKVPageSize; slot < address.page_count; ++slot) {
+            pages_->destructive_truncate(membership(address, slot), 0);
+        }
+        std::vector<ninfer::kvmem::ImmutableKStore::RestoreRequest> source_restores;
+        source_restores.reserve(prefix / kPagedKVPageSize);
+        for (const auto& block : kvmem_repos_[index].blocks()) {
+            if (block.tier != ninfer::kvmem::KvTier::Gpu) { continue; }
+            const auto id = block.id;
+            if (block.baked_pos >= 0 && static_cast<std::uint64_t>(block.baked_pos) < prefix) {
+                // V still has the same canonical prefix conditioning. Recover K
+                // from that epoch's first-write codes to remove intermediate rephase drift.
+                const auto logical = kvmem_block_pages_[index][id];
+                source_restores.push_back({&kvmem_source_records_[index][id],
+                    pages_->physical_pool().physical_index_of(pages_->physical(logical)),
+                    static_cast<std::int32_t>(block.baked_pos)});
+                continue;
+            }
+            if (id < kvmem_source_records_[index].size()) {
+                kvmem_source_k_->release(kvmem_source_records_[index][id]);
+            }
+            if (id < kvmem_mean_k_tokens_[index].size()) {
+                kvmem_mean_k_tokens_[index][id] = 0;
+            }
+            if (id < kvmem_block_hosts_[index].size()) { kvmem_block_hosts_[index][id].release(); }
+            if (id < kvmem_block_cold_[index].size() && kvmem_block_cold_[index][id].valid()) {
+                (void)kvmem_cold_file_->release(kvmem_block_cold_[index][id]);
+                kvmem_block_cold_[index][id] = {};
+            }
+        }
+        if (!source_restores.empty()) {
+            kvmem_source_k_->restore_many(source_restores, pages_->physical_pool(), stream);
+        }
+        address.committed_frontier = prefix;
+    }
+
+    // A prefix fork copies native mapped pages, not this address's archive and
+    // source-K directory. Only a full, unrebased history is self-contained.
+    [[nodiscard]] bool kvmem_can_fork_prefix(KVAddressSpaceHandle handle) const {
+        if (!kvmem_enabled_) { return true; }
+        // A native prefix fork does not clone the single-owner original archive
+        // or its branch identity. Start this mode with its own empty directory.
+        if (kvmem_original_positions_) { return false; }
+        const auto& address = require(handle);
+        const auto index = static_cast<std::size_t>(&address - addresses_.data());
+        const auto& repo = kvmem_repos_[index];
+        if (repo.block_count() != address.page_count) { return false; }
+        for (const auto& block : repo.blocks()) {
+            if (block.tier != ninfer::kvmem::KvTier::Gpu ||
+                block.baked_pos != static_cast<std::int64_t>(block.token_begin)) { return false; }
+        }
+        return true;
+    }
+
+    [[nodiscard]] bool kvmem_has_lexical_candidates(KVAddressSpaceHandle handle) const {
+        if (!kvmem_enabled_) { return false; }
+        const Address& address = require(handle);
+        const auto index = static_cast<std::size_t>(&address - addresses_.data());
+        return !kvmem_lexical_pages_[index].empty();
+    }
+
+    // A reused window can fit the incoming question while its lexical evidence
+    // is still on Host/Cold. Waiting for capacity pressure (or round completion)
+    // would let that question run without the evidence. Only request reselection
+    // once every candidate has actually been written into this lineage.
+    [[nodiscard]] bool kvmem_lexical_restore_needed(KVAddressSpaceHandle handle) const {
+        if (!kvmem_enabled_ || !kvmem_action_lrfu_) { return false; }
+        const Address& address = require(handle);
+        const auto index = static_cast<std::size_t>(&address - addresses_.data());
+        const auto& repo = kvmem_repos_[index];
+        bool missing = false;
+        for (const std::uint32_t id : kvmem_lexical_pages_[index]) {
+            if (id >= repo.block_count()) { return false; }
+            missing = missing || repo.tier_of(id) != ninfer::kvmem::KvTier::Gpu;
+        }
+        if (!missing) { return false; }
+        // Optional recall must not turn an otherwise fitting shared-prefix
+        // request into a geometry error. Leave shared views to the existing
+        // pressure/protection policy; only force an exclusive window to move.
+        for (std::uint32_t page = 0; page < address.page_count; ++page) {
+            if (pages_->address_references(membership(address, page)) != 1) { return false; }
+        }
+        return true;
+    }
+
     // KVMem K3: install the device query-sum buffer (f32 [layers][q_heads][head_dim])
     // and the host mean-K geometry. Called once at start-up so the addresses stay
     // stable across CUDA-graph capture; the prefill schedule accumulates the
@@ -3062,6 +3927,12 @@ public:
                                             closed_thinking_spans.end());
     }
 
+    // Keep the completed probe Q for retrieval/profile while replaying the query.
+    void freeze_kvmem_query() noexcept {
+        kvmem_query_.query_begin = 0;
+        kvmem_query_.query_end = 0;
+    }
+
     // Null until install_kvmem_query ran, i.e. unless KVMem is enabled.
     [[nodiscard]] const ninfer::kvmem::KvmemQueryCapture* kvmem_query_capture() const noexcept {
         return kvmem_query_.valid() ? &kvmem_query_ : nullptr;
@@ -3078,6 +3949,21 @@ public:
         usage.stage_out_blocks  = kvmem_stage_out_blocks_;
         usage.transfer_runs     = kvmem_transfer_runs_;
         usage.transfer_us       = kvmem_transfer_us_;
+        usage.async_submitted   = kvmem_async_submitted_;
+        usage.async_completed   = kvmem_async_completed_;
+        usage.async_discarded   = kvmem_async_discarded_;
+        usage.async_submit_us   = kvmem_async_submit_us_;
+        usage.async_wait_us     = kvmem_async_wait_us_;
+        usage.async_bytes       = kvmem_async_bytes_;
+        usage.async_fallbacks   = kvmem_async_fallbacks_;
+        usage.async_restore_submitted = kvmem_async_restore_submitted_;
+        usage.async_restore_us = kvmem_async_restore_us_;
+        usage.async_split_batches = kvmem_async_split_batches_;
+        usage.nvme_prefetch_submitted = kvmem_nvme_prefetch_submitted_;
+        usage.nvme_prefetch_completed = kvmem_nvme_prefetch_completed_;
+        usage.nvme_prefetch_wait_us = kvmem_nvme_prefetch_wait_us_;
+        usage.inflight_pages   = kvmem_inflight_pages();
+        usage.inflight_bytes   = usage.inflight_pages * kvmem_host_layout_.page_stride;
         usage.scoreable_blocks  = kvmem_scoreable_blocks_;
         usage.zero_score_blocks = kvmem_zero_score_blocks_;
         usage.window_tokens     = kvmem_window_tokens_;
@@ -3085,24 +3971,146 @@ public:
         usage.host_capacity_bytes = kvmem_host_capacity_bytes();
         usage.cold_bytes          = kvmem_cold_bytes();
         usage.host_to_cold_spills = kvmem_host_to_cold_spills();
+        if (kvmem_source_k_) {
+            usage.source_k_bytes = kvmem_source_k_->occupied_bytes();
+            usage.source_k_file_capacity_bytes = kvmem_source_k_->file_capacity_bytes();
+            usage.source_k_staging_bytes = kvmem_source_k_->staging_bytes();
+            usage.source_k_captures = kvmem_source_k_->captures();
+            usage.source_k_rebuilds = kvmem_source_k_->restores();
+        }
         return usage;
     }
 
 private:
+    struct OriginalNativeRecord {
+        std::uint32_t columns = 0;
+        std::uint64_t revision = 0;
+    };
+
+    void commit_original_native_columns(std::size_t index, Address& address) {
+        if (address.original_epoch == 0) {
+            throw std::logic_error("original KV branch requires fresh prefill");
+        }
+        const auto& repo = kvmem_repos_[index];
+        auto& native = kvmem_native_records_[index];
+        native.resize(repo.block_count());
+        for (const auto& block : repo.blocks()) {
+            if (block.tier != ninfer::kvmem::KvTier::Gpu) { continue; }
+            const auto logical = kvmem_block_pages_[index].at(block.id);
+            const auto columns = pages_->committed_columns(logical);
+            auto& record = native[block.id];
+            if (columns < record.columns) {
+                throw std::logic_error("original KV native coverage shrank without a rewind");
+            }
+            if (record.revision == 0 && columns != 0) {
+                record.revision = address.next_native_revision++;
+                if (address.next_native_revision == 0) { ++address.next_native_revision; }
+            }
+            record.columns = columns;
+        }
+    }
+
+    void require_original_native_owner(std::size_t index, std::uint32_t id,
+                                       std::uint32_t columns) const {
+        const auto& address = addresses_[index];
+        const auto& repo = kvmem_repos_[index];
+        const auto& record = kvmem_native_records_[index].at(id);
+        const auto& block = repo.blocks()[id];
+        const auto logical = id < kvmem_block_pages_[index].size()
+            ? kvmem_block_pages_[index][id] : LogicalKVPageHandle{};
+        const bool device = logical.valid() && pages_->valid(logical);
+        const bool host = id < kvmem_block_hosts_[index].size() &&
+            kvmem_block_hosts_[index][id].valid();
+        const bool cold = id < kvmem_block_cold_[index].size() &&
+            kvmem_block_cold_[index][id].valid();
+        if (block.id != id || block.token_begin != static_cast<std::uint64_t>(id) * kPagedKVPageSize ||
+            columns == 0 || record.revision == 0 || columns > record.columns ||
+            record.columns > kPagedKVPageSize || static_cast<int>(device) + host + cold != 1) {
+            throw std::logic_error("original KV prefix has no unique complete native owner");
+        }
+        if (device) {
+            const auto slot = block.baked_pos / kPagedKVPageSize;
+            if (block.tier != ninfer::kvmem::KvTier::Gpu || block.baked_pos < 0 ||
+                block.baked_pos % kPagedKVPageSize != 0 ||
+                static_cast<std::uint64_t>(slot) >= address.page_count ||
+                membership(address, static_cast<std::uint32_t>(slot)) != logical ||
+                pages_->committed_columns(logical) != record.columns ||
+                pages_->address_references(logical) != 1) {
+                throw std::logic_error("original KV native Device identity is stale or shared");
+            }
+        } else if (host) {
+            if (block.tier != ninfer::kvmem::KvTier::Host || !kvmem_host_arena_ ||
+                !kvmem_host_arena_->view(kvmem_block_hosts_[index][id]).valid()) {
+                throw std::logic_error("original KV native Host identity is stale");
+            }
+        } else if (block.tier != ninfer::kvmem::KvTier::Nvme || !kvmem_cold_file_ ||
+                   !kvmem_cold_file_->valid(kvmem_block_cold_[index][id])) {
+            throw std::logic_error("original KV native Cold identity is stale");
+        }
+    }
+
+    void ensure_kvmem_host_arena(DeviceKVPagePool& pool) {
+        if (kvmem_host_arena_) { return; }
+        kvmem_host_layout_ = plan_host_kv_page_layout(pool.geometry());
+        const std::size_t stride = kvmem_host_layout_.page_stride;
+        std::size_t host_pages = page_capacity_;
+        bool limited_host_tier = false;
+        if (const char* setting = std::getenv("NINFER_KVMEM_HOST_PAGES")) {
+            char* end = nullptr;
+            errno = 0;
+            const unsigned long long requested = std::strtoull(setting, &end, 10);
+            if (errno != 0 || end == setting || *end != '\0' || requested == 0) {
+                throw std::invalid_argument("NINFER_KVMEM_HOST_PAGES must be positive");
+            }
+            host_pages = std::min<std::size_t>(page_capacity_, requested);
+            limited_host_tier = true;
+        }
+        const std::size_t capacity =
+            stride * host_pages + (limited_host_tier ? 0 : (std::size_t{1} << 20));
+        kvmem_host_arena_ = std::make_unique<HostKVArena>(
+            capacity, std::vector<HostKVPageLayout>{kvmem_host_layout_});
+    }
+
+    const DeviceContext* kvmem_async_device_ = nullptr;
+    std::unique_ptr<PinnedHostBuffer> kvmem_rerope_host_;
+    DeviceSpan kvmem_rerope_device_;
+    std::unique_ptr<PendingDemote> kvmem_pending_demote_;
+    std::uint64_t kvmem_async_completed_ = 0;
+    std::uint64_t kvmem_async_split_batches_ = 0;
+    std::uint64_t kvmem_nvme_prefetch_submitted_ = 0;
+    std::uint64_t kvmem_nvme_prefetch_completed_ = 0;
+    std::uint64_t kvmem_nvme_prefetch_wait_us_ = 0;
+    std::uint64_t kvmem_async_submit_us_ = 0;
+    std::uint64_t kvmem_async_submitted_ = 0;
+    std::uint64_t kvmem_async_discarded_ = 0;
+    std::uint64_t kvmem_async_wait_us_ = 0;
+    std::uint64_t kvmem_async_bytes_ = 0;
+    std::uint64_t kvmem_async_fallbacks_ = 0;
+    std::uint64_t kvmem_async_restore_submitted_ = 0;
+    std::uint64_t kvmem_async_restore_us_ = 0;
     bool kvmem_enabled_ = false;
+    bool kvmem_original_positions_ = false;
     bool kvmem_action_lrfu_ = false;
     double kvmem_lrfu_lambda_ = 0.5;
     double kvmem_lrfu_top_fraction_ = 0.9;
     std::uint32_t kvmem_budget_ = 0;  // NINFER_KVMEM_BUDGET tokens; 0 = unbounded
+    std::uint32_t kvmem_extra_device_pages_ = 0;
     // Generation headroom in tokens (page-aligned, already clamped to the pool's spare room).
     // Zero disables generation-time reclaim, which is the identity configuration.
     std::uint32_t kvmem_gen_reserve_ = 0;
     std::vector<ninfer::kvmem::KvBlockRepository> kvmem_repos_;
+    std::vector<std::vector<std::uint32_t>> kvmem_lexical_pages_;
+    std::vector<std::vector<std::uint32_t>> kvmem_older_matches_;
     // Per address: block id -> logical page currently holding it (invalid while
     // the block is evicted), and the parked host slot while evicted.
     std::vector<std::vector<LogicalKVPageHandle>> kvmem_block_pages_;
     std::vector<std::vector<HostKVAllocation>> kvmem_block_hosts_;
     std::vector<std::vector<ninfer::kvmem::ColdKVStore::Handle>> kvmem_block_cold_;
+    std::vector<std::vector<ninfer::kvmem::ImmutableKStore::Record>> kvmem_source_records_;
+    // Valid first-write coverage lives independently of the legacy K-only
+    // mirror. Tier migration transfers one complete native K/V+scale owner.
+    std::vector<std::vector<OriginalNativeRecord>> kvmem_native_records_;
+    std::unique_ptr<ninfer::kvmem::ImmutableKStore> kvmem_source_k_;
     std::unique_ptr<HostKVArena> kvmem_host_arena_;
     std::unique_ptr<HostKVArena> kvmem_cold_staging_;
     std::unique_ptr<ninfer::kvmem::ColdKVStore> kvmem_cold_file_;

@@ -12,6 +12,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <limits>
@@ -19,6 +20,7 @@
 #include "core/decode_graph.h"
 #include "core/device.h"
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -1726,6 +1728,19 @@ void inject_codec_edges(const Geometry& geometry, std::int32_t tokens, std::vect
     v[kv_input_index(geometry, geometry.kv_heads - 1, 0, tokens - 1)] = 1.0f;
 }
 
+void dump_attention_test_output(const std::vector<std::uint16_t>& output_bits) {
+    static const char* path = std::getenv("NINFER_ATTN_TEST_DUMP_PATH");
+    if (path == nullptr || path[0] == '\0') { return; }
+    std::FILE* file = std::fopen(path, "ab");
+    if (file == nullptr) { throw std::runtime_error("cannot open NINFER_ATTN_TEST_DUMP_PATH"); }
+    const std::uint64_t count = output_bits.size();
+    const bool wrote = std::fwrite(&count, sizeof(count), 1, file) == 1 &&
+                       std::fwrite(output_bits.data(), sizeof(std::uint16_t), output_bits.size(),
+                                   file) == output_bits.size();
+    const bool closed = std::fclose(file) == 0;
+    if (!wrote || !closed) { throw std::runtime_error("cannot write NINFER_ATTN_TEST_DUMP_PATH"); }
+}
+
 int run_a1_case(const Geometry& geometry, KvCacheStorage storage, const AttentionCase& test_case,
                 MappingPattern mapping) {
     const std::int32_t total       = test_case.base + test_case.tokens;
@@ -1796,6 +1811,7 @@ int run_a1_case(const Geometry& geometry, KvCacheStorage storage, const Attentio
         case_label("causal_softmax_attention", geometry, storage, test_case, mapping);
     const std::vector<std::uint16_t> output_bits =
         copy_from_guarded<std::uint16_t>(dout, q_bits.size());
+    dump_attention_test_output(output_bits);
     int failures = verify_attention(label, bf16_bits_to_double(output_bits), reference,
                                     attention_criterion(storage));
     failures += verify_cache(label, cache.snapshot(), expected,
@@ -1874,6 +1890,7 @@ int run_a3_case(const Geometry& geometry, KvCacheStorage storage, const Attentio
         case_label("causal_softmax_attention_cached", geometry, storage, test_case, mapping);
     const std::vector<std::uint16_t> output_bits =
         copy_from_guarded<std::uint16_t>(dout, q_bits.size());
+    dump_attention_test_output(output_bits);
     int failures = verify_attention(label, bf16_bits_to_double(output_bits), reference,
                                     attention_criterion(storage));
     failures += verify_cache(label + " cache unchanged", cache.snapshot(), cache_host, true);
@@ -2459,6 +2476,31 @@ int verify_workspace_capacity_contract() {
 }
 
 } // namespace
+
+int run_softmax_attention_int8_prompt_tests() {
+    if (cuda_unavailable()) {
+        std::cout << "SKIP: no usable CUDA device\n";
+        return 77;
+    }
+    int failures = 0;
+    // Reuse the independent A1/A3 oracles. W=66 crosses Q/K tiles and has partial tails.
+    for (const Geometry& geometry : kGeometries) {
+        for (const MappingPattern mapping :
+             {MappingPattern::Identity, MappingPattern::Fragmented}) {
+            failures += run_a1_case(geometry, KvCacheStorage::Int8Group64,
+                                    {17, 31, 48, 1901u}, mapping);
+            failures += run_a3_case(geometry, KvCacheStorage::Int8Group64,
+                                    {17, 31, 48, 1902u}, mapping);
+            failures += run_a1_case(geometry, KvCacheStorage::Int8Group64,
+                                    {66, 63, 129, 1903u}, mapping);
+            failures += run_a3_case(geometry, KvCacheStorage::Int8Group64,
+                                    {66, 63, 129, 1904u}, mapping);
+        }
+    }
+    std::cout << (failures == 0 ? "PASS" : "FAIL")
+              << " causal_softmax_attention int8 prompt independent correctness\n";
+    return failures == 0 ? 0 : 1;
+}
 
 int run_softmax_attention_nvfp4_tests() {
     if (cuda_unavailable()) {

@@ -9,12 +9,15 @@
 
 #include <cuda_runtime.h>
 
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <vector>
+#include <thread>
 
 #include "core/paged_kv_cache.h"
 #include "kvmem/kvmem_blocks.h"
@@ -36,6 +39,20 @@ constexpr int kDim    = kKVCacheInt8HeadDim;
 constexpr int kGroups = kKVCacheInt8Groups;
 
 int failures = 0;
+struct CopyGate {
+    std::atomic<bool> open{false};
+    std::atomic<bool> finished{false};
+};
+
+void block_copy_until_released(void* pointer) {
+    auto& gate = *static_cast<CopyGate*>(pointer);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    while (!gate.open.load(std::memory_order_acquire) &&
+           std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::yield();
+    }
+    gate.finished.store(true, std::memory_order_release);
+}
 #define CHECK(cond, ...)                                    \
     do {                                                    \
         if (!(cond)) {                                      \
@@ -192,12 +209,13 @@ void test_generation_device_claim() {
         DeviceKVPagePool pool(DeviceSpan{backing, allocation_bytes}, pool_layout);
         KVExecutionTablePool tables(DeviceSpan{backing, allocation_bytes}, table_layout, pool);
         LogicalKVPageStore pages(pool, logical_pages);
+        DeviceBuffer rerope_meta(3ULL * logical_pages * sizeof(std::int32_t));
         KVAddressSpaceStore store(
             pages, tables, 1, logical_pages,
             KvMemOptions{.enabled = true,
                          .budget_tokens = budget_pages * kTokens,
                          .gen_reserve_tokens = reserve_pages * kTokens,
-                         .action_lrfu = true});
+                         .action_lrfu = true}, {rerope_meta.p, rerope_meta.bytes});
         const auto handle = store.create_inactive();
         CHECK(handle.has_value(), "claim: allocate address");
         if (!handle) { throw std::logic_error("claim: address allocation failed"); }
@@ -219,8 +237,10 @@ void test_generation_device_claim() {
         store.commit_frontier(*handle, budget_pages * kTokens);
         CHECK(pool.reserved_pages() == 0 && pool.allocated_pages() == budget_pages,
               "claim: active budget should consume its exact reservation");
-        CHECK(!store.kvmem_generation_reclaim_due(*handle, budget_pages * kTokens),
-              "claim: reclaim must not run before crossing budget page 32");
+        CHECK(store.kvmem_reclaim_watermark_pages(*handle) == budget_pages - 1,
+              "claim: typed bounded lead must retain one growth page");
+        CHECK(!store.kvmem_generation_reclaim_due(*handle, (budget_pages - 1) * kTokens),
+              "claim: reclaim must not run before crossing early watermark page 31");
         CHECK(store.kvmem_generation_reclaim_due(*handle, budget_pages * kTokens + 1),
               "claim: page 33 must reclaim even with physical pool room left");
 
@@ -267,10 +287,19 @@ void test_generation_device_claim() {
         CHECK(competing.has_value(), "claim: competing lane reservation failed");
         CHECK(pool.available_pages() == 0 && pool.reserved_pages() == spare + reserve_pages,
               "claim: competing lane must leave zero unclaimed capacity");
+        const std::uint32_t lexical[] = {7, 8};
+        store.set_kvmem_lexical_pages(*handle, lexical);
+        CHECK(store.kvmem_lexical_restore_needed(*handle),
+              "claim: archived evidence must request restore even while the question fits");
+        CHECK(!store.kvmem_generation_reclaim_due(
+                  *handle, store.committed_frontier(*handle) + 1),
+              "claim: lexical restore must not depend on generation capacity pressure");
         const std::uint64_t stages_before = store.kvmem_usage().stage_in_blocks;
-        CHECK(store.kvmem_compact(*handle, budget_pages * kTokens, nullptr, {7, 8}) ==
+        CHECK(store.kvmem_compact(*handle, budget_pages * kTokens) ==
                   budget_pages * kTokens,
               "claim: completion window must grow using its own active reservation");
+        CHECK(!store.kvmem_lexical_restore_needed(*handle),
+              "claim: completed restore must make both evidence pages device-visible");
         CHECK(store.kvmem_usage().stage_in_blocks >= stages_before + reserve_pages,
               "claim: selected Host/NVMe blocks did not stage back in");
         CHECK(store.window_page_handles(*handle).size() == budget_pages &&
@@ -304,6 +333,9 @@ int main(int argc, char** argv) {
         return failures == 0 ? 0 : 1;
     }
     const bool exercise_cold = argc == 2 && std::strcmp(argv[1], "--cold") == 0;
+    const bool cancel_async = argc == 2 && std::strcmp(argv[1], "--async-cancel") == 0;
+    const bool exercise_async = cancel_async ||
+                                (argc == 2 && std::strcmp(argv[1], "--async") == 0);
     if (exercise_cold) {
         // One Host page forces the remaining archived pages through the disk
         // ladder; the same CPU oracle below verifies their K/V after restore.
@@ -316,6 +348,8 @@ int main(int argc, char** argv) {
 #endif
     }
     try {
+        DeviceContext device;
+        CopyGate copy_gate;
         KVPageGeometry geometry;
         geometry.page_tokens        = kTokens;
         geometry.device_plane_order = PagedKVPlaneOrder::PageMajor;
@@ -343,8 +377,11 @@ int main(int argc, char** argv) {
         LogicalKVPageStore pages(pool, kPages);
         // The store takes its window explicitly. The process-wide switch is resolved by the
         // front ends, so a direct construction has to ask for KVMem itself.
+        DeviceBuffer rerope_meta(3ULL * kPages * sizeof(std::int32_t));
         KVAddressSpaceStore store(pages, tables, 2, kPages,
-                                  ninfer::KvMemOptions{.enabled = true});
+                                  ninfer::KvMemOptions{.enabled = true},
+                                  {rerope_meta.p, rerope_meta.bytes});
+        if (exercise_async) { store.enable_kvmem_async_d2h(device); }
         std::printf("stores ok\n");
 
         // ---- activate + map 6 pages ----
@@ -451,6 +488,69 @@ int main(int argc, char** argv) {
             }
         }
         std::printf("filled 6 pages\n");
+        const auto source_codes = sim_codes;
+        const auto source_bits = sim_bits;
+
+        // Immutable K must survive working-page mutation and keep mixed-birth
+        // tail columns. It must never overwrite V. The CPU rephase oracle
+        // above independently decodes the represented initial INT8 boundary.
+        {
+            ninfer::kvmem::ImmutableKStore source(geometry);
+            ninfer::kvmem::ImmutableKStore::Record record;
+            const int physical = phys_of_slot(0);
+            source.capture(record, pool, physical, 0, 17, device.stream);
+            std::array<std::int32_t, 64> origins;
+            for (int t = 0; t < kTokens; ++t) { origins[t] = t; }
+            ninfer::kvmem::kvmem_rebuild_source_k(pool, physical, origins, 192, 64, device.stream);
+            source.capture(record, pool, physical, 192, 64, device.stream);
+            source.restore(record, pool, physical, 0, device.stream);
+            for (int l = 0; l < kLayers; ++l) {
+                const auto code_bytes = static_cast<std::size_t>(elems_per_page(256));
+                const auto scale_bytes = static_cast<std::size_t>(elems_per_page(4) * 2);
+                std::vector<std::int8_t> actual(code_bytes);
+                std::vector<unsigned short> scales(scale_bytes / 2);
+                CUDA_CHECK(cudaMemcpy(actual.data(), static_cast<std::byte*>(planes[l*4].data) +
+                    physical * code_bytes, code_bytes, cudaMemcpyDeviceToHost));
+                CUDA_CHECK(cudaMemcpy(scales.data(), static_cast<std::byte*>(planes[l*4+2].data) +
+                    physical * scale_bytes, scale_bytes, cudaMemcpyDeviceToHost));
+                for (int h = 0; h < kHeads; ++h) for (int t = 0; t < kTokens; ++t) {
+                    const auto si = sim_idx(0,l,h,t);
+                    std::int8_t intermediate[kDim], expected[kDim];
+                    unsigned short middle_scales[kGroups], expected_scales[kGroups];
+                    if (t < 17) {
+                        std::copy_n(source_codes.data()+si*kDim,kDim,expected);
+                        std::copy_n(source_bits.data()+si*kGroups,kGroups,expected_scales);
+                    } else {
+                        expected_rephase(source_codes.data()+si*kDim,source_bits.data()+si*kGroups,
+                                          t,192+t,intermediate,middle_scales);
+                        expected_rephase(intermediate,middle_scales,192+t,t,expected,expected_scales);
+                    }
+                    for (int d=0;d<kDim;++d) {
+                        CHECK(std::abs(int(actual[in_page_elems(256,h,t,d)])-int(expected[d]))<=1,
+                              "immutable mixed-column CPU oracle layer=%d h=%d t=%d d=%d",l,h,t,d);
+                    }
+                    for (int g=0;g<kGroups;++g) {
+                        const auto actual_scale=__half2float(__ushort_as_half(scales[in_page_elems(4,h,t,g)]));
+                        const auto expected_scale=__half2float(__ushort_as_half(expected_scales[g]));
+                        CHECK(std::abs(actual_scale-expected_scale)<2e-5f,
+                              "immutable source scale oracle layer=%d h=%d t=%d g=%d",l,h,t,g);
+                    }
+                }
+                // Reset fixture; later cold rounds must start at its original boundary.
+                for (int p=l*4;p<l*4+4;++p) {
+                    const auto size=host_plane[p].size()/6;
+                    CUDA_CHECK(cudaMemcpy(static_cast<std::byte*>(planes[p].data)+physical*size,
+                                           host_plane[p].data(),size,cudaMemcpyHostToDevice));
+                }
+            }
+            record.columns = 17; // rollback discards the appended source suffix
+            source.capture(record,pool,physical,0,64,device.stream);
+            CHECK(record.positions[16]==16 && record.positions[17]==17 &&
+                      record.positions[63]==63,"immutable rollback must recapture new columns");
+            source.release(record);
+            CHECK(source.occupied_bytes()==0 && !record.backing.valid(),
+                  "immutable source release reclaims backing record");
+        }
 
         // Ledger snapshot before compaction: blocks 0..5 resident at their
         // natural slots.
@@ -460,9 +560,71 @@ int main(int argc, char** argv) {
         }
         store.deactivate(*handle);
         std::printf("deactivated\n");
+        const auto original_handles = store.window_page_handles(*handle);
+        if (exercise_async) {
+            CHECK(pages.can_destructive_truncate_inactive(original_handles[1], kTokens - 1),
+                  "async: unpinned source initially permits a version change");
+        }
 
         // ---- compact 6 pages -> 4 ----
-        const std::uint32_t w1 = store.kvmem_compact(*handle, 4 * kTokens);
+        if (exercise_async) {
+            CHECK(cudaLaunchHostFunc(device.transfer_stream, block_copy_until_released,
+                                     &copy_gate) == cudaSuccess,
+                  "async: queue controlled copy delay");
+        }
+        const std::uint32_t w1 = store.kvmem_compact(
+            *handle, 4 * kTokens, exercise_async ? device.stream : nullptr);
+        if (exercise_async) {
+            CHECK(store.kvmem_inflight_pages() == 2, "async: two source pages remain in flight");
+            CHECK(pool.allocated_pages() == 6, "async: source storage is not free before copy");
+            CHECK(!pool.reserve(3),
+                  "async: promised source releases are not allocatable free pages");
+            std::uint32_t pinned = 0;
+            for (const auto logical : original_handles) {
+                if (pages.source_pins(logical) == 0) { continue; }
+                ++pinned;
+                CHECK(!pages.can_release_reference(logical, false),
+                      "async: in-flight source reference cannot be released");
+                const auto epoch = pages.content_epoch(logical);
+                bool refused = false;
+                try { pages.destructive_truncate_inactive(logical, kTokens - 1); }
+                catch (const std::logic_error&) { refused = true; }
+                CHECK(refused && pages.content_epoch(logical) == epoch,
+                      "async: source pin must prevent a stale epoch publication");
+            }
+            CHECK(pinned == 2 && store.kvmem_usage().host_bytes >=
+                                      2 * plan_host_kv_page_layout(geometry).page_stride,
+                  "async: source pins and destination quota remain owned");
+            CHECK(!store.retire_kvmem_transfers(), "async: incomplete batch cannot publish");
+            if (cancel_async) {
+                CHECK(store.release(*handle), "async cancel: release inactive address");
+                CHECK(copy_gate.finished.load(std::memory_order_acquire),
+                      "async cancel: address release must drain queued access");
+                CHECK(pool.allocated_pages() == 0 && store.kvmem_usage().host_bytes == 0 &&
+                          store.kvmem_inflight_pages() == 0,
+                      "async cancel: held sources and destinations must be reclaimed");
+                const auto next = store.create_inactive();
+                CHECK(next.has_value() && !store.valid(*handle),
+                      "async cancel: reused address must invalidate old generation");
+                if (next) {
+                    store.activate(*next, 1, 0);
+                    store.ensure_mapped_to_tokens(*next, kTokens, device.stream);
+                    store.commit_frontier(*next, kTokens);
+                    store.deactivate(*next);
+                    CHECK(store.release(*next), "async cancel: next request can release");
+                }
+                device.synchronize();
+                CHECK(cudaFree(backing) == cudaSuccess, "async cancel: free backing");
+                std::printf("async cancel failures=%d VERDICT: %s\n", failures,
+                            failures == 0 ? "PASS" : "FAIL");
+                return failures == 0 ? 0 : 1;
+            }
+            copy_gate.open.store(true, std::memory_order_release);
+            CHECK(store.retire_kvmem_transfers(true), "async: retire after copy completion");
+            CHECK(store.kvmem_inflight_pages() == 0 && pool.allocated_pages() == 4,
+                  "async: completed batch releases its held source pages");
+            device.synchronize();
+        }
         CHECK(w1 == 4 * kTokens, "compact window = %u (want 256)", w1);
         std::printf("compact #1 -> window %u tokens\n", w1);
 
@@ -539,9 +701,17 @@ int main(int argc, char** argv) {
                                         sim_bits[si * kGroups + static_cast<std::size_t>(g)];
                                 }
                             } else {
-                                expected_rephase(&sim_codes[si * kDim], &sim_bits[si * kGroups],
-                                                 baked_pre + t, s * kTokens + t, want_codes,
-                                                 want_bits);
+                                const bool cold = resident[static_cast<std::size_t>(blk)] == 0;
+                                const auto* codes = cold ? source_codes.data() : sim_codes.data();
+                                const auto* bits = cold ? source_bits.data() : sim_bits.data();
+                                const int from = cold ? blk*kTokens : baked_pre;
+                                if (cold && from==s*kTokens) {
+                                    std::copy_n(codes+si*kDim,kDim,want_codes);
+                                    std::copy_n(bits+si*kGroups,kGroups,want_bits);
+                                } else {
+                                    expected_rephase(codes+si*kDim,bits+si*kGroups,
+                                                     from+t,s*kTokens+t,want_codes,want_bits);
+                                }
                                 for (int d = 0; d < kDim; ++d) {
                                     new_codes[si * kDim + static_cast<std::size_t>(d)] =
                                         want_codes[d];
@@ -633,7 +803,22 @@ int main(int argc, char** argv) {
         // Expected selection {0,1,4,5}: 1 restored from the host arena and
         // re-phased 64->64 (identity rotation, but a full requantize pass);
         // 2 and 3 are newly evicted.
-        const std::uint32_t w2 = store.kvmem_compact(*handle, 4 * kTokens, nullptr, {1});
+        if (exercise_async) {
+            copy_gate.open.store(false, std::memory_order_release);
+            copy_gate.finished.store(false, std::memory_order_release);
+            CHECK(cudaLaunchHostFunc(device.transfer_stream, block_copy_until_released,
+                                     &copy_gate) == cudaSuccess,
+                  "async: delay required H2D restore");
+        }
+        const std::uint32_t w2 = store.kvmem_compact(*handle, 4 * kTokens, exercise_async ? device.stream : nullptr, {1});
+        if (exercise_async) {
+            CHECK(copy_gate.finished.load(std::memory_order_acquire) &&
+                      store.kvmem_usage().async_restore_submitted == 1,
+                  "async: required history must finish H2D before compact returns");
+            CHECK(store.kvmem_usage().async_wait_us > 0,
+                  "async: uncovered required-page delay must be reported");
+            copy_gate.open.store(true, std::memory_order_release);
+        }
         CHECK(w2 == 4 * kTokens, "compact #2 window = %u", w2);
         int sel2[4] = {0, 1, 4, 5};
         verify_window(sel2, 4);
@@ -650,7 +835,7 @@ int main(int argc, char** argv) {
         // 2-page stage-in merges into 1 H2D run (plus 2 D2H runs for non-adjacent
         // device pages 1 and 4 -> 3 runs total instead of 4).
         const std::uint64_t runs_before_c3 = store.kvmem_usage().transfer_runs;
-        const std::uint32_t w3 = store.kvmem_compact(*handle, 4 * kTokens, nullptr, {2, 3});
+        const std::uint32_t w3 = store.kvmem_compact(*handle, 4 * kTokens, exercise_async ? device.stream : nullptr, {2, 3});
         CHECK(w3 == 4 * kTokens, "compact #3 window = %u", w3);
         int sel3[4] = {0, 2, 3, 5};
         verify_window(sel3, 4);
@@ -693,16 +878,66 @@ int main(int argc, char** argv) {
 
             // Re-select the page that was Host-backed, then spilled to disk;
             // verify its recovered K/V with the independent CPU oracle.
-            CHECK(store.kvmem_compact(*handle, 4 * kTokens, nullptr, {1}) == 4 * kTokens,
+            CHECK(store.kvmem_compact(*handle, 4 * kTokens, exercise_async ? device.stream : nullptr, {1}) == 4 * kTokens,
                   "compact #5 former-Host cold restore");
             int sel5[4] = {0, 1, 4, 5};
             std::printf("verifying cold compact #5\n");
             verify_window(sel5, 4);
         }
 
+        if (exercise_async) {
+            // A later batch must not inherit the first batch's ready state.
+            CHECK(store.release(*handle), "async: finish the first address before reuse");
+            handle = store.create_inactive();
+            if (!handle) { throw std::runtime_error("async: address reuse failed"); }
+            store.activate(*handle, kPages, 0);
+            store.ensure_mapped_to_tokens(*handle, 6 * kTokens, device.stream);
+            store.commit_frontier(*handle, 6 * kTokens);
+            copy_gate.open.store(false, std::memory_order_release);
+            copy_gate.finished.store(false, std::memory_order_release);
+            CHECK(cudaLaunchHostFunc(device.transfer_stream, block_copy_until_released,
+                                     &copy_gate) == cudaSuccess,
+                  "async: delay the second batch independently");
+            CHECK(store.kvmem_compact(*handle, 4 * kTokens, device.stream) == 4 * kTokens,
+                  "async: second batch compacts");
+            CHECK(store.kvmem_inflight_pages() == 2 && !store.retire_kvmem_transfers(),
+                  "async: old completion must not retire the new batch");
+            // Six allocated + two reserved fill this pool. Re-establishing
+            // four growth pages must wait for actual release, not spend a promise.
+            store.resize_entitlement(*handle, kPages);
+            CHECK(copy_gate.finished.load(std::memory_order_acquire) &&
+                      pool.allocated_pages() == 4 && pool.reserved_pages() == 4 &&
+                      store.kvmem_inflight_pages() == 0 &&
+                      store.kvmem_usage().async_completed ==
+                          store.kvmem_usage().async_submitted,
+                  "async: full pool must harvest before reserving growth");
+            copy_gate.open.store(true, std::memory_order_release);
+            store.deactivate(*handle);
+        }
         CHECK(store.release(*handle), "release KVMem address");
         CHECK(store.kvmem_cold_bytes() == 0, "address release reclaims cold records");
+        CHECK(pool.allocated_pages() == 0 && pool.reserved_pages() == 0 &&
+                  store.kvmem_usage().host_bytes == 0 && store.kvmem_inflight_pages() == 0,
+              "address release must reclaim all Device, Host and in-flight storage");
 
+        // Reused prefill may map an empty growth tail before reselection.
+        // It must never become a committed interior page or checkpoint coverage.
+        handle = store.create_inactive();
+        if (!handle) { throw std::runtime_error("unwritten-tail address creation failed"); }
+        store.activate(*handle, kPages, 0);
+        store.ensure_mapped_to_tokens(*handle, 7 * kTokens, device.stream);
+        store.commit_frontier(*handle, 5 * kTokens);
+        const auto written_window = store.kvmem_compact(
+            *handle, 4 * kTokens, exercise_async ? device.stream : nullptr);
+        CHECK(written_window == 4 * kTokens &&
+                  store.committed_frontier(*handle) == written_window,
+              "unwritten growth pages entered the committed window");
+        (void)store.retire_kvmem_transfers(true);
+        store.set_checkpoint_requirement(*handle, written_window);
+        store.deactivate(*handle);
+        CHECK(store.release(*handle) && pool.allocated_pages() == 0 &&
+                  pool.reserved_pages() == 0,
+              "unwritten-tail checkpoint leaked pages or reservation");
         std::printf("failures=%d  VERDICT: %s\n", failures, failures == 0 ? "PASS" : "FAIL");
         cudaFree(backing);
         return failures == 0 ? 0 : 1;

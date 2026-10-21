@@ -94,11 +94,13 @@ int main() {
         LogicalKVPageStore pages(pool, kPool);
         // The store takes its window and headroom explicitly: the front ends resolve them, so a
         // direct construction has to ask for them itself.
+        DeviceBuffer rerope_meta(3ULL * kPool * sizeof(std::int32_t));
+        const DeviceSpan rerope_workspace{rerope_meta.p, rerope_meta.bytes};
         KVAddressSpaceStore store(
             pages, tables, 2, kPool,
             KvMemOptions{.enabled = true,
                          .budget_tokens = kBudgetPages * kTokens,
-                         .gen_reserve_tokens = kReservePages * kTokens});
+                         .gen_reserve_tokens = kReservePages * kTokens}, rerope_workspace);
         CHECK(store.kvmem_enabled(), "KVMem did not enable itself");
         CHECK(store.kvmem_gen_reserve_tokens() == kReservePages * kTokens,
               "generation headroom resolved to %u (want %u)", store.kvmem_gen_reserve_tokens(),
@@ -108,7 +110,7 @@ int main() {
         {
             KVAddressSpaceStore narrow(pages, tables, 2, kPool,
                                        KvMemOptions{.enabled = true,
-                                                    .budget_tokens = kPool * kTokens});
+                                                    .budget_tokens = kPool * kTokens}, rerope_workspace);
             CHECK(narrow.kvmem_gen_reserve_tokens() == 0,
                   "a pool that only spans the window reserved %u tokens",
                   narrow.kvmem_gen_reserve_tokens());
@@ -116,7 +118,7 @@ int main() {
                 pages, tables, 2, kPool,
                 KvMemOptions{.enabled = true,
                              .budget_tokens = KVAddressSpaceStore::kMinimumWindowPages * kTokens,
-                             .gen_reserve_tokens = kPool * kTokens});
+                             .gen_reserve_tokens = kPool * kTokens}, rerope_workspace);
             CHECK(greedy.kvmem_gen_reserve_tokens() ==
                       (kPool - KVAddressSpaceStore::kMinimumWindowPages) * kTokens,
                   "an oversized headroom was not clamped: %u",
@@ -124,7 +126,7 @@ int main() {
             KVAddressSpaceStore off(pages, tables, 2, kPool,
                                     KvMemOptions{.enabled = true,
                                                  .budget_tokens = kBudgetPages * kTokens,
-                                                 .gen_reserve_tokens = 0});
+                                                 .gen_reserve_tokens = 0}, rerope_workspace);
             CHECK(off.kvmem_gen_reserve_tokens() == 0, "zero headroom was not honored: %u",
                   off.kvmem_gen_reserve_tokens());
         }

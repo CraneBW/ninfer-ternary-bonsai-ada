@@ -28,10 +28,16 @@ namespace ninfer::ops {
  *   ar_rope_positions, and ar_valid_columns are I32 [B,C] with C>=max(P-1,1), contiguous rows and
  *   one shared step stride at least B; only the first max(P-1,1) steps are written, so a
  *   fixed-capacity round buffer is passed unchanged for a shorter proposal. All
- *   other tensors are contiguous I32 [B]. B>=1, 1<=K<=7, 1<=P<=15, 0<=accepted[b]<=K,
+ *   other tensors are contiguous I32 [B]. B>=1, 1<=K<=15, 1<=P<=15, 0<=accepted[b]<=K,
  *   licensed_counts[b]=accepted[b]+1, updated_frontiers and remaining_budgets are non-negative,
  *   and max_context is positive. The Op writes every output slot, including safe invalid-tail
  *   values. Inputs remain unchanged. No workspace or other state is used.
+ *
+ * Original-position KV mode may supply updated_logical_frontiers. In this mode
+ * `updated_frontiers` instead carries the pre-accept compact base C; the Op uses
+ * C+licensed_counts for AR cache positions and the already-updated logical P'
+ * for context_after. rope_deltas then equals logical_rope_delta-(C-P).
+ * A null pointer retains the original updated-frontier contract exactly.
  */
 void mtp_prepare_next_round(const Tensor& verify_ids, const Tensor& next_anchors,
                             const Tensor& accepted, const Tensor& updated_frontiers,
@@ -39,6 +45,7 @@ void mtp_prepare_next_round(const Tensor& verify_ids, const Tensor& next_anchors
                             const Tensor& rope_deltas, Tensor& alignment_ids, Tensor& next_extents,
                             Tensor& ar_positions, Tensor& ar_rope_positions,
                             Tensor& ar_valid_columns, std::int32_t proposal_drafts,
-                            std::int32_t max_context, cudaStream_t stream);
+                            std::int32_t max_context, cudaStream_t stream,
+                            const Tensor* updated_logical_frontiers = nullptr);
 
 } // namespace ninfer::ops
