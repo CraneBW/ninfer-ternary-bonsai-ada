@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdio>
 #include <exception>
 #include <cstdlib>
@@ -61,11 +62,41 @@ public:
         }
         staging_ = std::make_unique<PinnedHostBuffer>(bytes_);
         backing_ = std::make_unique<ColdKVStore>(bytes_);
+        if (source_read_ahead_enabled() && event_pipeline_enabled()) {
+            // cudaHostAlloc may wait on outstanding transfers. Allocate before
+            // the first async demotion, never in its intended overlap interval.
+            read_ahead_staging_ = std::make_unique<PinnedHostBuffer>(bytes_);
+            event_pipeline_ = std::make_unique<EventPipeline>();
+        }
     }
 
     ~ImmutableKStore() {
+        // The second pinned slot and the stable source backing must outlive
+        // every previously submitted per-layer H2D. In particular, an
+        // exception before the final ready event cannot abandon a DMA reader.
+        if (layer_source_stream_ && cudaStreamSynchronize(layer_source_stream_) != cudaSuccess) {
+            std::terminate();
+        }
         (void)drain_pipeline_reads();
         source_workers_.reset(); // Join workers while backing and all pinned slots still live.
+        if (stage_trace_enabled() && stage_timing_.restore_pages != 0) {
+            // GPU event durations cover just the copies and the re-RoPE kernel;
+            // overlapping prefetch waits are host time and must not be added to them.
+            std::fprintf(stderr,
+                "KVMEM_STAGE_SOURCE pages=%llu moved=%llu read_sync_us=%llu "
+                "read_wait_us=%llu h2d_gpu_ms=%.3f rebuild_gpu_ms=%.3f "
+                "gpu_timed_pages=%llu\n",
+                static_cast<unsigned long long>(stage_timing_.restore_pages),
+                static_cast<unsigned long long>(stage_timing_.moved_pages),
+                static_cast<unsigned long long>(stage_timing_.read_sync_us),
+                static_cast<unsigned long long>(stage_timing_.read_wait_us),
+                stage_timing_.h2d_gpu_ms, stage_timing_.rebuild_gpu_ms,
+                static_cast<unsigned long long>(stage_timing_.gpu_timed_pages));
+        }
+        if (event_pipeline_pages_ && std::getenv("NINFER_KVMEM_PREFIX_TRACE")) {
+            std::fprintf(stderr, "SOURCE_EVENT_PIPELINE pages=%llu staging_bytes=%zu slots=2\n",
+                         static_cast<unsigned long long>(event_pipeline_pages_), staging_bytes());
+        }
         if (pipeline_trace_emitted_ && r26_bundle_trace()) {
             std::fprintf(stderr,
                 "R26_SOURCE_PIPELINE_FINAL read_submits=%llu groups_started=%llu "
@@ -82,13 +113,44 @@ public:
         }
     }
 
+    template<class Writer> void save_record(const Record& record, Writer& out) {
+        drain_layer_source();
+        out.pod(record.columns); out.pod(record.positions);
+        out.pod(static_cast<std::uint8_t>(record.backing.valid()));
+        if (record.backing.valid()) {
+            backing_->load(record.backing,{static_cast<std::byte*>(staging_->data()),bytes_});
+            out.write(staging_->data(),bytes_);
+        }
+    }
+    template<class Reader> void load_record(Record& record, Reader& in) {
+        drain_layer_source();
+        record.columns = in.template pod<std::uint32_t>();
+        record.positions = in.template pod<decltype(record.positions)>();
+        const auto present = in.template pod<std::uint8_t>();
+        if (record.columns > kPagedKVPageSize || present > 1 ||
+            (record.columns != 0 && !present)) { throw std::invalid_argument("snapshot raw-K coverage"); }
+        if (present) {
+            const auto snapshot=in.stable_backing();
+            const auto offset=in.position();
+            in.read(staging_->data(),bytes_); // full per-consume integrity still applies
+            record.backing = snapshot ? backing_->adopt_snapshot_extent(snapshot,offset)
+                : backing_->store({static_cast<const std::byte*>(staging_->data()),bytes_});
+        }
+    }
+
     void release(Record& record) noexcept {
+        if (layer_source_stream_ && cudaStreamSynchronize(layer_source_stream_) != cudaSuccess) {
+            std::terminate();
+        }
+        layer_source_stream_ = nullptr;
+        layer_source_count_ = 0;
         if (record.backing.valid()) { (void)backing_->release(record.backing); }
         record = {};
     }
 
     void capture(Record& record, DeviceKVPagePool& pool, std::int32_t physical,
                  std::int32_t baked, std::uint32_t columns, cudaStream_t stream) {
+        drain_layer_source();
         if (columns > kPagedKVPageSize || columns < record.columns) {
             throw std::logic_error("immutable K capture coverage is invalid");
         }
@@ -109,11 +171,18 @@ public:
 
     void restore(const Record& record, DeviceKVPagePool& pool, std::int32_t physical,
                  std::int32_t destination, cudaStream_t stream) {
+        drain_layer_source();
         if (!record.backing.valid() || record.columns == 0) {
             throw std::logic_error("immutable K restore has no committed source");
         }
+        const auto read_start = std::chrono::steady_clock::now();
         backing_->load(record.backing,
                        {static_cast<std::byte*>(staging_->data()), bytes_});
+        if (stage_trace_enabled()) {
+            stage_timing_.read_sync_us += static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - read_start).count());
+        }
         restore_loaded(record, pool, physical, destination, stream, staging_->data());
     }
 
@@ -122,6 +191,7 @@ public:
     // completes its original copy/rebuild/sync before that pinned slot may be refilled.
     void restore_many(std::span<const RestoreRequest> requests, DeviceKVPagePool& pool,
                        cudaStream_t stream) {
+        drain_layer_source();
         if (!source_read_ahead_enabled() || requests.size() < 2) {
             for (const auto& request : requests) {
                 if (request.record == nullptr) {
@@ -129,6 +199,10 @@ public:
                 }
                 restore(*request.record, pool, request.physical, request.destination, stream);
             }
+            return;
+        }
+        if (event_pipeline_enabled() && stream != nullptr && stream != cudaStreamLegacy) {
+            restore_event_pipeline(requests, pool, stream);
             return;
         }
         if (r26_bundle_enabled() && source_pipeline_geometry(pool)) {
@@ -166,7 +240,13 @@ public:
         try {
             for (std::size_t i = 0; i < requests.size(); ++i) {
                 auto& slot = slots[i % slots.size()];
+                const auto wait_start = std::chrono::steady_clock::now();
                 slot.ready.get();
+                if (stage_trace_enabled()) {
+                    stage_timing_.read_wait_us += static_cast<std::uint64_t>(
+                        std::chrono::duration_cast<std::chrono::microseconds>(
+                            std::chrono::steady_clock::now() - wait_start).count());
+                }
                 const auto& source = *requests[i].record;
                 if (slot.owner != requests[i].record ||
                     source.backing != slot.captured.backing ||
@@ -189,6 +269,127 @@ public:
         }
     }
 
+    // Restricted Main16 producer: at most two independent immutable K pages
+    // occupy the store's *existing* pinned slots. The disk reads and identity
+    // validation finish on the owner thread. H2D and original K rephase are
+    // then enqueued for one attention-plane group at a time by enqueue_layer.
+    // Unlike restore_many, no producer stream sync is performed on success.
+    void prepare_layer_sources(std::span<const RestoreRequest> requests,
+                               DeviceKVPagePool& pool, cudaStream_t producer) {
+        drain_layer_source();
+        if (requests.empty() || requests.size() > layer_source_slots_.size() ||
+            producer == nullptr || producer == cudaStreamLegacy ||
+            !source_pipeline_geometry(pool) || pool.geometry().planes.size() != 64) {
+            throw std::invalid_argument("source layer pipeline needs one/two Main16 pages");
+        }
+        if (!read_ahead_staging_) {
+            read_ahead_staging_ = std::make_unique<PinnedHostBuffer>(bytes_);
+        }
+        for (std::size_t i = 0; i < requests.size(); ++i) {
+            const auto& request = requests[i];
+            if (!request.record || request.physical < 0 ||
+                static_cast<std::uint32_t>(request.physical) >= pool.capacity_pages() ||
+                request.destination < 0 || !request.record->backing.valid() ||
+                request.record->columns == 0 || request.record->columns > kPagedKVPageSize ||
+                request.destination > std::numeric_limits<std::int32_t>::max() -
+                    static_cast<std::int32_t>(request.record->columns - 1) ||
+                !backing_->valid(request.record->backing) ||
+                (i == 1 && request.physical == requests[0].physical)) {
+                throw std::logic_error("source layer pipeline stale/overlapping target");
+            }
+        }
+        const auto start = std::chrono::steady_clock::now();
+        for (std::size_t i = 0; i < requests.size(); ++i) {
+            const auto& request = requests[i];
+            auto& slot = layer_source_slots_[i];
+            slot.owner = request.record;
+            slot.captured = *request.record;
+            slot.physical = request.physical;
+            slot.destination = request.destination;
+            slot.data = i == 0 ? staging_->data() : read_ahead_staging_->data();
+            backing_->load(slot.captured.backing,
+                           {static_cast<std::byte*>(slot.data), bytes_});
+            if (slot.owner->backing != slot.captured.backing ||
+                slot.owner->columns != slot.captured.columns ||
+                slot.owner->positions != slot.captured.positions ||
+                !backing_->valid(slot.captured.backing)) {
+                throw std::logic_error("source layer pipeline owner changed after read");
+            }
+            slot.moved = false;
+            for (std::uint32_t token = 0; token < slot.captured.columns; ++token) {
+                slot.moved |= slot.captured.positions[token] !=
+                    slot.destination + static_cast<std::int32_t>(token);
+            }
+        }
+        if (stage_trace_enabled()) {
+            stage_timing_.read_sync_us += static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - start).count());
+        }
+        layer_source_stream_ = producer;
+        layer_source_count_ = requests.size();
+        next_layer_source_ = 0;
+    }
+
+    void enqueue_layer_source(std::uint32_t layer, DeviceKVPagePool& pool,
+                              cudaStream_t producer) {
+        if (!layer_source_stream_ || producer != layer_source_stream_ ||
+            layer >= 16 || layer != next_layer_source_ || layer_source_count_ == 0) {
+            throw std::logic_error("source layer producer order/owner is invalid");
+        }
+        std::array<SourcePageRestore, 2> moved{};
+        std::size_t moved_count = 0;
+        for (std::size_t i = 0; i < layer_source_count_; ++i) {
+            auto& slot = layer_source_slots_[i];
+            // Exactly the captured column extent, not unwritten tail cells:
+            // a later append may write the remainder of a partial page.
+            for (const std::size_t plane : {static_cast<std::size_t>(layer) * 4,
+                                            static_cast<std::size_t>(layer) * 4 + 2}) {
+                const auto& dst = pool.plane(plane);
+                const auto& packed = layout_.planes[plane];
+                const auto heads = pool.geometry().planes[plane].head_extent;
+                const auto row_bytes = packed.head_payload_bytes / kPagedKVPageSize;
+                auto* device = static_cast<std::byte*>(dst.data) +
+                    static_cast<std::int64_t>(slot.physical) * dst.nb[3];
+                auto* source = static_cast<std::byte*>(slot.data) + offsets_[plane];
+                CUDA_CHECK(cudaMemcpy2DAsync(
+                    device, static_cast<std::size_t>(dst.nb[2]), source,
+                    packed.head_payload_bytes,
+                    slot.captured.columns * row_bytes, heads,
+                    cudaMemcpyHostToDevice, producer));
+            }
+            if (slot.moved) {
+                moved[moved_count++] = SourcePageRestore{
+                    slot.physical, slot.captured.positions,
+                    slot.destination, slot.captured.columns};
+            }
+        }
+        if (moved_count != 0) {
+            kvmem_rebuild_source_k_batch_layer(pool,
+                std::span<const SourcePageRestore>(moved.data(), moved_count), layer, producer);
+        }
+        ++next_layer_source_;
+        if (next_layer_source_ == 16) {
+            restores_ += layer_source_count_;
+            stage_timing_.restore_pages += layer_source_count_;
+            for (std::size_t i = 0; i < layer_source_count_; ++i) {
+                stage_timing_.moved_pages += static_cast<std::uint64_t>(layer_source_slots_[i].moved);
+            }
+        }
+    }
+
+    void drain_layer_source() {
+        if (!layer_source_stream_) { return; }
+        CUDA_CHECK(cudaStreamSynchronize(layer_source_stream_));
+        layer_source_stream_ = nullptr;
+        layer_source_count_ = 0;
+        next_layer_source_ = 0;
+    }
+
+    [[nodiscard]] std::size_t pending_layer_source_pages() const noexcept {
+        return layer_source_count_;
+    }
+
     [[nodiscard]] std::size_t occupied_bytes() const noexcept { return backing_->occupied_bytes(); }
     [[nodiscard]] std::size_t file_capacity_bytes() const noexcept { return backing_->allocated_bytes(); }
     [[nodiscard]] std::size_t staging_bytes() const noexcept {
@@ -200,11 +401,171 @@ public:
     [[nodiscard]] std::uint64_t restores() const noexcept { return restores_; }
 
 private:
+    struct LayerSourceSlot {
+        const Record* owner = nullptr;
+        Record captured;
+        std::int32_t physical = -1;
+        std::int32_t destination = 0;
+        void* data = nullptr;
+        bool moved = false;
+    };
+    struct StageTiming {
+        std::uint64_t restore_pages = 0;
+        std::uint64_t moved_pages = 0;
+        std::uint64_t read_sync_us = 0;
+        std::uint64_t read_wait_us = 0;
+        std::uint64_t gpu_timed_pages = 0;
+        double h2d_gpu_ms = 0;
+        double rebuild_gpu_ms = 0;
+    };
+    struct TimedEvent {
+        cudaEvent_t value = nullptr;
+        TimedEvent() { CUDA_CHECK(cudaEventCreate(&value)); }
+        ~TimedEvent() { if (value) { (void)cudaEventDestroy(value); } }
+        TimedEvent(const TimedEvent&) = delete;
+        TimedEvent& operator=(const TimedEvent&) = delete;
+    };
+    struct TimedStages {
+        TimedEvent before_copy;
+        TimedEvent after_copy;
+        TimedEvent after_rebuild;
+    };
+    static bool stage_trace_enabled() {
+        static const bool enabled = [] {
+            const char* value = std::getenv("NINFER_KVMEM_STAGE_TRACE");
+            if (!value || std::strcmp(value, "0") == 0) { return false; }
+            if (std::strcmp(value, "1") == 0) { return true; }
+            throw std::invalid_argument("NINFER_KVMEM_STAGE_TRACE must be 0 or 1");
+        }();
+        return enabled;
+    }
     struct CopyBatchDescriptors {
         std::array<void*, 32> destinations{};
         std::array<const void*, 32> sources{};
         std::array<std::size_t, 32> sizes{};
     };
+    struct PipelineEvent {
+        cudaEvent_t value = nullptr;
+        PipelineEvent() { CUDA_CHECK(cudaEventCreateWithFlags(&value, cudaEventDisableTiming)); }
+        ~PipelineEvent() { if (value) { (void)cudaEventDestroy(value); } }
+        PipelineEvent(const PipelineEvent&) = delete;
+        PipelineEvent& operator=(const PipelineEvent&) = delete;
+    };
+    struct EventPipeline {
+        cudaStream_t copy = nullptr;
+        PipelineEvent start;
+        std::array<PipelineEvent, 2> ready;
+        EventPipeline() { CUDA_CHECK(cudaStreamCreateWithFlags(&copy, cudaStreamNonBlocking)); }
+        ~EventPipeline() { if (copy) { (void)cudaStreamDestroy(copy); } }
+    };
+    static bool event_pipeline_enabled() {
+        static const bool value = [] {
+            const char* flag = std::getenv("NINFER_KVMEM_SOURCE_EVENT_PIPELINE");
+            if (!flag || std::strcmp(flag, "0") == 0) { return false; }
+            if (std::strcmp(flag, "1") == 0) { return true; }
+            throw std::invalid_argument("NINFER_KVMEM_SOURCE_EVENT_PIPELINE must be 0 or 1");
+        }();
+        return value;
+    }
+
+    // Sync/Async ledger46 uses distinct submitted/retired ownership. Adapted here
+    // to two source-K slots: file ready -> copy ready -> compute wait. KVMem/ActKV
+    // immutable owner checks remain authoritative. No requantization changes.
+    void restore_event_pipeline(std::span<const RestoreRequest> requests, DeviceKVPagePool& pool,
+                                cudaStream_t stream) {
+        std::vector<std::int32_t> targets;
+        targets.reserve(requests.size());
+        for (const auto& request : requests) {
+            if (!request.record || request.physical < 0 ||
+                static_cast<std::uint32_t>(request.physical) >= pool.capacity_pages() ||
+                !request.record->backing.valid() || request.record->columns == 0 ||
+                request.record->columns > kPagedKVPageSize || request.destination < 0 ||
+                request.destination > std::numeric_limits<std::int32_t>::max() -
+                    static_cast<std::int32_t>(request.record->columns - 1) ||
+                !backing_->valid(request.record->backing)) {
+                throw std::logic_error("source-K event pipeline has invalid owner or extent");
+            }
+            targets.push_back(request.physical);
+        }
+        std::sort(targets.begin(), targets.end());
+        if (std::adjacent_find(targets.begin(), targets.end()) != targets.end()) {
+            throw std::logic_error("source-K event pipeline requires disjoint device targets");
+        }
+        if (!event_pipeline_) { event_pipeline_ = std::make_unique<EventPipeline>(); }
+        if (!read_ahead_staging_) { read_ahead_staging_ = std::make_unique<PinnedHostBuffer>(bytes_); }
+        auto& events = *event_pipeline_;
+        struct Slot {
+            Record captured;
+            const Record* owner = nullptr;
+            void* data = nullptr;
+            CopyBatchDescriptors descriptors;
+            bool copied = false;
+            std::future<void> read;
+        };
+        std::array<Slot, 2> slots;
+        slots[0].data = staging_->data();
+        slots[1].data = read_ahead_staging_->data();
+        // Retire every earlier compute access before any transfer overwrites a target.
+        CUDA_CHECK(cudaEventRecord(events.start.value, stream));
+        CUDA_CHECK(cudaStreamWaitEvent(events.copy, events.start.value, 0));
+        const auto start = [&](std::size_t i) {
+            auto& slot = slots[i % 2];
+            if (slot.copied) {
+                // Source bytes/descriptors can be reused after H2D, without waiting
+                // for the independent rebuild kernel on the compute stream.
+                CUDA_CHECK(cudaEventSynchronize(events.ready[i % 2].value));
+                slot.copied = false;
+            }
+            slot.owner = requests[i].record;
+            slot.captured = *slot.owner;
+            slot.read = backing_->prefetch(slot.captured.backing,
+                {static_cast<std::byte*>(slot.data), bytes_});
+        };
+        std::uint64_t completed = 0;
+        try {
+            start(0); start(1);
+            for (std::size_t i = 0; i < requests.size(); ++i) {
+                auto& slot = slots[i % 2];
+                slot.read.get();
+                if (slot.owner != requests[i].record ||
+                    slot.owner->backing != slot.captured.backing ||
+                    slot.owner->columns != slot.captured.columns ||
+                    slot.owner->positions != slot.captured.positions ||
+                    !backing_->valid(slot.captured.backing)) {
+                    throw std::logic_error("source-K event pipeline owner changed");
+                }
+                copy_columns(pool, requests[i].physical, 0, slot.captured.columns, true,
+                             events.copy, slot.data, &slot.descriptors);
+                CUDA_CHECK(cudaEventRecord(events.ready[i % 2].value, events.copy));
+                slot.copied = true;
+                // Each wait binds the already recorded event, even if that slot's
+                // event is re-recorded for a later page after its source retires.
+                CUDA_CHECK(cudaStreamWaitEvent(stream, events.ready[i % 2].value, 0));
+                bool moved = false;
+                for (std::uint32_t t = 0; t < slot.captured.columns; ++t) {
+                    moved |= slot.captured.positions[t] != requests[i].destination + static_cast<std::int32_t>(t);
+                }
+                if (moved) {
+                    kvmem_rebuild_source_k(pool, requests[i].physical, slot.captured.positions,
+                                          requests[i].destination, slot.captured.columns, stream);
+                }
+                ++completed;
+                if (i + 2 < requests.size()) { start(i + 2); }
+            }
+            // Completion/publication stays at the existing caller boundary. This
+            // does not claim per-layer forward consumption, which needs its own hook.
+            CUDA_CHECK(cudaStreamSynchronize(stream));
+            restores_ += completed;
+            event_pipeline_pages_ += completed;
+        } catch (...) {
+            // A failed later enqueue cannot be covered by an earlier ready event.
+            // Drain both GPU streams before local slot futures or buffers retire.
+            if (cudaStreamSynchronize(events.copy) != cudaSuccess ||
+                cudaStreamSynchronize(stream) != cudaSuccess) { std::terminate(); }
+            throw;
+        }
+    }
+
     struct PipelineStats {
         std::uint64_t read_submits = 0, groups_started = 0, groups_completed = 0;
         std::uint64_t pages_completed = 0, moved_pages = 0, rebuild_calls = 0;
@@ -412,7 +773,14 @@ private:
 
     void restore_loaded(const Record& record, DeviceKVPagePool& pool, std::int32_t physical,
                          std::int32_t destination, cudaStream_t stream, void* source) {
+        TimedStages* events = nullptr;
+        if (stage_trace_enabled()) {
+            if (!stage_events_) { stage_events_ = std::make_unique<TimedStages>(); }
+            events = stage_events_.get();
+            CUDA_CHECK(cudaEventRecord(events->before_copy.value, stream));
+        }
         copy_columns(pool, physical, 0, record.columns, true, stream, source);
+        if (events) { CUDA_CHECK(cudaEventRecord(events->after_copy.value, stream)); }
         bool moved = false;
         for (std::uint32_t t = 0; t < record.columns; ++t) {
             moved = moved || record.positions[t] != destination + static_cast<std::int32_t>(t);
@@ -421,8 +789,21 @@ private:
             kvmem_rebuild_source_k(pool, physical, record.positions, destination,
                                    record.columns, stream);
         }
+        if (events) { CUDA_CHECK(cudaEventRecord(events->after_rebuild.value, stream)); }
         // The selected pinned staging page is reusable only after this sync.
         CUDA_CHECK(cudaStreamSynchronize(stream));
+        if (events) {
+            float copy_ms = 0, rebuild_ms = 0;
+            CUDA_CHECK(cudaEventElapsedTime(&copy_ms, events->before_copy.value,
+                                            events->after_copy.value));
+            CUDA_CHECK(cudaEventElapsedTime(&rebuild_ms, events->after_copy.value,
+                                            events->after_rebuild.value));
+            stage_timing_.h2d_gpu_ms += copy_ms;
+            if (moved) { stage_timing_.rebuild_gpu_ms += rebuild_ms; }
+            ++stage_timing_.gpu_timed_pages;
+        }
+        ++stage_timing_.restore_pages;
+        stage_timing_.moved_pages += static_cast<std::uint64_t>(moved);
         ++restores_;
     }
 
@@ -510,14 +891,25 @@ private:
     std::vector<std::size_t> offsets_;
     std::size_t bytes_ = 0;
     std::unique_ptr<PinnedHostBuffer> staging_;
+    std::unique_ptr<EventPipeline> event_pipeline_;
+    std::uint64_t event_pipeline_pages_ = 0;
     // Optional second page is fixed-size, store-owned and included in staging_bytes().
     std::unique_ptr<PinnedHostBuffer> read_ahead_staging_;
     std::unique_ptr<ColdKVStore> backing_;
+    // Two reused pinned buffers are held until the producer stream finishes.
+    // Their record identities are captured before scheduling any DMA and no
+    // buffer is refilled by capture/restore until drain_layer_source().
+    std::array<LayerSourceSlot, 2> layer_source_slots_{};
+    cudaStream_t layer_source_stream_ = nullptr;
+    std::size_t layer_source_count_ = 0;
+    std::uint32_t next_layer_source_ = 0;
     // Host descriptors live with the original single staging owner, including
     // through restore's existing stream synchronization. Payload size is unchanged.
     bool copy_batch_geometry_ = false;
     CopyBatchDescriptors copy_batch_;
     std::uint64_t captures_ = 0, restores_ = 0;
+    StageTiming stage_timing_;
+    std::unique_ptr<TimedStages> stage_events_;
     // Four total pinned pages: two groups of two. No pin is refilled before group sync.
     std::array<std::unique_ptr<PinnedHostBuffer>, 2> pipeline_staging_;
     std::array<PipelineReadSlot, 4> pipeline_slots_;

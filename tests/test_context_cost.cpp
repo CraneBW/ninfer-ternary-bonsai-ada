@@ -284,8 +284,8 @@ void test_resolution_and_atomic_upserts() {
     try {
         const ninfer::runtime::ContextCostIdentity compiled_identity{
             .hardware_class = "nvidia-geforce-rtx-5090-sm120",
-            .model_id       = "qwen3.6-27b",
-            .weights_id     = "groupwise-int",
+            .model_id       = "qwen3.8-27b",
+            .weights_id     = "nvfp4",
         };
         const auto compiled = ninfer::runtime::resolve_context_machine_cost(compiled_identity);
         expect(

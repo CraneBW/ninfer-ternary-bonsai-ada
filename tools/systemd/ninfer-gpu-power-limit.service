@@ -1,0 +1,18 @@
+[Unit]
+Description=NInfer measured NVIDIA GPU power limit
+After=systemd-modules-load.service nvidia-persistenced.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/default/ninfer-gpu-power-limit
+ExecStartPre=/usr/bin/nvidia-smi -i ${GPU_UUID} -pm 1
+ExecStart=/usr/bin/nvidia-smi -i ${GPU_UUID} -pl ${POWER_LIMIT_W}
+ExecStop=/usr/bin/nvidia-smi -i ${GPU_UUID} -pl ${DEFAULT_POWER_LIMIT_W}
+RemainAfterExit=yes
+Restart=on-failure
+RestartSec=10s
+TimeoutStartSec=30s
+
+[Install]
+WantedBy=multi-user.target

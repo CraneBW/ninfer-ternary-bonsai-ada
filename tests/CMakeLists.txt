@@ -1,5 +1,11 @@
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
+# Checkpoint transport integrity is CPU-only; it needs no CUDA or Engine target.
+add_executable(ninfer_prefix_checkpoint_io_test test_prefix_checkpoint_io.cpp)
+target_include_directories(ninfer_prefix_checkpoint_io_test PRIVATE
+  ${PROJECT_SOURCE_DIR}/src ${PROJECT_SOURCE_DIR}/third_party)
+add_test(NAME ninfer_prefix_checkpoint_io_test COMMAND ninfer_prefix_checkpoint_io_test)
+
 # This target deliberately receives no src/, CUDA, artifact, kernel, or target
 # include root. It proves that the installed product headers stand alone.
 add_executable(ninfer_public_api_test test_public_api.cpp)
@@ -256,6 +262,12 @@ ninfer_add_op_test(ninfer_kvmem_rerope_test
 set_target_properties(ninfer_kvmem_rerope_test PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 ninfer_add_op_test(ninfer_kvmem_compact_test
   SOURCES kvmem_compact_test.cu
+  LIBRARIES ninfer_ops ninfer_core)
+ninfer_add_op_test(ninfer_kvmem_layer_source_test
+  SOURCES kvmem_layer_source_test.cu
+  LIBRARIES ninfer_ops ninfer_core)
+ninfer_add_op_test(ninfer_kvmem_layer_cold_test
+  SOURCES kvmem_layer_cold_test.cu
   LIBRARIES ninfer_ops ninfer_core)
 add_test(NAME ninfer_kvmem_async_compact_test COMMAND ninfer_kvmem_compact_test --async)
 add_test(NAME ninfer_kvmem_async_cancel_test COMMAND ninfer_kvmem_compact_test --async-cancel)

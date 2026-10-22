@@ -236,7 +236,10 @@ artifact::ArtifactIdentity registered_identity(const artifact::Reader& reader) {
         const auto& config = components.at("text").at("config");
         const auto& metadata = directory->at("metadata");
         const std::string name = metadata.value("name", "");
-        if ((name == "qwen3.8-27b" || name == "qwen3.6-27b" ||
+        if (name == "qwen3.6-27b") {
+            throw artifact::ArtifactError("Qwen3.6-27B support has been retired; use Qwen3.8-27B");
+        }
+        if ((name == "qwen3.8-27b" ||
              name == "qwen3.8-27b-tp2-rank0" || name == "qwen3.8-27b-tp2-rank1") &&
             config.value("model_type", "") == "qwen3_5_text" &&
             config.value("hidden_size", 0) == 5120 &&
@@ -244,20 +247,7 @@ artifact::ArtifactIdentity registered_identity(const artifact::Reader& reader) {
             if (name == "qwen3.8-27b-tp2-rank0" || name == "qwen3.8-27b-tp2-rank1") {
                 return {name, "groupwise-int"};
             }
-            // v3 stores the physical codec on each tensor. For Qwen3.6 the
-            // presence of any NVFP4 weights also selects the existing
-            // NVFP4-family capacity policy; plain Q4/Q5 stays groupwise.
-            bool any_nvfp4 = false;
-            if (name == "qwen3.6-27b") {
-                for (const auto& object : directory->at("objects")) {
-                    if (object.value("kind", "") == "tensor" &&
-                        object.value("format", "") == "nvfp4") {
-                        any_nvfp4 = true;
-                        break;
-                    }
-                }
-            }
-            return {name, any_nvfp4 ? "nvfp4" : "groupwise-int"};
+            return {name, "groupwise-int"};
         }
         throw artifact::ArtifactError(
             "v3 component geometry is not registered as an executable target");
@@ -328,9 +318,8 @@ ConstructedTarget construct_target(const EngineOptions& options, DeviceContext& 
     artifact::Reader reader(options.artifact_path);
     inspect_phase.complete();
     const auto identity = registered_identity(reader);
-    if (identity.model_id == Qwen3_6_27B::model_id) {
-        return construct_registered<Qwen3_6_27B, LoadedQwen3_6_27B, Qwen3_6_27BInstance>(
-            options, device, reader, identity, load_start, Qwen3_6_27B::target_key);
+    if (identity.model_id == "qwen3.6-27b") {
+        throw artifact::ArtifactError("Qwen3.6-27B support has been retired; use Qwen3.8-27B");
     }
     if (identity.model_id == Qwen3_6_27B::qwen3_8_model_id) {
         return construct_registered<Qwen3_6_27B, LoadedQwen3_6_27B, Qwen3_6_27BInstance>(

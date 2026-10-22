@@ -231,3 +231,7 @@ The old/new Qwen3.8 binding matrix uses `out/qwen3_8_27b_old.ninfer` and
 `out/qwen3_8_27b_nvfp4_old.ninfer` for the legacy inventories, and the canonical filenames above
 for the companion artifacts. The legacy paths may be overridden with
 `NINFER_QWEN3_8_27B_OLD_WEIGHTS` and `NINFER_QWEN3_8_27B_NVFP4_OLD_WEIGHTS`.
+
+CPU-only checkpoint transport: `ctest --test-dir build -R '^ninfer_prefix_checkpoint_io_test$' --output-on-failure` covers full legacy/indexed bytes, fragmented/tail reads, stale/corrupt indexes, corruption before/during load, and truncation. It starts no CUDA workload.
+
+`ninfer_prefix_checkpoint_io_test`还覆盖私有COW恢复源在原文件修改/删除、Reader关闭、异步读取与其他目录增长、代际/slot重用及私有数据损坏时的行为。Linux reflink资格须将TMPDIR放在支持clone的本地文件系统，本机结果private_clone=1。`NINFER_BENCH_CHECKPOINT_LOAD_PIPELINE=1 ninfer_kvmem_compact_test --checkpoint`沿用实际Device/Host/Cold/raw-K全字节回环；该开关不改变归档/数学ABI。

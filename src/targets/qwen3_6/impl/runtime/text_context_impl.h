@@ -897,6 +897,12 @@ void TextContext::attn_mix(const FullLayerW& w, Tensor& x, int fidx, Phase ph) {
     Tensor a = results.attention.view({kCfg.head_dim, kCfg.n_q, T});
     const Tensor& kv_table_rows =
         active_kv_table_rows_ != nullptr ? *active_kv_table_rows_ : io_.text_kv_table_row;
+    // This is the first device KV read of full attention layer fidx. The
+    // producer's layer_ready event follows all relevant K rephase writes;
+    // a Host enqueue or a different layer's completion is not sufficient.
+    if (ph == Phase::Prefill && text_layer_ready_ != nullptr) {
+        text_layer_ready_->wait_before_layer(static_cast<std::uint32_t>(fidx), s);
+    }
     if (active_sequence_batch_ != 0) {
         const std::int32_t width = active_sequence_width_;
         if (width <= 0 || width * active_sequence_batch_ != T) {
@@ -917,6 +923,11 @@ void TextContext::attn_mix(const FullLayerW& w, Tensor& x, int fidx, Phase ph) {
                                       {kCfg.head_dim, kCfg.n_q, kCfg.n_kv}, attn_scale_,
                                       batch_text_kv_->batch_layer_view(fidx),
                                       *active_causal_attention_envelope_, work_, a, s);
+    }
+    if (ph == Phase::Prefill && text_layer_ready_ != nullptr) {
+        // The event is recorded *after* the last attention read has been
+        // submitted on this stream, not merely after starting the layer.
+        text_layer_ready_->release_after_layer(static_cast<std::uint32_t>(fidx), s);
     }
     ops::sigmoid_mul(gate, a, s);
 

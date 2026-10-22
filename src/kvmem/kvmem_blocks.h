@@ -335,6 +335,9 @@ public:
     }
 
     [[nodiscard]] std::span<const KvBlockMeta> blocks() const noexcept { return blocks_; }
+    [[nodiscard]] std::uint32_t checkpoint_scoring_step() const noexcept { return scoring_step_; }
+    void restore_scoring_step(std::uint32_t step) noexcept { scoring_step_ = step; }
+
 
     [[nodiscard]] std::uint32_t block_count() const noexcept {
         return static_cast<std::uint32_t>(blocks_.size());

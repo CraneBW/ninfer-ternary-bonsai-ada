@@ -1,0 +1,729 @@
+{
+  "quality_and_paired_long_256k": {
+    "state": "THREE_PAIRS_36_OF_36_PASS",
+    "binary_sha256": "53f0fc8642546971f23c1d739883810e9c4b1bedd66136b6e15f829444328a8a",
+    "power_limit_w": 200,
+    "case": "256k",
+    "physical_kv_tokens": 36864,
+    "kvmem_budget_tokens": 32768,
+    "gen_reserve_tokens": 512,
+    "checkpoint_stage": "raw",
+    "checkpoint_io": "indexed",
+    "checkpoint_load_pipeline": false,
+    "canonical_query_reuse": true,
+    "same_device": 47,
+    "baseline_checkpoint": "/home/ran/ninfer-work/benchmarks/frozen-long-context/256k/prefix.nkv",
+    "candidate_checkpoint": "/home/ran/ninfer-work/benchmarks/frozen-long-context/256k/mtp4-raw-prefix-20261022.nkv",
+    "runs": [
+      {
+        "pair": 1,
+        "label": "mtp15",
+        "width": 15,
+        "runner_exit": 0,
+        "process_wall_s": 46.426021223000134,
+        "output": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-s3-20261022/mtp4-vs-mtp15-256k-200w-three-pairs/pair-1-mtp15",
+        "command": [
+          "/usr/bin/python3",
+          "-m",
+          "tools.bench.prefix_checkpoint",
+          "restore",
+          "--case",
+          "256k",
+          "--draft-tokens",
+          "15",
+          "--checkpoint-stage",
+          "raw",
+          "--checkpoint",
+          "/home/ran/ninfer-work/benchmarks/frozen-long-context/256k/prefix.nkv",
+          "--output",
+          "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-s3-20261022/mtp4-vs-mtp15-256k-200w-three-pairs/pair-1-mtp15",
+          "--power-limit",
+          "200",
+          "--checkpoint-io",
+          "indexed",
+          "--no-checkpoint-load-pipeline",
+          "--canonical-query-reuse"
+        ],
+        "correct": 6,
+        "first_ttft_s": 36.644383544,
+        "later_ttfts_s": [
+          0.441454716,
+          0.444077021,
+          0.441129805,
+          0.460813362,
+          0.459604492
+        ],
+        "later_ttft_sum_s": 2.247079396,
+        "session_wall_s": 39.330439128,
+        "request_wall_s": [
+          36.717853319,
+          0.510171306,
+          0.512752513,
+          0.509806403,
+          0.528963631,
+          0.528393946
+        ],
+        "draft_proposed": 90.0,
+        "draft_accepted": 54.0,
+        "history_replay_tokens": 32211.0,
+        "physical_prefill_tokens": 32456.0,
+        "restored_prefill_tokens": 261395.0,
+        "inflight_pages": 0.0,
+        "inflight_bytes": 0.0,
+        "active_requests": 0.0
+      },
+      {
+        "pair": 1,
+        "label": "mtp4",
+        "width": 4,
+        "runner_exit": 0,
+        "process_wall_s": 44.891530673000034,
+        "output": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-s3-20261022/mtp4-vs-mtp15-256k-200w-three-pairs/pair-1-mtp4",
+        "command": [
+          "/usr/bin/python3",
+          "-m",
+          "tools.bench.prefix_checkpoint",
+          "restore",
+          "--case",
+          "256k",
+          "--draft-tokens",
+          "4",
+          "--checkpoint-stage",
+          "raw",
+          "--checkpoint",
+          "/home/ran/ninfer-work/benchmarks/frozen-long-context/256k/mtp4-raw-prefix-20261022.nkv",
+          "--output",
+          "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-s3-20261022/mtp4-vs-mtp15-256k-200w-three-pairs/pair-1-mtp4",
+          "--power-limit",
+          "200",
+          "--checkpoint-io",
+          "indexed",
+          "--no-checkpoint-load-pipeline",
+          "--canonical-query-reuse"
+        ],
+        "correct": 6,
+        "first_ttft_s": 35.106053845,
+        "later_ttfts_s": [
+          0.424501691,
+          0.432342879,
+          0.429848543,
+          0.443503597,
+          0.442008636
+        ],
+        "later_ttft_sum_s": 2.172205346,
+        "session_wall_s": 37.672257827,
+        "request_wall_s": [
+          35.139144485,
+          0.490787112,
+          0.498730084,
+          0.496112496,
+          0.509400448,
+          0.508935845
+        ],
+        "draft_proposed": 44.0,
+        "draft_accepted": 42.0,
+        "history_replay_tokens": 32211.0,
+        "physical_prefill_tokens": 32456.0,
+        "restored_prefill_tokens": 261395.0,
+        "inflight_pages": 0.0,
+        "inflight_bytes": 0.0,
+        "active_requests": 0.0
+      },
+      {
+        "pair": 2,
+        "label": "mtp4",
+        "width": 4,
+        "runner_exit": 0,
+        "process_wall_s": 44.17352914200001,
+        "output": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-s3-20261022/mtp4-vs-mtp15-256k-200w-three-pairs/pair-2-mtp4",
+        "command": [
+          "/usr/bin/python3",
+          "-m",
+          "tools.bench.prefix_checkpoint",
+          "restore",
+          "--case",
+          "256k",
+          "--draft-tokens",
+          "4",
+          "--checkpoint-stage",
+          "raw",
+          "--checkpoint",
+          "/home/ran/ninfer-work/benchmarks/frozen-long-context/256k/mtp4-raw-prefix-20261022.nkv",
+          "--output",
+          "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-s3-20261022/mtp4-vs-mtp15-256k-200w-three-pairs/pair-2-mtp4",
+          "--power-limit",
+          "200",
+          "--checkpoint-io",
+          "indexed",
+          "--no-checkpoint-load-pipeline",
+          "--canonical-query-reuse"
+        ],
+        "correct": 6,
+        "first_ttft_s": 34.773967652,
+        "later_ttfts_s": [
+          0.416844568,
+          0.425880111,
+          0.42814466,
+          0.443661926,
+          0.443522126
+        ],
+        "later_ttft_sum_s": 2.158053391,
+        "session_wall_s": 37.330542681,
+        "request_wall_s": [
+          34.807104821,
+          0.483355188,
+          0.492487014,
+          0.49483927,
+          0.509964604,
+          0.509625395
+        ],
+        "draft_proposed": 44.0,
+        "draft_accepted": 42.0,
+        "history_replay_tokens": 32211.0,
+        "physical_prefill_tokens": 32456.0,
+        "restored_prefill_tokens": 261395.0,
+        "inflight_pages": 0.0,
+        "inflight_bytes": 0.0,
+        "active_requests": 0.0
+      },
+      {
+        "pair": 2,
+        "label": "mtp15",
+        "width": 15,
+        "runner_exit": 0,
+        "process_wall_s": 46.06044345999999,
+        "output": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-s3-20261022/mtp4-vs-mtp15-256k-200w-three-pairs/pair-2-mtp15",
+        "command": [
+          "/usr/bin/python3",
+          "-m",
+          "tools.bench.prefix_checkpoint",
+          "restore",
+          "--case",
+          "256k",
+          "--draft-tokens",
+          "15",
+          "--checkpoint-stage",
+          "raw",
+          "--checkpoint",
+          "/home/ran/ninfer-work/benchmarks/frozen-long-context/256k/prefix.nkv",
+          "--output",
+          "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-s3-20261022/mtp4-vs-mtp15-256k-200w-three-pairs/pair-2-mtp15",
+          "--power-limit",
+          "200",
+          "--checkpoint-io",
+          "indexed",
+          "--no-checkpoint-load-pipeline",
+          "--canonical-query-reuse"
+        ],
+        "correct": 6,
+        "first_ttft_s": 36.49515862,
+        "later_ttfts_s": [
+          0.439200844,
+          0.449202449,
+          0.436643487,
+          0.450837685,
+          0.461889018
+        ],
+        "later_ttft_sum_s": 2.237773483,
+        "session_wall_s": 39.175543108,
+        "request_wall_s": [
+          36.568428962,
+          0.507709932,
+          0.517882636,
+          0.505601205,
+          0.518889384,
+          0.53115495
+        ],
+        "draft_proposed": 90.0,
+        "draft_accepted": 54.0,
+        "history_replay_tokens": 32211.0,
+        "physical_prefill_tokens": 32456.0,
+        "restored_prefill_tokens": 261395.0,
+        "inflight_pages": 0.0,
+        "inflight_bytes": 0.0,
+        "active_requests": 0.0
+      },
+      {
+        "pair": 3,
+        "label": "mtp15",
+        "width": 15,
+        "runner_exit": 0,
+        "process_wall_s": 45.856480118000036,
+        "output": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-s3-20261022/mtp4-vs-mtp15-256k-200w-three-pairs/pair-3-mtp15",
+        "command": [
+          "/usr/bin/python3",
+          "-m",
+          "tools.bench.prefix_checkpoint",
+          "restore",
+          "--case",
+          "256k",
+          "--draft-tokens",
+          "15",
+          "--checkpoint-stage",
+          "raw",
+          "--checkpoint",
+          "/home/ran/ninfer-work/benchmarks/frozen-long-context/256k/prefix.nkv",
+          "--output",
+          "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-s3-20261022/mtp4-vs-mtp15-256k-200w-three-pairs/pair-3-mtp15",
+          "--power-limit",
+          "200",
+          "--checkpoint-io",
+          "indexed",
+          "--no-checkpoint-load-pipeline",
+          "--canonical-query-reuse"
+        ],
+        "correct": 6,
+        "first_ttft_s": 35.757293595,
+        "later_ttfts_s": [
+          0.438065516,
+          0.44380447,
+          0.439095273,
+          0.45116102,
+          0.453529148
+        ],
+        "later_ttft_sum_s": 2.225655427,
+        "session_wall_s": 38.425774538,
+        "request_wall_s": [
+          35.830391246,
+          0.507067557,
+          0.512745958,
+          0.507974501,
+          0.519952261,
+          0.522156127
+        ],
+        "draft_proposed": 90.0,
+        "draft_accepted": 54.0,
+        "history_replay_tokens": 32211.0,
+        "physical_prefill_tokens": 32456.0,
+        "restored_prefill_tokens": 261395.0,
+        "inflight_pages": 0.0,
+        "inflight_bytes": 0.0,
+        "active_requests": 0.0
+      },
+      {
+        "pair": 3,
+        "label": "mtp4",
+        "width": 4,
+        "runner_exit": 0,
+        "process_wall_s": 43.710388708999744,
+        "output": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-s3-20261022/mtp4-vs-mtp15-256k-200w-three-pairs/pair-3-mtp4",
+        "command": [
+          "/usr/bin/python3",
+          "-m",
+          "tools.bench.prefix_checkpoint",
+          "restore",
+          "--case",
+          "256k",
+          "--draft-tokens",
+          "4",
+          "--checkpoint-stage",
+          "raw",
+          "--checkpoint",
+          "/home/ran/ninfer-work/benchmarks/frozen-long-context/256k/mtp4-raw-prefix-20261022.nkv",
+          "--output",
+          "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-s3-20261022/mtp4-vs-mtp15-256k-200w-three-pairs/pair-3-mtp4",
+          "--power-limit",
+          "200",
+          "--checkpoint-io",
+          "indexed",
+          "--no-checkpoint-load-pipeline",
+          "--canonical-query-reuse"
+        ],
+        "correct": 6,
+        "first_ttft_s": 34.869997238,
+        "later_ttfts_s": [
+          0.424014418,
+          0.428503182,
+          0.430988478,
+          0.439832946,
+          0.438676185
+        ],
+        "later_ttft_sum_s": 2.1620152089999998,
+        "session_wall_s": 37.417459123,
+        "request_wall_s": [
+          34.902987541,
+          0.490232224,
+          0.494705823,
+          0.497334374,
+          0.506348565,
+          0.504796271
+        ],
+        "draft_proposed": 44.0,
+        "draft_accepted": 42.0,
+        "history_replay_tokens": 32211.0,
+        "physical_prefill_tokens": 32456.0,
+        "restored_prefill_tokens": 261395.0,
+        "inflight_pages": 0.0,
+        "inflight_bytes": 0.0,
+        "active_requests": 0.0
+      }
+    ],
+    "pairs": [
+      {
+        "pair": 1,
+        "first": "mtp15",
+        "mtp15_session_wall_s": 39.330439128,
+        "mtp4_session_wall_s": 37.672257827,
+        "mtp4_reduction_fraction": 0.04216025393470657
+      },
+      {
+        "pair": 2,
+        "first": "mtp4",
+        "mtp15_session_wall_s": 39.175543108,
+        "mtp4_session_wall_s": 37.330542681,
+        "mtp4_reduction_fraction": 0.04709572045788013
+      },
+      {
+        "pair": 3,
+        "first": "mtp15",
+        "mtp15_session_wall_s": 38.425774538,
+        "mtp4_session_wall_s": 37.417459123,
+        "mtp4_reduction_fraction": 0.026240600927974977
+      }
+    ],
+    "median_mtp4_session_reduction_fraction": 0.04216025393470657
+  },
+  "official_4k_32k_tg128": {
+    "state": "THREE_PAIRS_BOTH_CONTEXTS_12_OF_12_MEASURED",
+    "binary": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/bench/ninfer_bench",
+    "binary_sha256": "92244e50b35109039e91738c330d493b5edc236beacc5246ab675cc460a01fa7",
+    "model": "/home/ran/ninfer-work/real-models/qwen3_8_gsq_rco_iq3_s_v3.ninfer",
+    "model_sha256": "29e54467ca0ddae7e9aac04439f72ad20dbf6dc8fb5e84833b41ec7de9c46750",
+    "corpus": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/bench/fixtures/bench_corpus.ids",
+    "corpus_sha256": "27e4f63c17efe3f89b5cf278b3b1a42a737316ed4044d7d0d1d52437059d1002",
+    "power_limit_w": 200,
+    "physical_gpu_count": 1,
+    "max_context": 36864,
+    "kv_dtype": "int8",
+    "prefill_chunk": 512,
+    "graph": true,
+    "warmup": 1,
+    "repetitions": 1,
+    "n_prompt": [
+      4096,
+      32768
+    ],
+    "n_gen": 128,
+    "input_portion": "fixed corpus token IDs",
+    "sequence": "15,4,4,15,15,4",
+    "runs": [
+      {
+        "pair": 1,
+        "label": "mtp15",
+        "width": 15,
+        "output": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-s3-20261022/mtp4-vs-mtp15-4k32k-200w-three-pairs/pair1-mtp15.json",
+        "log": null,
+        "process_wall_s": null,
+        "cases": {
+          "4096": {
+            "prefill_tok_s": 1691.219166,
+            "decode_tok_s": 170.7403161,
+            "prefill_s": 2.421921465,
+            "decode_s": 0.749676485,
+            "prepare_s": 2.2187e-05,
+            "session_measurement_s": 3.171859595,
+            "ttft_compute_proxy_s": 2.421943652,
+            "decode_tokens": 128,
+            "generated_tokens": 129,
+            "rounds": 12,
+            "drafted": 164,
+            "accepted": 116,
+            "acceptance_rate": 0.7073170732,
+            "full_output_ids_in_report": false
+          },
+          "32768": {
+            "prefill_tok_s": 1533.256913,
+            "decode_tok_s": 203.2296026,
+            "prefill_s": 21.37149993,
+            "decode_s": 0.629829505,
+            "prepare_s": 6.3158e-05,
+            "session_measurement_s": 22.0017057,
+            "ttft_compute_proxy_s": 21.371563088,
+            "decode_tokens": 128,
+            "generated_tokens": 129,
+            "rounds": 9,
+            "drafted": 124,
+            "accepted": 119,
+            "acceptance_rate": 0.9596774194,
+            "full_output_ids_in_report": false
+          }
+        }
+      },
+      {
+        "pair": 1,
+        "label": "mtp4",
+        "width": 4,
+        "output": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-s3-20261022/mtp4-vs-mtp15-4k32k-200w-three-pairs/pair1-mtp4.json",
+        "log": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-s3-20261022/mtp4-vs-mtp15-4k32k-200w-three-pairs/pair1-mtp4.log",
+        "process_wall_s": 53.963724386000194,
+        "cases": {
+          "4096": {
+            "prefill_tok_s": 1710.715544,
+            "decode_tok_s": 149.8384281,
+            "prefill_s": 2.394319742,
+            "decode_s": 0.854253489,
+            "prepare_s": 1.6708e-05,
+            "session_measurement_s": 3.248832232,
+            "ttft_compute_proxy_s": 2.39433645,
+            "decode_tokens": 128,
+            "generated_tokens": 129,
+            "rounds": 26,
+            "drafted": 103,
+            "accepted": 102,
+            "acceptance_rate": 0.9902912621,
+            "full_output_ids_in_report": false
+          },
+          "32768": {
+            "prefill_tok_s": 1528.515135,
+            "decode_tok_s": 135.3114124,
+            "prefill_s": 21.43779885,
+            "decode_s": 0.945966033,
+            "prepare_s": 5.6746e-05,
+            "session_measurement_s": 22.38404681,
+            "ttft_compute_proxy_s": 21.437855596,
+            "decode_tokens": 128,
+            "generated_tokens": 129,
+            "rounds": 26,
+            "drafted": 102,
+            "accepted": 102,
+            "acceptance_rate": 1,
+            "full_output_ids_in_report": false
+          }
+        }
+      },
+      {
+        "pair": 2,
+        "label": "mtp4",
+        "width": 4,
+        "output": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-s3-20261022/mtp4-vs-mtp15-4k32k-200w-three-pairs/pair2-mtp4.json",
+        "log": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-s3-20261022/mtp4-vs-mtp15-4k32k-200w-three-pairs/pair2-mtp4.log",
+        "process_wall_s": 54.36172859399994,
+        "cases": {
+          "4096": {
+            "prefill_tok_s": 1668.835249,
+            "decode_tok_s": 145.7576362,
+            "prefill_s": 2.45440645,
+            "decode_s": 0.878170114,
+            "prepare_s": 2.736e-05,
+            "session_measurement_s": 3.332929486,
+            "ttft_compute_proxy_s": 2.45443381,
+            "decode_tokens": 128,
+            "generated_tokens": 129,
+            "rounds": 26,
+            "drafted": 103,
+            "accepted": 102,
+            "acceptance_rate": 0.9902912621,
+            "full_output_ids_in_report": false
+          },
+          "32768": {
+            "prefill_tok_s": 1519.936299,
+            "decode_tok_s": 135.5279813,
+            "prefill_s": 21.55879824,
+            "decode_s": 0.944454413,
+            "prepare_s": 8.2062e-05,
+            "session_measurement_s": 22.50353921,
+            "ttft_compute_proxy_s": 21.558880302000002,
+            "decode_tokens": 128,
+            "generated_tokens": 129,
+            "rounds": 26,
+            "drafted": 102,
+            "accepted": 102,
+            "acceptance_rate": 1,
+            "full_output_ids_in_report": false
+          }
+        }
+      },
+      {
+        "pair": 2,
+        "label": "mtp15",
+        "width": 15,
+        "output": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-s3-20261022/mtp4-vs-mtp15-4k32k-200w-three-pairs/pair2-mtp15.json",
+        "log": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-s3-20261022/mtp4-vs-mtp15-4k32k-200w-three-pairs/pair2-mtp15.log",
+        "process_wall_s": 54.60459837999997,
+        "cases": {
+          "4096": {
+            "prefill_tok_s": 1647.040225,
+            "decode_tok_s": 169.491746,
+            "prefill_s": 2.486885224,
+            "decode_s": 0.755199017,
+            "prepare_s": 2.3116e-05,
+            "session_measurement_s": 3.242500125,
+            "ttft_compute_proxy_s": 2.48690834,
+            "decode_tokens": 128,
+            "generated_tokens": 129,
+            "rounds": 12,
+            "drafted": 164,
+            "accepted": 116,
+            "acceptance_rate": 0.7073170732,
+            "full_output_ids_in_report": false
+          },
+          "32768": {
+            "prefill_tok_s": 1513.215285,
+            "decode_tok_s": 201.501914,
+            "prefill_s": 21.65455261,
+            "decode_s": 0.635229698,
+            "prepare_s": 0.000107018,
+            "session_measurement_s": 22.29018476,
+            "ttft_compute_proxy_s": 21.654659628,
+            "decode_tokens": 128,
+            "generated_tokens": 129,
+            "rounds": 9,
+            "drafted": 124,
+            "accepted": 119,
+            "acceptance_rate": 0.9596774194,
+            "full_output_ids_in_report": false
+          }
+        }
+      },
+      {
+        "pair": 3,
+        "label": "mtp15",
+        "width": 15,
+        "output": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-s3-20261022/mtp4-vs-mtp15-4k32k-200w-three-pairs/pair3-mtp15.json",
+        "log": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-s3-20261022/mtp4-vs-mtp15-4k32k-200w-three-pairs/pair3-mtp15.log",
+        "process_wall_s": 54.830619031000424,
+        "cases": {
+          "4096": {
+            "prefill_tok_s": 1648.82396,
+            "decode_tok_s": 169.8189885,
+            "prefill_s": 2.484194856,
+            "decode_s": 0.753743743,
+            "prepare_s": 1.0236e-05,
+            "session_measurement_s": 3.238183589,
+            "ttft_compute_proxy_s": 2.484205092,
+            "decode_tokens": 128,
+            "generated_tokens": 129,
+            "rounds": 12,
+            "drafted": 164,
+            "accepted": 116,
+            "acceptance_rate": 0.7073170732,
+            "full_output_ids_in_report": false
+          },
+          "32768": {
+            "prefill_tok_s": 1505.945656,
+            "decode_tok_s": 202.1709381,
+            "prefill_s": 21.75908531,
+            "decode_s": 0.633127596,
+            "prepare_s": 0.000177456,
+            "session_measurement_s": 22.39260482,
+            "ttft_compute_proxy_s": 21.759262766,
+            "decode_tokens": 128,
+            "generated_tokens": 129,
+            "rounds": 9,
+            "drafted": 124,
+            "accepted": 119,
+            "acceptance_rate": 0.9596774194,
+            "full_output_ids_in_report": false
+          }
+        }
+      },
+      {
+        "pair": 3,
+        "label": "mtp4",
+        "width": 4,
+        "output": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-s3-20261022/mtp4-vs-mtp15-4k32k-200w-three-pairs/pair3-mtp4.json",
+        "log": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-s3-20261022/mtp4-vs-mtp15-4k32k-200w-three-pairs/pair3-mtp4.log",
+        "process_wall_s": 54.525136298000234,
+        "cases": {
+          "4096": {
+            "prefill_tok_s": 1661.123268,
+            "decode_tok_s": 145.3090548,
+            "prefill_s": 2.465801352,
+            "decode_s": 0.8808811,
+            "prepare_s": 1.3207e-05,
+            "session_measurement_s": 3.346818821,
+            "ttft_compute_proxy_s": 2.465814559,
+            "decode_tokens": 128,
+            "generated_tokens": 129,
+            "rounds": 26,
+            "drafted": 103,
+            "accepted": 102,
+            "acceptance_rate": 0.9902912621,
+            "full_output_ids_in_report": false
+          },
+          "32768": {
+            "prefill_tok_s": 1509.907066,
+            "decode_tok_s": 133.6623634,
+            "prefill_s": 21.70199791,
+            "decode_s": 0.957636815,
+            "prepare_s": 9.8213e-05,
+            "session_measurement_s": 22.65995225,
+            "ttft_compute_proxy_s": 21.702096123,
+            "decode_tokens": 128,
+            "generated_tokens": 129,
+            "rounds": 26,
+            "drafted": 102,
+            "accepted": 102,
+            "acceptance_rate": 1,
+            "full_output_ids_in_report": false
+          }
+        }
+      }
+    ],
+    "pairs": [
+      {
+        "n_prompt": 4096,
+        "per_pair": {
+          "prefill_tok_s": [
+            0.01152800204252169,
+            0.0132328425676429,
+            0.007459442789756743
+          ],
+          "decode_tok_s": [
+            -0.12241917127386659,
+            -0.14003106558357126,
+            -0.14432975909522616
+          ],
+          "session_reduction": [
+            -0.024267353170782435,
+            -0.0278887764113811,
+            -0.03354820040748452
+          ],
+          "ttft_compute_proxy_reduction": [
+            0.011398779644275603,
+            0.013058193371131677,
+            0.007402984986716099
+          ]
+        },
+        "medians": {
+          "prefill_tok_s": 0.01152800204252169,
+          "decode_tok_s": -0.14003106558357126,
+          "session_reduction": -0.0278887764113811,
+          "ttft_compute_proxy_reduction": 0.011398779644275603
+        }
+      },
+      {
+        "n_prompt": 32768,
+        "per_pair": {
+          "prefill_tok_s": [
+            -0.0030926180471099185,
+            0.004441545143393011,
+            0.0026305132487463023
+          ],
+          "decode_tok_s": [
+            -0.334194375873862,
+            -0.32741094806672655,
+            -0.3388646031118159
+          ],
+          "session_reduction": [
+            -0.01737779403166928,
+            -0.00957167705414741,
+            -0.011939094721183041
+          ],
+          "ttft_compute_proxy_reduction": [
+            -0.0031019026417034024,
+            0.0044230353949389345,
+            0.0026272325314865563
+          ]
+        },
+        "medians": {
+          "prefill_tok_s": 0.0026305132487463023,
+          "decode_tok_s": -0.334194375873862,
+          "session_reduction": -0.011939094721183041,
+          "ttft_compute_proxy_reduction": 0.0026272325314865563
+        }
+      }
+    ],
+    "report_limitations": "ninfer_bench records token counts and timings, not output IDs; original six-fact Serve runs separately verify exact answers"
+  }
+}

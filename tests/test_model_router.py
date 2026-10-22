@@ -9,12 +9,9 @@ from tools.model_router import choose_backend, inspect, main
 class ModelRouterTest(unittest.TestCase):
     def test_versions_and_model_routes(self):
         cases = (
-            (b"NINFER\0\2", {"identity": {"model_id": "qwen3.6-27b", "weights_id": "nvfp4"}},
+            (b"NINFER\0\2", {"identity": {"model_id": "qwen3.8-27b", "weights_id": "nvfp4"}},
              "native"),
             (b"NINFER\0\3", {"metadata": {"name": "qwen3.8-27b"},
-                                "components": {"text": {"config": {"model_type": "qwen3_5_text"}}}},
-             "native"),
-            (b"NINFER\0\3", {"metadata": {"name": "qwen3.6-27b"},
                                 "components": {"text": {"config": {"model_type": "qwen3_5_text"}}}},
              "native"),
             (b"NINFER\0\3", {"metadata": {"name": "bonsai2-4b"},
@@ -36,7 +33,7 @@ class ModelRouterTest(unittest.TestCase):
                 found = inspect(path)
                 self.assertEqual(choose_backend(found, []), expected)
                 self.assertEqual(main([str(path), "--dry-run"]), 0)
-                if index in (1, 2):
+                if index == 1:
                     self.assertEqual(
                         choose_backend(found, ["--spec", "mtp"]), "native"
                     )
@@ -49,6 +46,20 @@ class ModelRouterTest(unittest.TestCase):
             for rank in (0, 1):
                 with self.assertRaisesRegex(ValueError, "two-rank runtime"):
                     choose_backend((3, f"qwen3.8-27b-tp2-rank{rank}", "qwen3_5_text"), [])
+
+    def test_retired_qwen36_rejected_with_backend_override(self):
+        with TemporaryDirectory() as scratch:
+            for version in (2, 3):
+                directory = ({"identity": {"model_id": "qwen3.6-27b", "weights_id": "nvfp4"}}
+                             if version == 2 else {"metadata": {"name": "qwen3.6-27b"},
+                             "components": {"text": {"config": {"model_type": "qwen3_5_text"}}}})
+                body = json.dumps(directory).encode()
+                path = Path(scratch) / "retired.ninfer"
+                path.write_bytes(b"NINFER\0" + bytes([version]) + len(body).to_bytes(8, "little")
+                                 + (bytes(16) if version == 3 else b"") + body)
+                for backend in ("auto", "native", "companion"):
+                    with self.assertRaisesRegex(ValueError, "retired"):
+                        main([str(path), "--dry-run", "--backend", backend])
 
 
 if __name__ == "__main__":

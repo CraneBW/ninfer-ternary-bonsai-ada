@@ -1,0 +1,587 @@
+{
+  "source": "tmp-nvcc/opsx-s5-20261022/",
+  "profiles": {
+    "4k128": {
+      "case": "4k128",
+      "model": "/home/ran/ninfer-work/real-models/qwen3_8_gsq_rco_iq3_s_v3.ninfer",
+      "binary_sha256": "354149af6e6dd7034e2bd24bd34937063490c828cd2bde141fcb17d8df28b158",
+      "expected_watt_cap": 200,
+      "state": "THREE_PAIRS_SAME_TEXT_AND_USAGE",
+      "pairs": [
+        {
+          "pair": 1,
+          "same_response_text_and_usage": true,
+          "raw_seconds": {
+            "request_wall": {
+              "fixed": 3.1714,
+              "adaptive": 3.2263
+            },
+            "ttft": {
+              "fixed": 2.3306393969999997,
+              "adaptive": 2.342992462
+            },
+            "session_total": {
+              "fixed": 3.170244982,
+              "adaptive": 3.225149747
+            },
+            "prefill": {
+              "fixed": 2.320852511,
+              "adaptive": 2.334858217
+            },
+            "decode": {
+              "fixed": 0.8394868979999999,
+              "adaptive": 0.8820137919999997
+            },
+            "host_exposed": {
+              "fixed": 1.372644433,
+              "adaptive": 1.378768336
+            },
+            "device_wait_exposed": {
+              "fixed": 1.7878847260000001,
+              "adaptive": 1.8383124610000001
+            },
+            "decode_host_exposed": {
+              "fixed": 0.000913624,
+              "adaptive": 0.0013076840000000001
+            },
+            "decode_device_wait_exposed": {
+              "fixed": 0.838674039,
+              "adaptive": 0.880830369
+            }
+          },
+          "adaptive_time_reduction": {
+            "request_wall": -0.017310966765466285,
+            "ttft": -0.005300290133214647,
+            "session_total": -0.017318776722852203,
+            "prefill": -0.006034724711552197,
+            "decode": -0.05065819859883014,
+            "host_exposed": -0.004461390621470551,
+            "device_wait_exposed": -0.028205249626367612,
+            "decode_host_exposed": -0.43131528944073283,
+            "decode_device_wait_exposed": -0.05026545241613234
+          },
+          "fixed_speculative": {
+            "accepted_per_position": [
+              26,
+              25,
+              25,
+              25
+            ],
+            "accepted_tokens": 101,
+            "backend": "mtp",
+            "draft_window": 4,
+            "drafted_tokens": 101,
+            "fallback_steps": 0,
+            "rounds": 26
+          },
+          "adaptive_speculative": {
+            "accepted_per_position": [
+              27,
+              27,
+              26,
+              20
+            ],
+            "accepted_tokens": 100,
+            "backend": "mtp",
+            "draft_window": 4,
+            "drafted_tokens": 101,
+            "fallback_steps": 0,
+            "rounds": 27
+          },
+          "adaptive_windows": {
+            "rounds_per_window": [
+              0,
+              0,
+              6,
+              21
+            ],
+            "window_transitions": 1
+          }
+        },
+        {
+          "pair": 2,
+          "same_response_text_and_usage": true,
+          "raw_seconds": {
+            "request_wall": {
+              "fixed": 3.1663,
+              "adaptive": 3.202
+            },
+            "ttft": {
+              "fixed": 2.328741293,
+              "adaptive": 2.339443368
+            },
+            "session_total": {
+              "fixed": 3.1652476540000003,
+              "adaptive": 3.200934432
+            },
+            "prefill": {
+              "fixed": 2.319625395,
+              "adaptive": 2.3304637780000004
+            },
+            "decode": {
+              "fixed": 0.836393341,
+              "adaptive": 0.8613606470000001
+            },
+            "host_exposed": {
+              "fixed": 1.370991501,
+              "adaptive": 1.3777837040000003
+            },
+            "device_wait_exposed": {
+              "fixed": 1.7851916980000002,
+              "adaptive": 1.8143113370000001
+            },
+            "decode_host_exposed": {
+              "fixed": 0.000853896,
+              "adaptive": 0.0031599970000000003
+            },
+            "decode_device_wait_exposed": {
+              "fixed": 0.835635864,
+              "adaptive": 0.858312794
+            }
+          },
+          "adaptive_time_reduction": {
+            "request_wall": -0.011274989735653662,
+            "ttft": -0.00459564788590705,
+            "session_total": -0.011274561077361911,
+            "prefill": -0.00467247126340431,
+            "decode": -0.0298511534897552,
+            "host_exposed": -0.0049542269190188115,
+            "device_wait_exposed": -0.01631177146556495,
+            "decode_host_exposed": -2.700681347611419,
+            "decode_device_wait_exposed": -0.02713733454599554
+          },
+          "fixed_speculative": {
+            "accepted_per_position": [
+              26,
+              25,
+              25,
+              25
+            ],
+            "accepted_tokens": 101,
+            "backend": "mtp",
+            "draft_window": 4,
+            "drafted_tokens": 101,
+            "fallback_steps": 0,
+            "rounds": 26
+          },
+          "adaptive_speculative": {
+            "accepted_per_position": [
+              27,
+              27,
+              26,
+              20
+            ],
+            "accepted_tokens": 100,
+            "backend": "mtp",
+            "draft_window": 4,
+            "drafted_tokens": 101,
+            "fallback_steps": 0,
+            "rounds": 27
+          },
+          "adaptive_windows": {
+            "rounds_per_window": [
+              0,
+              0,
+              6,
+              21
+            ],
+            "window_transitions": 1
+          }
+        },
+        {
+          "pair": 3,
+          "same_response_text_and_usage": true,
+          "raw_seconds": {
+            "request_wall": {
+              "fixed": 3.1748,
+              "adaptive": 3.2054
+            },
+            "ttft": {
+              "fixed": 2.3350967689999997,
+              "adaptive": 2.3437472269999997
+            },
+            "session_total": {
+              "fixed": 3.1735413269999997,
+              "adaptive": 3.2042660339999998
+            },
+            "prefill": {
+              "fixed": 2.3253544159999997,
+              "adaptive": 2.335799069
+            },
+            "decode": {
+              "fixed": 0.838326391,
+              "adaptive": 0.860366218
+            },
+            "host_exposed": {
+              "fixed": 1.377209617,
+              "adaptive": 1.3826021080000004
+            },
+            "device_wait_exposed": {
+              "fixed": 1.786633155,
+              "adaptive": 1.8137735060000002
+            },
+            "decode_host_exposed": {
+              "fixed": 0.0009241160000000001,
+              "adaptive": 0.001507317
+            },
+            "decode_device_wait_exposed": {
+              "fixed": 0.83750391,
+              "adaptive": 0.8589919690000001
+            }
+          },
+          "adaptive_time_reduction": {
+            "request_wall": -0.009638402419050118,
+            "ttft": -0.003704539407034746,
+            "session_total": -0.009681520999458515,
+            "prefill": -0.004491639179014628,
+            "decode": -0.026290269800178567,
+            "host_exposed": -0.003915519419438018,
+            "device_wait_exposed": -0.01519077988900297,
+            "decode_host_exposed": -0.6310906855849263,
+            "decode_device_wait_exposed": -0.025657264095638732
+          },
+          "fixed_speculative": {
+            "accepted_per_position": [
+              26,
+              25,
+              25,
+              25
+            ],
+            "accepted_tokens": 101,
+            "backend": "mtp",
+            "draft_window": 4,
+            "drafted_tokens": 101,
+            "fallback_steps": 0,
+            "rounds": 26
+          },
+          "adaptive_speculative": {
+            "accepted_per_position": [
+              27,
+              27,
+              26,
+              20
+            ],
+            "accepted_tokens": 100,
+            "backend": "mtp",
+            "draft_window": 4,
+            "drafted_tokens": 101,
+            "fallback_steps": 0,
+            "rounds": 27
+          },
+          "adaptive_windows": {
+            "rounds_per_window": [
+              0,
+              0,
+              6,
+              21
+            ],
+            "window_transitions": 1
+          }
+        }
+      ],
+      "summary_median_time_reduction": {
+        "request_wall": -0.011274989735653662,
+        "ttft": -0.00459564788590705,
+        "session_total": -0.011274561077361911,
+        "prefill": -0.00467247126340431,
+        "decode": -0.0298511534897552,
+        "host_exposed": -0.004461390621470551,
+        "device_wait_exposed": -0.01631177146556495,
+        "decode_host_exposed": -0.6310906855849263,
+        "decode_device_wait_exposed": -0.02713733454599554
+      },
+      "all_3_pairs_same_response": true
+    },
+    "32k": {
+      "case": "32k",
+      "model": "/home/ran/ninfer-work/real-models/qwen3_8_gsq_rco_iq3_s_v3.ninfer",
+      "binary_sha256": "354149af6e6dd7034e2bd24bd34937063490c828cd2bde141fcb17d8df28b158",
+      "expected_watt_cap": 200,
+      "state": "THREE_PAIRS_SAME_TEXT_AND_USAGE",
+      "pairs": [
+        {
+          "pair": 1,
+          "same_response_text_and_usage": true,
+          "raw_seconds": {
+            "request_wall": {
+              "fixed": 22.6705,
+              "adaptive": 22.937
+            },
+            "ttft": {
+              "fixed": 21.133324322,
+              "adaptive": 21.370898034
+            },
+            "session_total": {
+              "fixed": 22.668132152000002,
+              "adaptive": 22.935728864
+            },
+            "prefill": {
+              "fixed": 21.116867097000004,
+              "adaptive": 21.357280509
+            },
+            "decode": {
+              "fixed": 1.5342586689999993,
+              "adaptive": 1.5642333129999997
+            },
+            "host_exposed": {
+              "fixed": 12.466037021000002,
+              "adaptive": 12.607522289
+            },
+            "device_wait_exposed": {
+              "fixed": 10.184394215000001,
+              "adaptive": 10.313357625
+            },
+            "decode_host_exposed": {
+              "fixed": 0.001686044,
+              "adaptive": 0.0022261710000000003
+            },
+            "decode_device_wait_exposed": {
+              "fixed": 1.533091758,
+              "adaptive": 1.5625746260000002
+            }
+          },
+          "adaptive_time_reduction": {
+            "request_wall": -0.011755364901524068,
+            "ttft": -0.011241663090017617,
+            "session_total": -0.011804974058102546,
+            "prefill": -0.011384899611086352,
+            "decode": -0.019536890750982305,
+            "host_exposed": -0.011349658898144988,
+            "device_wait_exposed": -0.012662845455261085,
+            "decode_host_exposed": -0.3203516634204091,
+            "decode_device_wait_exposed": -0.019230987216617867
+          },
+          "fixed_speculative": {
+            "accepted_per_position": [
+              30,
+              25,
+              17,
+              12
+            ],
+            "accepted_tokens": 84,
+            "backend": "mtp",
+            "draft_window": 4,
+            "drafted_tokens": 164,
+            "fallback_steps": 1,
+            "rounds": 42
+          },
+          "adaptive_speculative": {
+            "accepted_per_position": [
+              32,
+              26,
+              18,
+              5
+            ],
+            "accepted_tokens": 81,
+            "backend": "mtp",
+            "draft_window": 4,
+            "drafted_tokens": 148,
+            "fallback_steps": 1,
+            "rounds": 45
+          },
+          "adaptive_windows": {
+            "rounds_per_window": [
+              0,
+              0,
+              31,
+              15
+            ],
+            "window_transitions": 2
+          }
+        },
+        {
+          "pair": 2,
+          "same_response_text_and_usage": true,
+          "raw_seconds": {
+            "request_wall": {
+              "fixed": 22.8077,
+              "adaptive": 22.8743
+            },
+            "ttft": {
+              "fixed": 21.283704134,
+              "adaptive": 21.302812095
+            },
+            "session_total": {
+              "fixed": 22.806161245,
+              "adaptive": 22.872074115
+            },
+            "prefill": {
+              "fixed": 21.267807005999995,
+              "adaptive": 21.286080284
+            },
+            "decode": {
+              "fixed": 1.5219881219999996,
+              "adaptive": 1.5686402490000009
+            },
+            "host_exposed": {
+              "fixed": 12.552550249000001,
+              "adaptive": 12.567690668000003
+            },
+            "device_wait_exposed": {
+              "fixed": 10.236510458000001,
+              "adaptive": 10.286457289000001
+            },
+            "decode_host_exposed": {
+              "fixed": 0.001459755,
+              "adaptive": 0.0023659560000000002
+            },
+            "decode_device_wait_exposed": {
+              "fixed": 1.520968066,
+              "adaptive": 1.5668645950000002
+            }
+          },
+          "adaptive_time_reduction": {
+            "request_wall": -0.0029200664687802913,
+            "ttft": -0.0008977742257503252,
+            "session_total": -0.002890134349745166,
+            "prefill": -0.0008591989759381136,
+            "decode": -0.030652096639688153,
+            "host_exposed": -0.0012061627876143177,
+            "device_wait_exposed": -0.0048792829553518935,
+            "decode_host_exposed": -0.6207897900675114,
+            "decode_device_wait_exposed": -0.030175866295933274
+          },
+          "fixed_speculative": {
+            "accepted_per_position": [
+              30,
+              25,
+              17,
+              12
+            ],
+            "accepted_tokens": 84,
+            "backend": "mtp",
+            "draft_window": 4,
+            "drafted_tokens": 164,
+            "fallback_steps": 1,
+            "rounds": 42
+          },
+          "adaptive_speculative": {
+            "accepted_per_position": [
+              32,
+              26,
+              18,
+              5
+            ],
+            "accepted_tokens": 81,
+            "backend": "mtp",
+            "draft_window": 4,
+            "drafted_tokens": 148,
+            "fallback_steps": 1,
+            "rounds": 45
+          },
+          "adaptive_windows": {
+            "rounds_per_window": [
+              0,
+              0,
+              31,
+              15
+            ],
+            "window_transitions": 2
+          }
+        },
+        {
+          "pair": 3,
+          "same_response_text_and_usage": true,
+          "raw_seconds": {
+            "request_wall": {
+              "fixed": 22.8899,
+              "adaptive": 22.9004
+            },
+            "ttft": {
+              "fixed": 21.35111218,
+              "adaptive": 21.330284758
+            },
+            "session_total": {
+              "fixed": 22.8875742,
+              "adaptive": 22.896829645
+            },
+            "prefill": {
+              "fixed": 21.332242138000005,
+              "adaptive": 21.311307772
+            },
+            "decode": {
+              "fixed": 1.5359860590000003,
+              "adaptive": 1.5660046770000002
+            },
+            "host_exposed": {
+              "fixed": 12.585380043999999,
+              "adaptive": 12.565094878
+            },
+            "device_wait_exposed": {
+              "fixed": 10.282135211,
+              "adaptive": 10.310942081
+            },
+            "decode_host_exposed": {
+              "fixed": 0.001474875,
+              "adaptive": 0.002053776
+            },
+            "decode_device_wait_exposed": {
+              "fixed": 1.534957708,
+              "adaptive": 1.564460184
+            }
+          },
+          "adaptive_time_reduction": {
+            "request_wall": -0.0004587176003389981,
+            "ttft": 0.000975472463655036,
+            "session_total": -0.0004043873290862088,
+            "prefill": 0.0009813486020165962,
+            "decode": -0.01954354847435491,
+            "host_exposed": 0.001611804008228579,
+            "device_wait_exposed": -0.002801642791973924,
+            "decode_host_exposed": -0.39250851767098927,
+            "decode_device_wait_exposed": -0.019220383627664095
+          },
+          "fixed_speculative": {
+            "accepted_per_position": [
+              30,
+              25,
+              17,
+              12
+            ],
+            "accepted_tokens": 84,
+            "backend": "mtp",
+            "draft_window": 4,
+            "drafted_tokens": 164,
+            "fallback_steps": 1,
+            "rounds": 42
+          },
+          "adaptive_speculative": {
+            "accepted_per_position": [
+              32,
+              26,
+              18,
+              5
+            ],
+            "accepted_tokens": 81,
+            "backend": "mtp",
+            "draft_window": 4,
+            "drafted_tokens": 148,
+            "fallback_steps": 1,
+            "rounds": 45
+          },
+          "adaptive_windows": {
+            "rounds_per_window": [
+              0,
+              0,
+              31,
+              15
+            ],
+            "window_transitions": 2
+          }
+        }
+      ],
+      "summary_median_time_reduction": {
+        "request_wall": -0.0029200664687802913,
+        "ttft": -0.0008977742257503252,
+        "session_total": -0.002890134349745166,
+        "prefill": -0.0008591989759381136,
+        "decode": -0.01954354847435491,
+        "host_exposed": -0.0012061627876143177,
+        "device_wait_exposed": -0.0048792829553518935,
+        "decode_host_exposed": -0.39250851767098927,
+        "decode_device_wait_exposed": -0.019230987216617867
+      },
+      "all_3_pairs_same_response": true
+    }
+  }
+}

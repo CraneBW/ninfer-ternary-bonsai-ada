@@ -28,8 +28,10 @@ approval requirements beyond the user's instructions and the actual execution en
 ## Product and architecture
 
 NInfer is a from-scratch C++/CUDA inference engine for maximum single-GPU performance on explicitly
-registered artifacts. Current identities are `qwen3.6-27b/groupwise-int`, `qwen3.6-27b/nvfp4`,
-`qwen3.8-27b/groupwise-int`, `qwen3.8-27b/nvfp4`, and `qwen3.6-35b-a3b/groupwise-int`.
+registered artifacts. The actively maintained model is `qwen3.8-27b` (GSQ mixed GGUF blocks; existing groupwise-int/nvfp4 interfaces).
+Qwen3.6-27B product support and both local weight artifacts were retired on 2026-10-21.
+Do not restore or download them. The `qwen3_6` family/package source names include code shared
+by Qwen3.8 and remain necessary. Older validation reports are historical evidence.
 Upstream tuning includes `sm_120a` / NVIDIA GeForce RTX 5090. This checkout is developed and
 validated locally on Linux with an NVIDIA GeForce RTX 4070 Ti SUPER (`sm_89`, 66 SM, 16 GiB).
 Current local performance claims apply to that Ada profile, not automatically to upstream 5090 results.
@@ -151,3 +153,7 @@ only when that work is in scope. Install or upgrade dependencies only when the t
 
 Create commits only when requested. Use Conventional Commit subjects with concise lowercase types
 such as `feat`, `fix`, `perf`, `bench`, `test`, `build`, `refactor`, `docs`, or `chore`.
+
+## 本机功耗与模型维护（2026-10-21）
+
+用户明确选择 RTX 4070 Ti SUPER **200W** 为后续默认功耗；系统服务 `ninfer-gpu-power-limit.service` 已开机自启，配置 `/etc/default/ninfer-gpu-power-limit`。日常测试、性能对照、分析和优化均使用200W；仅发布前最后一轮验收使用300W，结果与200W分别报告，结束恢复200W。主线只维护Qwen3.8；Qwen3.6-27B Groupwise/NVFP4已退役并删除本地权重，不要重新下载。保留Qwen3.8所依赖的共享实现。

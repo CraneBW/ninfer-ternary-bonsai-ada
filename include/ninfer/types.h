@@ -1303,6 +1303,7 @@ struct RuntimeStats {
     // Logical prompt tokens evaluated by prefill; extra internal KVMem replay is reported
     // separately in kvmem.history_replay_tokens/query_replay_tokens.
     std::uint64_t computed_prefill_tokens = 0;
+    std::uint64_t restored_prefill_tokens = 0;
     // Tokens committed by decode rounds; the first token emitted by prefill is excluded.
     std::uint64_t committed_decode_tokens = 0;
     // Decode batch executions and the sum of their batch sizes.

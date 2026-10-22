@@ -685,6 +685,7 @@ template <class Variant>
 struct PrefillProgress {
     runtime::BeginSummary summary;
     std::uint32_t processed_prompt_tokens = 0;
+    std::uint32_t restored_prompt_tokens = 0;
     bool complete                         = false;
     runtime::ExecutionTiming timing;
     std::optional<PendingBatch<Variant>> pending;

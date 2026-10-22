@@ -7,6 +7,7 @@
 #include "kvmem/kvmem_blocks.h"
 #include "kvmem/kvmem_bridge.h"
 #include "kvmem/kvmem_cold_store.h"
+#include "kvmem/kvmem_layer_ready.h"
 #include "kvmem/kvmem_source_k.h"
 #include "kvmem/kvmem_retrieval.h"
 #include "ninfer/types.h"
@@ -856,6 +857,24 @@ private:
 
 class KVAddressSpaceStore {
     static constexpr std::size_t kAsyncBatchBytes = 16ULL << 20;
+    static bool layer_ready_requested() {
+        static const bool enabled = [] {
+            const char* flag = std::getenv("NINFER_KVMEM_LAYER_READY");
+            if (!flag || std::strcmp(flag, "0") == 0) { return false; }
+            if (std::strcmp(flag, "1") == 0) { return true; }
+            throw std::invalid_argument("NINFER_KVMEM_LAYER_READY must be 0 or 1");
+        }();
+        return enabled;
+    }
+    static bool transfer_pipeline_enabled() {
+        static const bool value = [] {
+            const char* flag = std::getenv("NINFER_KVMEM_TRANSFER_PIPELINE");
+            if (!flag || std::strcmp(flag, "0") == 0) { return false; }
+            if (std::strcmp(flag, "1") == 0) { return true; }
+            throw std::invalid_argument("NINFER_KVMEM_TRANSFER_PIPELINE must be 0 or 1");
+        }();
+        return value;
+    }
     struct PendingDemote {
         struct Page {
             std::uint32_t block = 0;
@@ -960,6 +979,44 @@ public:
         return kvmem_original_positions_;
     }
 
+    // Read-only diagnostic of the bytes actually visible to attention. Reuse
+    // the native KVMem Host codec, bounded to one page; omit unwritten columns
+    // and layout padding. The visitor owns hashing/reporting, not storage.
+    template<class Visitor>
+    void visit_original_window(KVAddressSpaceHandle handle, Visitor&& visitor,
+                               cudaStream_t stream) {
+        (void)retire_kvmem_transfers(true);
+        auto& address = require_active(handle);
+        if (!kvmem_original_positions_ || address.original_epoch == 0) {
+            throw std::logic_error("native window inspection needs a live original epoch");
+        }
+        const auto index = static_cast<std::size_t>(&address - addresses_.data());
+        auto& pool = pages_->physical_pool();
+        ensure_kvmem_host_arena(pool);
+        auto staging = kvmem_cold_buffer();
+        auto view = kvmem_cold_staging_->writable_view(staging);
+        for (const auto& block : kvmem_repos_[index].blocks()) {
+            if (block.tier != ninfer::kvmem::KvTier::Gpu) { continue; }
+            const auto columns = kvmem_native_records_[index].at(block.id).columns;
+            require_original_native_owner(index, block.id, columns);
+            const std::array<DeviceKVPageHandle, 1> source{
+                pages_->physical(kvmem_block_pages_[index].at(block.id))};
+            const std::array<HostKVAllocationView, 1> destination{view};
+            (void)pool.copy_to_host_pages(source, destination, stream);
+            kvmem_cold_sync(stream);
+            visitor(&block.id, sizeof(block.id));
+            visitor(&columns, sizeof(columns));
+            for (std::size_t p = 0; p < kvmem_host_layout_.planes.size(); ++p) {
+                const auto& plane = kvmem_host_layout_.planes[p];
+                const auto heads = kvmem_host_layout_.geometry.planes[p].head_extent;
+                for (std::int32_t h = 0; h < heads; ++h) {
+                    visitor(view.data() + plane.offset + h * plane.head_payload_bytes,
+                            plane.head_payload_bytes / kPagedKVPageSize * columns);
+                }
+            }
+        }
+    }
+
     KVAddressSpaceStore(LogicalKVPageStore& pages, KVExecutionTablePool& tables,
                         std::uint32_t address_capacity, std::uint32_t page_capacity,
                         KvMemOptions kvmem = {}, DeviceSpan rerope_workspace = {},
@@ -1055,7 +1112,27 @@ public:
     KVAddressSpaceStore(KVAddressSpaceStore&&)                 = delete;
     KVAddressSpaceStore& operator=(KVAddressSpaceStore&&)      = delete;
 
-    ~KVAddressSpaceStore() { kvmem_pending_demote_.reset(); }
+    ~KVAddressSpaceStore() {
+        // Cold staging is owned by this store and may still be read by an
+        // independent per-layer copy stream when a request is cancelled.
+        try {
+            if (kvmem_layer_ready_) { kvmem_layer_ready_->drain_consumers(); }
+            if (kvmem_source_k_) { kvmem_source_k_->drain_layer_source(); }
+            drain_cold_layer_buffers();
+        } catch (...) { std::terminate(); }
+        kvmem_pending_demote_.reset();
+        if (kvmem_enabled_) {
+            const char* trace = std::getenv("NINFER_KVMEM_LAYER_READY_TRACE");
+            if (trace && std::strcmp(trace, "1") == 0) {
+                std::fprintf(stderr,
+                    "KVMEM_LAYER_FINAL pending_pinned_pages=%zu inflight_pages=%u "
+                    "producer_active=%d failure_drains=%llu\n",
+                    kvmem_layer_pending_pages(), kvmem_inflight_pages(),
+                    kvmem_layer_ready_ && kvmem_layer_ready_->active() ? 1 : 0,
+                    static_cast<unsigned long long>(kvmem_layer_failure_drains_));
+            }
+        }
+    }
 
     // The Program owns the stream and outlives this store. One bounded batch
     // per typed pool is enabled first; the synchronous path remains available.
@@ -1157,7 +1234,8 @@ public:
                        std::int32_t execution_row,
                        std::optional<std::uint32_t> activation_frontier = std::nullopt) {
         Address& address = require(handle);
-        if (address.active || address.row || address.reservation.valid() || entitlement == 0 ||
+        if (address.failed_compaction || address.active || address.row ||
+            address.reservation.valid() || entitlement == 0 ||
             entitlement > page_capacity_ ||
             (activation_frontier && *activation_frontier > address.committed_frontier)) {
             throw std::logic_error("KV address space is not reservable for activation");
@@ -1228,7 +1306,7 @@ public:
             throw std::logic_error("KV activation reservation address is stale");
         }
         Address& address = require(activation.address_);
-        if (address.active || address.row || address.reservation.valid() ||
+        if (address.failed_compaction || address.active || address.row || address.reservation.valid() ||
             activation.requested_entitlement_ == 0 ||
             activation.requested_entitlement_ > page_capacity_ ||
             (activation.activation_frontier_ &&
@@ -1274,6 +1352,7 @@ public:
 
     void deactivate(KVAddressSpaceHandle handle) {
         Address& address = require_active(handle);
+        drain_kvmem_layer_reader(handle);
         for (std::uint32_t page = 0; page < address.page_count; ++page) {
             const LogicalKVPageHandle logical = membership(address, page);
             if (pages_->writer_references(logical) != 0 &&
@@ -1859,6 +1938,7 @@ public:
         }
         const std::uint32_t target = pages_for_tokens(frontier);
         if (frontier == address.committed_frontier && target == address.page_count) { return; }
+        drain_kvmem_layer_reader(handle);
         for (std::uint32_t page = target; page < address.page_count; ++page) {
             if (!pages_->can_dematerialize(membership(address, page))) {
                 throw std::logic_error("KV truncate would partially release a protected page");
@@ -2057,6 +2137,35 @@ public:
 
     [[nodiscard]] bool kvmem_enabled() const noexcept { return kvmem_enabled_; }
 
+    // Only an explicit prefill compaction may publish a layer-ready ticket;
+    // decode/Graph and other addresses never inherit a producer by accident.
+    [[nodiscard]] ninfer::kvmem::LayerReadyConsumer*
+    kvmem_layer_ready_for(KVAddressSpaceHandle handle) noexcept {
+        return handle.valid() && handle == kvmem_layer_ready_address_ &&
+                       kvmem_layer_ready_ && kvmem_layer_ready_->active()
+            ? kvmem_layer_ready_.get() : nullptr;
+    }
+
+    [[nodiscard]] std::size_t kvmem_layer_pending_pages() const noexcept {
+        return cold_layer_count_ +
+            (kvmem_source_k_ ? kvmem_source_k_->pending_layer_source_pages() : 0);
+    }
+
+    [[nodiscard]] std::uint64_t kvmem_layer_failure_drains() const noexcept {
+        return kvmem_layer_failure_drains_;
+    }
+
+    void drain_kvmem_layer_reader(KVAddressSpaceHandle handle) {
+        if (kvmem_layer_ready_ && handle.valid() && handle == kvmem_layer_ready_address_) {
+            // Cancellation / address invalidation is not a same-stream
+            // remap. Drain *both* the producer and final queued consumer reads
+            // before giving its physical pages or execution row back.
+            kvmem_layer_ready_->drain_consumers();
+            drain_cold_layer_buffers();
+            kvmem_layer_ready_address_ = {};
+        }
+    }
+
     [[nodiscard]] std::uint32_t committed_frontier(KVAddressSpaceHandle handle) const {
         return require(handle).committed_frontier;
     }
@@ -2143,6 +2252,8 @@ public:
 
     [[nodiscard]] bool release(KVAddressSpaceHandle handle) noexcept {
         if (!can_release(handle)) { return false; }
+        try { drain_kvmem_layer_reader(handle); }
+        catch (...) { std::terminate(); }
         if (kvmem_pending_demote_ && kvmem_pending_demote_->address == handle) {
             // The address is being discarded: drain without publishing an
             // otherwise unnecessary Host replica, then release its held refs.
@@ -2197,6 +2308,9 @@ private:
         std::optional<KVExecutionRowLease> row;
         bool occupied = false;
         bool active   = false;
+        // The only legal follow-up after a failed page remap is address
+        // disposal. Partially restored contents must never be activated.
+        bool failed_compaction = false;
         // An epoch covers one original execution branch. Ordinary append and
         // native owner migration preserve it; a destructive rewind revokes it.
         std::uint64_t original_epoch = 1;
@@ -2353,6 +2467,70 @@ private:
         if (error != cudaSuccess) {
             throw std::runtime_error(std::string("KVMem cold transfer: ") +
                                      cudaGetErrorString(error));
+        }
+    }
+
+    struct ColdLayerSlot {
+        HostKVAllocation staging;
+        std::int32_t physical = -1;
+        std::uint32_t block_id = 0;
+    };
+
+    void drain_cold_layer_buffers() {
+        if (cold_layer_producer_stream_) {
+            CUDA_CHECK(cudaStreamSynchronize(cold_layer_producer_stream_));
+            cold_layer_producer_stream_ = nullptr;
+        }
+        for (std::size_t i = 0; i < cold_layer_count_; ++i) {
+            cold_layer_slots_[i].staging.release();
+            cold_layer_slots_[i].physical = -1;
+        }
+        cold_layer_count_ = 0;
+    }
+
+    // Cold futures have completed and their source handle generation was
+    // checked before arriving here. These one/two HostKVAllocation instances
+    // stay owned until producer GPU DMA retires, not until memcpy is enqueued.
+    void enqueue_cold_layer(std::uint32_t layer, DeviceKVPagePool& pool,
+                            cudaStream_t producer) {
+        if (!cold_layer_producer_stream_ || producer != cold_layer_producer_stream_ ||
+            cold_layer_count_ == 0 || layer >= 16 ||
+            pool.geometry().page_tokens != kPagedKVPageSize ||
+            pool.geometry().device_plane_order != PagedKVPlaneOrder::PageMajor ||
+            pool.geometry().planes.size() != 64) {
+            throw std::logic_error("Cold layer copy has no compatible pending owner");
+        }
+        for (std::size_t i = 0; i < cold_layer_count_; ++i) {
+            const auto& entry = cold_layer_slots_[i];
+            const auto view = kvmem_cold_staging_->view(entry.staging);
+            if (!view.valid() || view.page_count() != 1 ||
+                view.layout() != kvmem_host_layout_) {
+                throw std::logic_error("Cold layer source staging is stale");
+            }
+            for (std::uint32_t group = 0; group < 4; ++group) {
+                const std::size_t plane_index = layer * 4 + group;
+                const auto& plane = pool.plane(plane_index);
+                const auto& packed = kvmem_host_layout_.planes[plane_index];
+                const auto heads = pool.geometry().planes[plane_index].head_extent;
+                if (plane.nb[2] < static_cast<std::int64_t>(packed.head_payload_bytes)) {
+                    throw std::logic_error("Cold layer destination head pitch is invalid");
+                }
+                auto* device = static_cast<std::byte*>(plane.data) +
+                    static_cast<std::int64_t>(entry.physical) * plane.nb[3];
+                const auto* source = view.data() + packed.offset;
+                CUDA_CHECK(cudaMemcpy2DAsync(device, static_cast<std::size_t>(plane.nb[2]),
+                    source, packed.head_payload_bytes, packed.head_payload_bytes, heads,
+                    cudaMemcpyHostToDevice, producer));
+                // OpenSpec 3.4 fault receipt: one real H2D has been submitted
+                // but no layer_ready has been recorded. Error unwinding must
+                // retain this Host source and physical target until DMA ends.
+                if (layer == 0 && i == 0 && group == 0) {
+                    const char* fault = std::getenv("NINFER_KVMEM_TEST_PARTIAL_LAYER_H2D_FAILURE");
+                    if (fault && std::strcmp(fault, "1") == 0) {
+                        throw std::runtime_error("KVMem injected partial Cold layer H2D failure");
+                    }
+                }
+            }
         }
     }
 
@@ -2679,6 +2857,224 @@ private:
     }
 
 public:
+    // Benchmark prefix archive: quiescent canonical q0 only. The caller binds
+    // model/prompt/config and validates the entire file before invoking load.
+    // Adapt KVMem snapshot allocation ownership; runtime handles are recreated.
+    template<class Writer>
+    void save_benchmark_prefix(KVAddressSpaceHandle handle, Writer& out, cudaStream_t stream) {
+        if (!kvmem_enabled_ || kvmem_original_positions_) {
+            throw std::invalid_argument("prefix archive requires canonical KVMem");
+        }
+        (void)retire_kvmem_transfers(true);
+        auto& address = require_active(handle);
+        const auto index = static_cast<std::size_t>(&address-addresses_.data());
+        if (address.checkpoint_frontier || address.original_epoch == 0) {
+            throw std::logic_error("prefix archive has protected or invalid state");
+        }
+        ensure_kvmem_host_arena(pages_->physical_pool());
+        out.pod(kvmem_host_layout_.page_stride);
+        out.pod(kvmem_budget_); out.pod(kvmem_gen_reserve_);
+        out.pod(kvmem_action_lrfu_); out.pod(kvmem_lrfu_lambda_); out.pod(kvmem_lrfu_top_fraction_);
+        out.pod(kvmem_host_arena_->capacity_bytes());
+        out.pod(address.page_count); out.pod(address.committed_frontier);
+        out.pod(kvmem_reuse_floors_[index]);
+        const auto& repo=kvmem_repos_[index];
+        out.pod(repo.checkpoint_scoring_step()); out.pod(repo.block_count());
+        for(const auto& block:repo.blocks()) out.pod(block);
+        out.pod_vector(kvmem_mean_k_[index]); out.pod_vector(kvmem_mean_k_tokens_[index]);
+        auto staging=kvmem_cold_buffer();
+        auto view=kvmem_cold_staging_->writable_view(staging);
+        auto& pool=pages_->physical_pool();
+        for(const auto& block:repo.blocks()) {
+            const auto id=block.id;
+            const ninfer::kvmem::ImmutableKStore::Record empty{};
+            kvmem_source_k_->save_record(id<kvmem_source_records_[index].size()
+                ? kvmem_source_records_[index][id] : empty,out);
+            if(block.tier==ninfer::kvmem::KvTier::Gpu) {
+                const auto logical=kvmem_block_pages_[index].at(id);
+                if(!logical.valid() || block.baked_pos<0 ||
+                   membership(address,block.baked_pos/kPagedKVPageSize)!=logical) {
+                    throw std::logic_error("prefix native resident identity");
+                }
+                const std::array<DeviceKVPageHandle,1> src{pages_->physical(logical)};
+                const std::array<HostKVAllocationView,1> dst{view};
+                (void)pool.copy_to_host_pages(src,dst,stream);kvmem_cold_sync(stream);
+            } else if(block.tier==ninfer::kvmem::KvTier::Host) {
+                const auto src=kvmem_host_arena_->view(kvmem_block_hosts_[index].at(id));
+                out.write(src.data(),kvmem_host_layout_.page_stride);continue;
+            } else {
+                kvmem_cold_file().load(kvmem_block_cold_[index].at(id),
+                    {view.data(),kvmem_host_layout_.page_stride});
+            }
+            out.write(view.data(),kvmem_host_layout_.page_stride);
+        }
+    }
+
+    template<class Reader>
+    void load_benchmark_prefix(KVAddressSpaceHandle handle, Reader& in, cudaStream_t stream) {
+        if(!kvmem_enabled_ || kvmem_original_positions_) {
+            throw std::invalid_argument("prefix archive requires canonical KVMem");
+        }
+        auto& address=require_active(handle);
+        const auto index=static_cast<std::size_t>(&address-addresses_.data());
+        if(address.page_count || address.committed_frontier || kvmem_repos_[index].block_count()) {
+            throw std::logic_error("prefix load requires an empty exclusive address");
+        }
+        ensure_kvmem_host_arena(pages_->physical_pool());
+        in.template expect<std::size_t>(kvmem_host_layout_.page_stride);
+        in.template expect<std::uint32_t>(kvmem_budget_); in.template expect<std::uint32_t>(kvmem_gen_reserve_);
+        in.template expect<bool>(kvmem_action_lrfu_); in.template expect<double>(kvmem_lrfu_lambda_);
+        in.template expect<double>(kvmem_lrfu_top_fraction_);
+        in.template expect<std::size_t>(kvmem_host_arena_->capacity_bytes());
+        const auto count=in.template pod<std::uint32_t>();
+        const auto frontier=in.template pod<std::uint32_t>();
+        const auto floor=in.template pod<std::uint32_t>();
+        const auto step=in.template pod<std::uint32_t>();
+        const auto n=in.template pod<std::uint32_t>();
+        if(count==0 || count>page_capacity_ || n<count || n>page_capacity_ ||
+           pages_for_tokens(frontier)!=count || floor>frontier) {
+            throw std::invalid_argument("prefix archive directory extent");
+        }
+        std::vector<ninfer::kvmem::KvBlockMeta> blocks(n);
+        std::vector<std::uint8_t> seen(count,0);
+        for(std::uint32_t i=0;i<n;++i) {
+            blocks[i]=in.template pod<ninfer::kvmem::KvBlockMeta>();const auto& b=blocks[i];
+            if(b.id!=i || b.token_begin!=std::uint64_t(i)*kPagedKVPageSize ||
+               b.n_tokens!=kPagedKVPageSize || b.tier>ninfer::kvmem::KvTier::Nvme ||
+               (b.in_working_set!=(b.tier==ninfer::kvmem::KvTier::Gpu))) {
+                throw std::invalid_argument("prefix archive block identity");
+            }
+            if(b.in_working_set) {
+                if(b.baked_pos<0 || b.baked_pos%kPagedKVPageSize ||
+                   std::uint64_t(b.baked_pos/kPagedKVPageSize)>=count ||
+                   seen[b.baked_pos/kPagedKVPageSize]++) {
+                    throw std::invalid_argument("prefix archive resident permutation");
+                }
+            }
+        }
+        if(std::find(seen.begin(),seen.end(),0)!=seen.end()) {
+            throw std::invalid_argument("prefix archive incomplete resident table");
+        }
+        auto means=in.template pod_vector<float>(std::size_t(n)*kvmem_mean_k_stride_);
+        auto columns=in.template pod_vector<std::uint32_t>(n);
+        ensure_mapped_to_tokens(handle,count*kPagedKVPageSize,stream);
+        commit_frontier(handle,frontier);
+        auto& repo=kvmem_repos_[index];repo={};
+        for(const auto& block:blocks) (void)repo.append(block);
+        repo.restore_scoring_step(step);
+        kvmem_block_pages_[index].assign(n,{});
+        kvmem_block_hosts_[index].resize(n);kvmem_block_cold_[index].resize(n);
+        kvmem_source_records_[index].resize(n);
+        kvmem_mean_k_[index]=std::move(means);kvmem_mean_k_tokens_[index]=std::move(columns);
+        kvmem_reuse_floors_[index]=floor;
+        const bool pipeline=ninfer::kvmem::checkpoint_load_pipeline_enabled();
+        const auto load_began=std::chrono::steady_clock::now();
+        std::uint64_t source_us=0,read_us=0,host_copy_us=0,gpu_submit_us=0,wait_us=0;
+        std::uint32_t gpu_pages=0,host_pages=0,cold_pages=0,batch_calls=0;
+        const auto add_time=[](auto began,std::uint64_t& total) {
+            total+=std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-began).count();
+        };
+        // Adapt Strata released/ready to the existing bounded Cold staging arena.
+        // Last H2D reader releases a slot; the next CPU read may use the other.
+        // The whole native address remains unpublished until both have retired.
+        struct LoadSlot {
+            HostKVAllocation owner;
+            cudaStream_t stream=nullptr;
+            cudaEvent_t ready=nullptr;
+            bool submitted=false;
+            std::array<void*,64> destinations{};
+            std::array<const void*,64> sources{};
+            std::array<std::size_t,64> sizes{};
+            void wait() {
+                if(submitted) { KVMEM_CUDA_CHECK(cudaEventSynchronize(ready));submitted=false; }
+            }
+            ~LoadSlot() {
+                // A failed partial enqueue may not be covered by its last event.
+                if(submitted && cudaStreamSynchronize(stream)!=cudaSuccess) std::terminate();
+                if(ready) (void)cudaEventDestroy(ready);
+            }
+        };
+        std::array<LoadSlot,2> slots;
+        for(std::size_t i=0;i<(pipeline?2U:1U);++i) {
+            slots[i].owner=kvmem_cold_buffer();slots[i].stream=stream;
+            if(pipeline) KVMEM_CUDA_CHECK(cudaEventCreateWithFlags(&slots[i].ready,cudaEventDisableTiming));
+        }
+        auto& pool=pages_->physical_pool();
+        for(const auto& b:blocks) {
+            auto began=std::chrono::steady_clock::now();
+            kvmem_source_k_->load_record(kvmem_source_records_[index][b.id],in);
+            add_time(began,source_us);
+            if(pipeline && b.tier==ninfer::kvmem::KvTier::Host) {
+                auto allocation=kvmem_host_arena_->allocate(kvmem_host_layout_,1);
+                if(!allocation) throw std::runtime_error("prefix archive Host quota");
+                auto dst=kvmem_host_arena_->writable_view(*allocation);
+                began=std::chrono::steady_clock::now();
+                in.read(dst.data(),kvmem_host_layout_.page_stride);add_time(began,read_us);
+                kvmem_block_hosts_[index][b.id]=std::move(*allocation);++host_pages;continue;
+            }
+            auto& slot=slots[pipeline ? gpu_pages%2 : 0];
+            began=std::chrono::steady_clock::now();slot.wait();add_time(began,wait_us);
+            auto view=kvmem_cold_staging_->writable_view(slot.owner);
+            began=std::chrono::steady_clock::now();
+            in.read(view.data(),kvmem_host_layout_.page_stride);add_time(began,read_us);
+            if(b.tier==ninfer::kvmem::KvTier::Gpu) {
+                const auto logical=membership(address,b.baked_pos/kPagedKVPageSize);
+                const std::array<HostKVAllocationConstView,1> src{view};
+                const std::array<DeviceKVPageHandle,1> dst{pages_->physical(logical)};
+                began=std::chrono::steady_clock::now();
+                bool batch=false;
+#if CUDART_VERSION >= 13000 && defined(NINFER_SM89)
+                if(pipeline && stream && pool.plane_count()<=slot.sizes.size() &&
+                   pool.geometry().device_plane_order==PagedKVPlaneOrder::PageMajor) {
+                    batch=true;
+                    const auto physical=pool.physical_index_of(dst[0]);
+                    for(std::size_t i=0;i<pool.plane_count();++i) {
+                        const auto& plane=pool.plane(i);const auto& packed=kvmem_host_layout_.planes[i];
+                        if(plane.nb[2]!=static_cast<std::int64_t>(packed.head_payload_bytes) ||
+                           plane.nb[3]<static_cast<std::int64_t>(packed.page_payload_bytes)) { batch=false;break; }
+                        slot.destinations[i]=static_cast<std::byte*>(plane.data)+physical*plane.nb[3];
+                        slot.sources[i]=view.data()+packed.offset;slot.sizes[i]=packed.page_payload_bytes;
+                    }
+                    if(batch) {
+                        // Existing Infernix/ninfer-3090 CUDA13 batch-copy contract:
+                        // independent ranges, stream-ordered source, owned descriptors.
+                        cudaMemcpyAttributes attrs{};attrs.srcAccessOrder=cudaMemcpySrcAccessOrderStream;
+                        std::size_t first=0;slot.submitted=true;
+                        KVMEM_CUDA_CHECK(cudaMemcpyBatchAsync(slot.destinations.data(),slot.sources.data(),
+                            slot.sizes.data(),pool.plane_count(),&attrs,&first,1,stream));++batch_calls;
+                    }
+                }
+#endif
+                if(!batch) {
+                    slot.submitted=true;
+                    (void)pool.copy_from_host_pages(src,dst,stream);
+                }
+                if(pipeline) KVMEM_CUDA_CHECK(cudaEventRecord(slot.ready,stream));
+                add_time(began,gpu_submit_us);
+                if(!pipeline) { began=std::chrono::steady_clock::now();kvmem_cold_sync(stream);slot.submitted=false;add_time(began,wait_us); }
+                kvmem_block_pages_[index][b.id]=logical;++gpu_pages;
+            } else if(b.tier==ninfer::kvmem::KvTier::Host) {
+                began=std::chrono::steady_clock::now();
+                auto allocation=kvmem_host_arena_->allocate(kvmem_host_layout_,1);
+                if(!allocation) throw std::runtime_error("prefix archive Host quota");
+                auto dst=kvmem_host_arena_->writable_view(*allocation);
+                std::memcpy(dst.data(),view.data(),kvmem_host_layout_.page_stride);
+                kvmem_block_hosts_[index][b.id]=std::move(*allocation);++host_pages;add_time(began,host_copy_us);
+            } else {
+                kvmem_block_cold_[index][b.id]=kvmem_cold_file().store(
+                    {view.data(),kvmem_host_layout_.page_stride});++cold_pages;
+            }
+        }
+        auto began=std::chrono::steady_clock::now();
+        for(auto& slot:slots) slot.wait();add_time(began,wait_us);
+        publish_membership(address,stream);kvmem_cold_sync(stream);
+        std::fprintf(stderr,"KVMEM_CHECKPOINT_PAGES pipeline=%d private=%d gpu=%u host=%u cold=%u batch=%u source_us=%llu read_us=%llu host_copy_us=%llu submit_us=%llu wait_us=%llu total_us=%llu staging_slots=%u\n",
+            pipeline,in.stable_backing()!=nullptr,gpu_pages,host_pages,cold_pages,batch_calls,
+            static_cast<unsigned long long>(source_us),static_cast<unsigned long long>(read_us),
+            static_cast<unsigned long long>(host_copy_us),static_cast<unsigned long long>(gpu_submit_us),
+            static_cast<unsigned long long>(wait_us),static_cast<unsigned long long>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-load_began).count()),pipeline?2:1);
+    }
+
     // Commit one completed-prompt history round without moving pages. Compaction previews
     // (including complete-query reselection before the assistant opener) update current
     // retrieval only; they must not repeatedly count the same query in the LRFU profile.
@@ -2702,10 +3098,28 @@ public:
                                 cudaStream_t stream = nullptr,
                                 std::vector<std::uint32_t> mandatory_ids = {},
                                 bool sink_only = false, std::uint32_t pinned_prefix_pages = 0,
-                                std::span<const std::uint32_t> coupled_selection = {}) {
+                                std::span<const std::uint32_t> coupled_selection = {},
+                                std::optional<std::uint32_t> replay_from = std::nullopt,
+                                bool prefill_layer_consumer = false) {
         if (!kvmem_enabled_) { return 0; }
+        // Finish the prior producer before reusing its pinned/device metadata;
+        // reader writes on the compute stream remain ordered with new work.
+        if (kvmem_layer_ready_) { kvmem_layer_ready_->retire(); }
+        drain_cold_layer_buffers();
+        kvmem_layer_ready_address_ = {};
+        // Caller must immediately begin canonical replay before any consumer.
+        // The reusable prefix retains native V; begin_kvmem_window_replay
+        // recovers its immutable K. Later columns will be computed afresh.
+        // Adapt KVMem's prepare/restore separation, retaining local ownership.
+        if (replay_from && (kvmem_original_positions_ || pinned_prefix_pages != 0 ||
+                            *replay_from % kPagedKVPageSize != 0)) {
+            throw std::invalid_argument("deferred KV preparation needs an exclusive canonical replay");
+        }
         (void)retire_kvmem_transfers(true);
         Address& address = require(handle);
+        if (address.failed_compaction) {
+            throw std::logic_error("failed KVMem compaction address must be released");
+        }
         if (kvmem_original_positions_ && address.original_epoch == 0) {
             throw std::logic_error("original KV compaction requires fresh prefill after a failed rewind");
         }
@@ -2759,6 +3173,62 @@ public:
         const std::uint32_t pinned_blocks = pinned_prefix_pages;
         const std::uint32_t budget_blocks = budget_tokens / kPagedKVPageSize;
         DeviceKVPagePool& pool = pages_->physical_pool();
+        const auto& pipeline_geometry = pool.geometry();
+        const bool layer_ready = prefill_layer_consumer && layer_ready_requested() &&
+            !kvmem_original_positions_ && !replay_from && stream != nullptr &&
+            stream != cudaStreamLegacy && pipeline_geometry.page_tokens == kPagedKVPageSize &&
+            pipeline_geometry.device_plane_order == PagedKVPlaneOrder::PageMajor &&
+            pipeline_geometry.planes.size() == 16 * 4;
+        // A future.get(), partial CUDA enqueue or metadata publication may
+        // throw after some work has already been submitted. Keep this scope
+        // alive until every local ColdRead future has been joined during stack
+        // unwinding; then drain both streams before the store can release or
+        // reallocate any producer-owned Host source / physical KV target.
+        bool compaction_complete = false;
+        const auto abort_layer_attempt = [&]() noexcept {
+            if (!layer_ready || compaction_complete) { return; }
+            try {
+                if (kvmem_layer_ready_) { kvmem_layer_ready_->drain_consumers(); }
+                if (kvmem_source_k_) { kvmem_source_k_->drain_layer_source(); }
+                drain_cold_layer_buffers();
+                kvmem_layer_ready_address_ = {};
+                // set_selection and stage-out can invalidate entries of the
+                // old membership before a file read or a CUDA enqueue fails.
+                // Rebuild only the address's release directory from valid
+                // references already held by this address and its block
+                // ledger. No partially restored data becomes consumable.
+                const std::uint32_t old_count = address.page_count;
+                std::uint32_t owned = 0;
+                const auto retain_for_disposal = [&](LogicalKVPageHandle page) {
+                    if (!pages_->valid(page)) { return; }
+                    for (std::uint32_t i = 0; i < owned; ++i) {
+                        if (membership(address, i) == page) { return; }
+                    }
+                    if (owned >= page_capacity_) { std::terminate(); }
+                    membership(address, owned++) = page;
+                };
+                // This forward compaction never overwrites an unread member.
+                for (std::uint32_t i = 0; i < old_count; ++i) {
+                    retain_for_disposal(membership(address, i));
+                }
+                for (const auto page : kvmem_block_pages_[index]) {
+                    retain_for_disposal(page);
+                }
+                for (std::uint32_t i = owned; i < old_count; ++i) {
+                    membership(address, i) = {};
+                }
+                address.page_count = owned;
+                address.committed_frontier = std::min(address.committed_frontier,
+                    owned * static_cast<std::uint32_t>(kPagedKVPageSize));
+                address.checkpoint_frontier = 0;
+                address.failed_compaction = true;
+                ++kvmem_layer_failure_drains_;
+            } catch (...) { std::terminate(); }
+        };
+        struct LayerAttemptGuard {
+            decltype(abort_layer_attempt)& action;
+            ~LayerAttemptGuard() noexcept { action(); }
+        } layer_attempt_guard{abort_layer_attempt};
         // Capture before set_selection mutates baked positions, and before any
         // working K can be re-phased or evicted. Only committed new columns
         // enter the immutable source. One pinned K page bounds staging RAM.
@@ -2863,6 +3333,9 @@ public:
             }
         }
         ninfer::kvmem::KvWindowPlan plan = repo.set_selection(sel, cfg);
+        const auto replay_overwrites = [&](std::uint32_t id) {
+            return replay_from && repo.baked_pos_of(id) >= static_cast<std::int64_t>(*replay_from);
+        };
         const std::uint32_t window_tokens = static_cast<std::uint32_t>(plan.total_window_tokens);
         const std::uint32_t window_pages  = window_tokens / kPagedKVPageSize;
         if (plan.remaps.size() != window_pages) {
@@ -2947,6 +3420,7 @@ public:
         std::unique_ptr<PendingDemote> async_demote;
         struct ColdRead {
             std::uint32_t id;
+            ninfer::kvmem::ColdKVStore::Handle source;
             HostKVAllocation buffer;
             // Destroy future first, including unwinding: never free bytes still used by I/O.
             std::future<void> ready;
@@ -2956,17 +3430,24 @@ public:
         std::size_t next_cold_read = 0;
         const auto start_cold_read = [&] {
             if (next_cold_read == cold_read_ids.size()) { return; }
+            // Two read owners, each with a distinct pinned allocation. Leave
+            // the third Cold staging page available for synchronous spill.
+            if (cold_reads.size() >= 2) {
+                throw std::logic_error("KVMem Cold read-ahead slots are still owned");
+            }
             const auto id = cold_read_ids[next_cold_read++];
+            const auto source = kvmem_block_cold_[index][id];
             auto buffer = kvmem_cold_buffer();
             auto view = kvmem_cold_staging_->writable_view(buffer);
-            auto future = kvmem_cold_file_->prefetch(kvmem_block_cold_[index][id],
+            auto future = kvmem_cold_file_->prefetch(source,
                 std::span<std::byte>(view.data(), kvmem_host_layout_.page_stride));
-            cold_reads.push_back({id, std::move(buffer), std::move(future)});
+            cold_reads.push_back({id, source, std::move(buffer), std::move(future)});
             ++kvmem_nvme_prefetch_submitted_;
         };
         if (kvmem_async_device_) {
             for (auto id : plan.stage_in) {
-                if (id < kvmem_block_cold_[index].size() && kvmem_block_cold_[index][id].valid()) {
+                if (!replay_overwrites(id) && id < kvmem_block_cold_[index].size() &&
+                    kvmem_block_cold_[index][id].valid()) {
                     cold_read_ids.push_back(id);
                 }
             }
@@ -3083,7 +3564,25 @@ public:
                     batch->recorded = true;
                     ++kvmem_async_submitted_;
                     kvmem_async_bytes_ += size * kvmem_host_layout_.page_stride;
-                    if (begin + size == handles.size()) {
+                    if (transfer_pipeline_enabled()) {
+                        // Adapt Sync/Async ledger46 multibatch: submit the next
+                        // bounded batch BEFORE waiting on the previous one. At most
+                        // two 16MiB batches are in flight. Claimed pages remain pinned
+                        // and never count as free until their completion retires.
+                        if (async_demote) {
+                            const auto wait_start = std::chrono::steady_clock::now();
+                            async_demote->completion.synchronize();
+                            kvmem_async_wait_us_ += static_cast<std::uint64_t>(
+                                std::chrono::duration_cast<std::chrono::microseconds>(
+                                    std::chrono::steady_clock::now() - wait_start).count());
+                            for (auto& page : async_demote->pages) {
+                                block_hosts[page.block] = std::move(page.destination);
+                            }
+                            ++kvmem_async_completed_;
+                            ++kvmem_async_split_batches_;
+                        }
+                        async_demote = std::move(batch);
+                    } else if (begin + size == handles.size()) {
                         async_demote = std::move(batch);
                     } else {
                         // At most 16MiB remains queued/pinned at any time. Complete
@@ -3146,7 +3645,10 @@ public:
 
         // pass 1 is independent resident work; pass 2 consumes completed restores.
         const auto rephase = [&](int pass) {
-            if (kvmem_original_positions_) { return; }
+            if (kvmem_original_positions_ || replay_from) { return; }
+            // Source and resident relocations must enter the same layer gate;
+            // defer the resident half until async Host stage-in has retired.
+            if (layer_ready && pass == 1) { return; }
             if (!plan.remaps.empty()) {
                 std::vector<std::int32_t> rerope_pages;
                 std::vector<std::int32_t> rerope_from;
@@ -3159,7 +3661,8 @@ public:
                 for (const ninfer::kvmem::KvRemap& rm : plan.remaps) {
                     const bool restored = std::find(plan.stage_in.begin(), plan.stage_in.end(),
                                                     rm.block_id) != plan.stage_in.end();
-                    if (rm.skip || (pass == 1 && restored) || (pass == 2 && !restored)) { continue; }
+                    if (rm.skip || (!layer_ready &&
+                        ((pass == 1 && restored) || (pass == 2 && !restored)))) { continue; }
                     if (rm.raw_refresh) {
                         source_restores.push_back({&sources[rm.block_id],
                             pool.physical_index_of(pages_->physical(block_pages[rm.block_id])),
@@ -3172,17 +3675,96 @@ public:
                     rerope_from.push_back(static_cast<std::int32_t>(rm.from_base));
                     rerope_to.push_back(static_cast<std::int32_t>(rm.to_base));
                 }
-                if (!source_restores.empty()) {
+                // Two existing pinned source-K read slots are sufficient for a
+                // truly async per-layer H2D+K rebuild. Larger batches retain
+                // the proven sync source path, never an unbounded staging pool.
+                const bool layer_sources = layer_ready && !source_restores.empty() &&
+                    source_restores.size() <= 2;
+                if (!source_restores.empty() && !layer_sources) {
                     kvmem_source_k_->restore_many(source_restores, pool, stream);
                 }
-                if (!rerope_pages.empty()) {
-                    ninfer::kvmem::kvmem_rerope_pages(
-                        pool, rerope_pages.data(), rerope_from.data(), rerope_to.data(),
-                        static_cast<std::uint32_t>(rerope_pages.size()),
-                        {{static_cast<std::int32_t*>(kvmem_rerope_host_->data()),
-                          static_cast<std::size_t>(page_capacity_) * 3},
-                     {static_cast<std::int32_t*>(kvmem_rerope_device_.data),
-                          static_cast<std::size_t>(page_capacity_) * 3}}, stream);
+                const bool layer_cold = layer_ready && cold_layer_count_ != 0;
+                if (!rerope_pages.empty() || layer_sources || layer_cold) {
+                    const ninfer::kvmem::KvmemReropeWorkspace workspace{
+                        {static_cast<std::int32_t*>(kvmem_rerope_host_->data()),
+                         static_cast<std::size_t>(page_capacity_) * 3},
+                        {static_cast<std::int32_t*>(kvmem_rerope_device_.data),
+                         static_cast<std::size_t>(page_capacity_) * 3}};
+                    if (layer_ready) {
+                        if (!kvmem_layer_ready_) {
+                            kvmem_layer_ready_ = std::make_unique<ninfer::kvmem::LayerReadyFence>();
+                        }
+                        auto& ticket = *kvmem_layer_ready_;
+                        ticket.begin(stream);
+                        std::array<cudaEvent_t, ninfer::kvmem::LayerReadyFence::kLayers> events;
+                        for (std::uint32_t layer = 0; layer < events.size(); ++layer) {
+                            events[layer] = ticket.ready_event(layer);
+                        }
+                        try {
+                            struct SourceCallback {
+                                KVAddressSpaceStore* owner;
+                                ninfer::kvmem::ImmutableKStore* source;
+                                DeviceKVPagePool* pool;
+                                bool layer_sources;
+                                bool layer_cold;
+                            } callback{this, kvmem_source_k_.get(), &pool,
+                                       layer_sources, layer_cold};
+                            if (layer_sources) {
+                                callback.source->prepare_layer_sources(
+                                    source_restores, pool, ticket.producer_stream());
+                            }
+                            if (layer_cold) {
+                                cold_layer_producer_stream_ = ticket.producer_stream();
+                            }
+                            const ninfer::kvmem::KvmemLayerEnqueue enqueue_source =
+                                (layer_sources || layer_cold) ? +[](void* owner, std::uint32_t layer,
+                                                     cudaStream_t producer) {
+                                    auto& item = *static_cast<SourceCallback*>(owner);
+                                    // Full Host/Cold K/V arrives before raw immutable
+                                    // K overwrites the selected layer's K codes/scales.
+                                    if (item.layer_cold) {
+                                        item.owner->enqueue_cold_layer(layer, *item.pool, producer);
+                                    }
+                                    if (item.layer_sources) {
+                                        item.source->enqueue_layer_source(layer, *item.pool, producer);
+                                    }
+                                } : nullptr;
+                            ninfer::kvmem::kvmem_rerope_pages_layer_ready(
+                                pool, rerope_pages.data(), rerope_from.data(), rerope_to.data(),
+                                static_cast<std::uint32_t>(rerope_pages.size()), workspace,
+                                events, ticket.producer_stream(), enqueue_source,
+                                (layer_sources || layer_cold) ? &callback : nullptr);
+                            for (std::uint32_t layer = 0; layer < events.size(); ++layer) {
+                                ticket.mark_ready(layer);
+                            }
+                            kvmem_layer_ready_address_ = handle;
+                            if (const char* trace = std::getenv("NINFER_KVMEM_LAYER_READY_TRACE");
+                                trace && std::strcmp(trace, "1") == 0) {
+                                std::fprintf(stderr,
+                                             "KVMEM_LAYER_READY epoch=%llu layers=%zu remap_pages=%zu "
+                                             "source_restores=%zu source_layer_async_pages=%zu "
+                                             "source_sync_pages=%zu cold_layer_async_pages=%zu "
+                                             "producer=%s\n",
+                                             static_cast<unsigned long long>(ticket.epoch()),
+                                             events.size(), rerope_pages.size(), source_restores.size(),
+                                             layer_sources ? source_restores.size() : 0UL,
+                                             layer_sources ? 0UL : source_restores.size(),
+                                             layer_cold ? cold_layer_count_ : 0UL,
+                                             layer_cold ? "cold_h2d+source+resident_rephase"
+                                                 : layer_sources ? "source_h2d_rebuild+resident_rephase"
+                                                                 : "resident_rephase");
+                            }
+                        } catch (...) {
+                            ticket.retire();
+                            if (layer_sources) { kvmem_source_k_->drain_layer_source(); }
+                            if (layer_cold) { drain_cold_layer_buffers(); }
+                            throw;
+                        }
+                    } else {
+                        ninfer::kvmem::kvmem_rerope_pages(
+                            pool, rerope_pages.data(), rerope_from.data(), rerope_to.data(),
+                            static_cast<std::uint32_t>(rerope_pages.size()), workspace, stream);
+                    }
                 }
             }
 
@@ -3221,6 +3803,16 @@ public:
                 if (block_pages.size() <= id) { block_pages.resize(id + 1); }
                 if (block_hosts.size() <= id) { block_hosts.resize(id + 1); }
             }
+            // Reserve the usual bounded physical pages, but leave overwritten
+            // destinations uncommitted. Host/Cold/source owners stay alive
+            // until begin_kvmem_window_replay revokes them. No H2D/pread here.
+            std::erase_if(ordered, [&](std::uint32_t id) {
+                if (!replay_overwrites(id)) { return false; }
+                const auto logical = pages_->materialize(*stage_in_reservation);
+                block_pages[id] = logical;
+                if (address.active) { pages_->retain_active_reference(logical); }
+                return true;
+            });
             std::stable_sort(ordered.begin(), ordered.end(),
                              [&](std::uint32_t a, std::uint32_t b) {
                                  const bool va = block_hosts[a].valid();
@@ -3237,7 +3829,7 @@ public:
             views.reserve(ordered.size());
             handles.reserve(ordered.size());
             restored_ids.reserve(ordered.size());
-            const bool async_restore = kvmem_async_device_ != nullptr && stream != nullptr &&
+            const bool async_restore = !ordered.empty() && kvmem_async_device_ != nullptr && stream != nullptr &&
                 kvmem_host_layout_.page_stride <= kAsyncBatchBytes &&
                 std::all_of(ordered.begin(), ordered.end(), [&](std::uint32_t id) {
                     return block_hosts[id].valid() && (kvmem_original_positions_
@@ -3339,14 +3931,29 @@ public:
                 if (transfer_runs != 0) { KVMEM_CUDA_CHECK(cudaStreamSynchronize(stream)); }
                 for (const std::uint32_t id : restored_ids) { block_hosts[id].release(); }
             }
+            // The existing three-page Cold arena has two read-ahead slots and
+            // one spill/restore reserve. Only one/two Cold restore pages can
+            // stay pinned through the forward producer; larger batches retain
+            // the original, already-drained per-page H2D path.
+            const bool layer_cold_stage = layer_ready && !cold_restores.empty() &&
+                cold_restores.size() <= cold_layer_slots_.size();
             for (const auto [id, device] : cold_restores) {
                 HostKVAllocation buffer;
                 const auto record = kvmem_block_cold_[index][id];
                 auto read = std::find_if(cold_reads.begin(), cold_reads.end(),
                                         [id](const auto& item) { return item.id == id; });
                 if (read != cold_reads.end()) {
+                    if (read->source != record || !kvmem_cold_file_->valid(read->source)) {
+                        throw std::logic_error("KVMem Cold read-ahead source generation changed");
+                    }
                     const auto wait_start = std::chrono::steady_clock::now();
                     read->ready.get();
+                    // Never publish bytes from a worker whose source was
+                    // released/replaced before the owner regained control.
+                    if (read->source != kvmem_block_cold_[index][id] ||
+                        !kvmem_cold_file_->valid(read->source)) {
+                        throw std::logic_error("KVMem Cold read-ahead owner changed");
+                    }
                     kvmem_nvme_prefetch_wait_us_ += static_cast<std::uint64_t>(
                         std::chrono::duration_cast<std::chrono::microseconds>(
                             std::chrono::steady_clock::now() - wait_start).count());
@@ -3359,15 +3966,22 @@ public:
                     kvmem_cold_file_->load(record,
                         std::span<std::byte>(writable.data(), kvmem_host_layout_.page_stride));
                 }
-                const std::array<HostKVAllocationConstView, 1> source{
-                    kvmem_cold_staging_->view(buffer)};
-                const std::array<DeviceKVPageHandle, 1> destination{device};
-                transfer_runs += pool.copy_from_host_pages(source, destination, stream);
-                kvmem_cold_sync(stream);
+                if (layer_cold_stage) {
+                    auto& slot = cold_layer_slots_.at(cold_layer_count_++);
+                    slot.staging = std::move(buffer);
+                    slot.block_id = id;
+                    slot.physical = pool.physical_index_of(device);
+                } else {
+                    const std::array<HostKVAllocationConstView, 1> source{
+                        kvmem_cold_staging_->view(buffer)};
+                    const std::array<DeviceKVPageHandle, 1> destination{device};
+                    transfer_runs += pool.copy_from_host_pages(source, destination, stream);
+                    kvmem_cold_sync(stream);
+                }
                 (void)kvmem_cold_file_->release(record);
                 kvmem_block_cold_[index][id] = {};
                 buffer.release();
-                start_cold_read();
+                if (!layer_cold_stage) { start_cold_read(); }
             }
         } else if (transfer_runs != 0 && !async_demote) {
             KVMEM_CUDA_CHECK(cudaStreamSynchronize(stream));
@@ -3379,6 +3993,11 @@ public:
 
         // ---- 3) finish relocation before publishing any restored page ----
         rephase(restore_was_async ? 2 : 0);
+        if (replay_from && std::getenv("NINFER_KVMEM_PREFIX_TRACE")) {
+            const auto skipped = std::count_if(plan.stage_in.begin(), plan.stage_in.end(), replay_overwrites);
+            std::fprintf(stderr, "KVMEM_REPLAY_PREPARE from=%u stage_in_skipped=%zu rephase_skipped=%zu\n",
+                         *replay_from, static_cast<std::size_t>(skipped), plan.remaps.size());
+        }
 
         // ---- 4) rewire the window and shrink the address ----
         const std::uint32_t old_page_count = address.page_count;
@@ -3469,6 +4088,7 @@ public:
                          static_cast<unsigned long long>(transfer_runs),
                          static_cast<unsigned long long>(transfer_us), kv_window);
         }
+        compaction_complete = true;
         return kv_window;
     }
 
@@ -3792,6 +4412,7 @@ public:
         if (kvmem_original_positions_) {
             throw std::logic_error("canonical window replay cannot overwrite original-position KV");
         }
+        drain_kvmem_layer_reader(handle);
         (void)retire_kvmem_transfers(true);
         Address& address = require_active(handle);
         const auto index = static_cast<std::size_t>(&address - addresses_.data());
@@ -3863,6 +4484,27 @@ public:
         return !kvmem_lexical_pages_[index].empty();
     }
 
+    // Stronger than !restore_needed: that helper can decline optional recall
+    // for shared or not-yet-written candidates. Direct continuation needs every
+    // candidate to have real committed columns in this exact working view.
+    [[nodiscard]] bool kvmem_lexical_candidates_resident(KVAddressSpaceHandle handle) const {
+        if (!kvmem_enabled_ || !kvmem_action_lrfu_) { return false; }
+        const auto& address = require(handle);
+        const auto index = static_cast<std::size_t>(&address - addresses_.data());
+        const auto& repo = kvmem_repos_[index];
+        const auto& ids = kvmem_lexical_pages_[index];
+        if (ids.empty()) { return false; }
+        for (const auto id : ids) {
+            if (id >= repo.block_count() || repo.tier_of(id) != ninfer::kvmem::KvTier::Gpu ||
+                id >= kvmem_block_pages_[index].size()) { return false; }
+            const auto page = kvmem_block_pages_[index][id];
+            if (!page.valid() || !pages_->valid(page) || pages_->committed_columns(page) == 0) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     // A reused window can fit the incoming question while its lexical evidence
     // is still on Host/Cold. Waiting for capacity pressure (or round completion)
     // would let that question run without the evidence. Only request reselection
@@ -3931,6 +4573,29 @@ public:
     void freeze_kvmem_query() noexcept {
         kvmem_query_.query_begin = 0;
         kvmem_query_.query_end = 0;
+    }
+
+    // Benchmark snapshot of the completed probe. Shape is bound by the archive
+    // header; action/lexical metadata is reconstructed from its exact prompt.
+    [[nodiscard]] std::vector<float> benchmark_query_sums(cudaStream_t stream) const {
+        if (!kvmem_query_.valid() || kvmem_query_.query_begin || kvmem_query_.query_end) {
+            throw std::logic_error("canonical checkpoint needs a frozen query");
+        }
+        std::vector<float> sums(kvmem_query_host_.size());
+        KVMEM_CUDA_CHECK(cudaMemcpyAsync(sums.data(), kvmem_query_.sums,
+            sums.size() * sizeof(float), cudaMemcpyDeviceToHost, stream));
+        KVMEM_CUDA_CHECK(cudaStreamSynchronize(stream));
+        return sums;
+    }
+
+    void restore_benchmark_query(std::span<const float> sums, cudaStream_t stream) {
+        if (!kvmem_query_.valid() || sums.size() != kvmem_query_host_.size()) {
+            throw std::invalid_argument("canonical checkpoint query shape mismatch");
+        }
+        KVMEM_CUDA_CHECK(cudaMemcpyAsync(kvmem_query_.sums, sums.data(), sums.size_bytes(),
+                                   cudaMemcpyHostToDevice, stream));
+        KVMEM_CUDA_CHECK(cudaStreamSynchronize(stream));
+        freeze_kvmem_query();
     }
 
     // Null until install_kvmem_query ran, i.e. unless KVMem is enabled.
@@ -4111,8 +4776,14 @@ private:
     // mirror. Tier migration transfers one complete native K/V+scale owner.
     std::vector<std::vector<OriginalNativeRecord>> kvmem_native_records_;
     std::unique_ptr<ninfer::kvmem::ImmutableKStore> kvmem_source_k_;
+    // Main16 prefill-only producer/consumer events; address is generation-bound.
+    std::unique_ptr<ninfer::kvmem::LayerReadyFence> kvmem_layer_ready_;
+    KVAddressSpaceHandle kvmem_layer_ready_address_;
     std::unique_ptr<HostKVArena> kvmem_host_arena_;
     std::unique_ptr<HostKVArena> kvmem_cold_staging_;
+    std::array<ColdLayerSlot, 2> cold_layer_slots_{};
+    std::size_t cold_layer_count_ = 0;
+    cudaStream_t cold_layer_producer_stream_ = nullptr;
     std::unique_ptr<ninfer::kvmem::ColdKVStore> kvmem_cold_file_;
     HostKVPageLayout kvmem_host_layout_{};
     // KVMem K3: the request query the prefill schedule captured, and the device
@@ -4139,6 +4810,7 @@ private:
     std::uint64_t kvmem_host_to_cold_spills_ = 0;
     std::uint64_t kvmem_transfer_runs_     = 0;
     std::uint64_t kvmem_transfer_us_       = 0;
+    std::uint64_t kvmem_layer_failure_drains_ = 0;
     std::uint64_t kvmem_scoreable_blocks_  = 0;
     std::uint64_t kvmem_zero_score_blocks_ = 0;
     std::uint32_t kvmem_window_tokens_     = 0;

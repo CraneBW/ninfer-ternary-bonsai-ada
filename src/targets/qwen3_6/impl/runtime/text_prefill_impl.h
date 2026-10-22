@@ -66,6 +66,7 @@ PrefillChunkResult prefill_text_chunk(PrefillContext& state, std::span<const Tok
     configure_text_card(card, state.execution, state.sampling, state.state_source_slot,
                         state.state_destination_slot, state.mtp_proposal_extent);
     card.set_original_kv_positions(state.original_kv_positions);
+    card.set_text_layer_ready(state.text_layer_ready);
     card.set_rewrite_checkpoint_hidden_output(state.rewrite_checkpoint_hidden);
     card.set_prefill_split_frontier(split_frontier ? static_cast<std::int64_t>(*split_frontier)
                                                    : -1);
@@ -91,6 +92,7 @@ PrefillChunkResult prefill_multimodal_chunk(PrefillContext& state, const Prepare
     configure_text_card(card, state.execution, state.sampling, state.state_source_slot,
                         state.state_destination_slot, state.mtp_proposal_extent);
     card.set_original_kv_positions(state.original_kv_positions);
+    card.set_text_layer_ready(state.text_layer_ready);
     card.set_rewrite_checkpoint_hidden_output(state.rewrite_checkpoint_hidden);
     card.set_prefill_split_frontier(split_frontier ? static_cast<std::int64_t>(*split_frontier)
                                                    : -1);

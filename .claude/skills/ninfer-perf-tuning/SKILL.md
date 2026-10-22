@@ -8,6 +8,8 @@ description: 在本仓库（Ternary Bonsai 2 27B on NINFER / Ada sm_89）上做�
 这个仓库是在别人的基础上做的 Ada 移植 + 本机调优。调优的难点不在改代码，在**别把噪声当结论**。
 下面每一条都是踩过之后写的，不是泛泛的原则。
 
+日常测试、profiling、性能对照与调优统一使用 **200W**；仅发布前最后验收使用 **300W**，结束恢复200W。历史300W成绩保持原标注。
+
 ## 一、动手之前：四项必须对齐
 
 比较任何两个配置之前，先确认这四项一致。不对齐的话量到的不是引擎。
@@ -249,3 +251,9 @@ ninfer-perplexity <model> --text fixtures/wiki-slice.txt --context 512 --stride 
 - **`TernaryLaunch` 是一个函数指针类型**，两个入口点（t1/t8）签名必须一致。加参数要同时改。
 - **prefill 是 eager 执行的**（只有三个 decode-batch 捕获入口），所以选档可以按当次 T 走，
   不需要在捕获时冻结；但 decode 路径上的选择**必须进程级冻结**（env 只读一次）。
+
+## 固定长题恢复入口（2026-10-22）
+
+已有213K/256K的 `prefix.nkv` ABI1和 `canonical-ready.nkv` ABI2。`tools.bench.prefix_checkpoint restore` auto优先ABI2（query reuse开启），省掉首次32K重建；先 `prepare`可从原包派生，不能覆盖原包或把restored tokens算作prefill吞吐。纯I/O、canonical-prepare、页流水/P4对照必须显式 `--checkpoint-stage raw`，否则根本不执行被优化的history/source-K工作。改变数学/布局要重做cold资格，旧快照不证明新算子正确。每日200W，发布终测才300W。原值和命令见 `docs/maintainer/2026-10-22-canonical-ready-checkpoint.md`。
+
+完整checkpoint-load流水在固定213K工具默认开启（COW+双槽+直接Host），256K只有功能资格、显式opt-in；恢复旧批次数据需两臂加 `--no-checkpoint-load-pipeline`。source file-capacity仍是逻辑record容量，私有reflink共享原extents，不按整个逻辑文件大小报告物理新增空间。3.47%是本机213K整体会话小收益，首对慢参考保留，不认领35%稳定收益或Async P4。见 `docs/maintainer/2026-10-22-checkpoint-load-pipeline.md`。

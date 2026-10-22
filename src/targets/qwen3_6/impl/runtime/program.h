@@ -718,6 +718,10 @@ public:
     std::unique_ptr<HostKVArena> host_kv_arena;
     std::unique_ptr<LogicalKVPageStore> text_kv_pages;
     std::unique_ptr<KVAddressSpaceStore> text_kv_addresses;
+    bool benchmark_prefix_checkpoint(SequenceState&, RequestControl::Prefill&, bool loading,
+                                     bool canonical_ready = false);
+    bool benchmark_checkpoint_consumed_ = false;
+    bool benchmark_canonical_checkpoint_consumed_ = false;
     std::uint64_t history_replay_tokens_ = 0;
     std::uint64_t query_replay_tokens_ = 0;
     std::uint64_t history_replay_rounds_ = 0;
@@ -729,6 +733,10 @@ public:
         std::vector<TokenId> tokens;
         std::array<qwen3_6::HostStateSlotHandle, 4> slots;
         std::array<std::uint32_t, 4> frontiers{};
+        // A complete canonical view, distinct from partial replay checkpoints.
+        // Only descendants of this exact StateImage may skip query probing.
+        std::vector<StateImageHandle> canonical_states;
+        std::uint32_t canonical_frontier = 0;
     };
     std::unique_ptr<qwen3_6::HostStatePool> replay_state_images_;
     std::vector<ReplayPrefixCache> replay_prefix_caches_;

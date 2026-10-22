@@ -4,6 +4,7 @@
 // unlinked immediately on POSIX or delete-on-close on Windows. Choose a real
 // NVMe-mounted directory with NINFER_KVMEM_COLD_DIR to use actual SSD storage.
 
+#include "kvmem/snapshot_backing.h"
 #include <algorithm>
 #include <cerrno>
 #include <cstddef>
@@ -145,9 +146,28 @@ public:
             throw;
         }
         if (reused) { free_.pop_back(); }
+        slots_[slot].stable = false;
         slots_[slot].active = true;
         ++active_;
         return Handle{slot, slots_[slot].generation};
+    }
+
+    // Adopt only a privately owned, already verified snapshot extent. Writes
+    // and later slot reuse go to fd_, never to another record's stable source.
+    [[nodiscard]] Handle adopt_snapshot_extent(std::shared_ptr<const SnapshotBacking> backing,
+                                               std::uint64_t offset) {
+        if(!backing || backing->fd<0 || offset>backing->bytes || page_bytes_>backing->bytes-offset ||
+           (snapshot_ && snapshot_!=backing)) throw std::invalid_argument("KVMem stable snapshot extent mismatch");
+        const bool reused=!free_.empty();
+        const auto slot=reused ? free_.back() : static_cast<std::uint32_t>(slots_.size());
+        if(!reused) {
+            if(slots_.size()>=std::numeric_limits<std::uint32_t>::max()) throw std::overflow_error("KVMem stable slot overflow");
+            const auto needed=slots_.size()+1;
+            if(needed>free_.capacity()) free_.reserve(std::max(needed,free_.capacity()>free_.max_size()/2 ? free_.max_size() : free_.capacity()*2));
+            slots_.push_back(Slot{});
+        } else free_.pop_back();
+        snapshot_=std::move(backing);slots_[slot].stable=true;slots_[slot].offset=offset;slots_[slot].active=true;
+        ++active_;return {slot,slots_[slot].generation};
     }
 
     void load(Handle handle, std::span<std::byte> destination) const {
@@ -161,8 +181,25 @@ public:
     [[nodiscard]] std::future<void> prefetch(Handle handle, std::span<std::byte> destination) const {
         require_size(destination.size());
         if (!valid(handle)) { throw std::invalid_argument("KVMem prefetch handle is stale"); }
-        return std::async(std::launch::async, [this, slot = handle.slot, destination] {
-            transfer(slot, destination.data(), false);
+        // Resolve immutable metadata on the owner thread. Other records may be
+        // added/released while this read is pending, including slots_ growth.
+        const auto offset=read_offset(handle.slot);
+#if !defined(_WIN32)
+        const int descriptor=slots_[handle.slot].stable ? snapshot_->fd : fd_;
+#else
+        const int descriptor=-1;
+#endif
+        // Opt-in fault receipt for OpenSpec 3.4. The exception is delivered by
+        // future.get() exactly as a real pread failure would be, while the
+        // owning transaction still has both the future and its pinned buffer.
+        const char* fault = std::getenv("NINFER_KVMEM_TEST_COLD_PREAD_FAILURE");
+        const bool inject_read_error = fault && std::strcmp(fault, "1") == 0;
+        return std::async(std::launch::async,
+                          [this, offset, descriptor, destination, inject_read_error] {
+            if (inject_read_error) {
+                throw std::runtime_error("KVMem injected Cold pread failure");
+            }
+            transfer_at(offset, destination.data(), false, descriptor);
         });
     }
 
@@ -184,9 +221,12 @@ public:
     }
 
 private:
+    std::shared_ptr<const SnapshotBacking> snapshot_;
     struct Slot {
         std::uint32_t generation = 1;
         bool active = false;
+        bool stable = false;
+        std::uint64_t offset = 0;
     };
 
 #if defined(_WIN32)
@@ -203,8 +243,23 @@ private:
         if (bytes != page_bytes_) { throw std::invalid_argument("KVMem cold page size mismatch"); }
     }
 
+    [[nodiscard]] std::uint64_t read_offset(std::uint32_t slot) const {
+        return slots_[slot].stable ? slots_[slot].offset : static_cast<std::uint64_t>(slot)*page_bytes_;
+    }
+
     void transfer(std::uint32_t slot, std::byte* data, bool writing) const {
+        const auto offset=writing ? static_cast<std::uint64_t>(slot)*page_bytes_ : read_offset(slot);
+#if !defined(_WIN32)
+        const int descriptor=!writing && slots_[slot].stable ? snapshot_->fd : fd_;
+#else
+        const int descriptor=-1;
+#endif
+        transfer_at(offset,data,writing,descriptor);
+    }
+
+    void transfer_at(std::uint64_t offset, std::byte* data, bool writing, int descriptor) const {
 #if defined(_WIN32)
+        (void)descriptor;
         // Windows uses a shared file cursor; POSIX pread/pwrite use independent offsets.
         const std::lock_guard lock(io_mutex_);
         constexpr std::uint64_t limit = static_cast<std::uint64_t>(
@@ -212,7 +267,6 @@ private:
 #else
         const auto limit = static_cast<std::uint64_t>(std::numeric_limits<off_t>::max());
 #endif
-        const auto offset = static_cast<std::uint64_t>(slot) * page_bytes_;
         if (offset > limit || page_bytes_ > limit - offset) {
             throw std::overflow_error("KVMem cold file offset overflow");
         }
@@ -238,9 +292,9 @@ private:
             done += transferred;
 #else
             const ssize_t n = writing
-                                  ? ::pwrite(fd_, data + done, page_bytes_ - done,
+                                  ? ::pwrite(descriptor, data + done, page_bytes_ - done,
                                              static_cast<off_t>(offset + done))
-                                  : ::pread(fd_, data + done, page_bytes_ - done,
+                                  : ::pread(descriptor, data + done, page_bytes_ - done,
                                             static_cast<off_t>(offset + done));
             if (n < 0 && errno == EINTR) { continue; }
             if (n <= 0) {

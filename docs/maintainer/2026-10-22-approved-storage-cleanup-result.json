@@ -1,0 +1,982 @@
+{
+  "operation": "user-approved selective deletion",
+  "status": "COMPLETE",
+  "started_local": "2026-10-22T22:07:07.018188+08:00",
+  "manifest": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/docs/maintainer/2026-10-22-approved-storage-cleanup-manifest.json",
+  "expected_count": 153,
+  "before_free_bytes": 8787243008,
+  "groups": [
+    {
+      "group": "hf_incomplete",
+      "expected_count": 1,
+      "removed_count": 1,
+      "deleted_allocated_bytes": 7407423488,
+      "free_before_bytes": 8787243008,
+      "free_after_bytes": 8787243008,
+      "free_delta_bytes": 0
+    },
+    {
+      "group": "old_build_test_elf",
+      "expected_count": 81,
+      "removed_count": 81,
+      "deleted_allocated_bytes": 23127506944,
+      "free_before_bytes": 8787243008,
+      "free_after_bytes": 35641053184,
+      "free_delta_bytes": 26853810176
+    },
+    {
+      "group": "historic_tmp_binary",
+      "expected_count": 71,
+      "removed_count": 71,
+      "deleted_allocated_bytes": 19541409792,
+      "free_before_bytes": 35642736640,
+      "free_after_bytes": 53104967680,
+      "free_delta_bytes": 17462231040
+    }
+  ],
+  "deleted": [
+    {
+      "group": "hf_incomplete",
+      "path": "/home/ran/ninfer-work/hf-xet-gsq/.cache/huggingface/download/NOw2NqaIf9x4zzeM_F_-85PcsNI=.29e54467ca0ddae7e9aac04439f72ad20dbf6dc8fb5e84833b41ec7de9c46750.7a5bba05.incomplete",
+      "size_bytes": 7407421397,
+      "allocated_bytes": 7407423488
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_add_bias_test",
+      "size_bytes": 275565616,
+      "allocated_bytes": 275566592
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_argmax_test",
+      "size_bytes": 275574648,
+      "allocated_bytes": 275574784
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_attn_input_proj_test",
+      "size_bytes": 275743184,
+      "allocated_bytes": 275746816
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_candidate_selector_test",
+      "size_bytes": 275653920,
+      "allocated_bytes": 275656704
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_cast_test",
+      "size_bytes": 275565608,
+      "allocated_bytes": 275566592
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_causal_conv1d_silu_test",
+      "size_bytes": 275681304,
+      "allocated_bytes": 275685376
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_context_kv_materialize_test",
+      "size_bytes": 275678760,
+      "allocated_bytes": 275681280
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_dynamic_grouped_conv_prepare_test",
+      "size_bytes": 275626696,
+      "allocated_bytes": 275628032
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_embedding_test",
+      "size_bytes": 275684936,
+      "allocated_bytes": 275685376
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_gated_delta_net_replay_record_test",
+      "size_bytes": 275611152,
+      "allocated_bytes": 275611648
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_gated_delta_net_test",
+      "size_bytes": 275653952,
+      "allocated_bytes": 275656704
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_gated_rmsnorm_test",
+      "size_bytes": 275587552,
+      "allocated_bytes": 275591168
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_gdn_gating_proj_test",
+      "size_bytes": 275721176,
+      "allocated_bytes": 275722240
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_gdn_gating_test",
+      "size_bytes": 275596648,
+      "allocated_bytes": 275599360
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_gdn_input_proj_conv_record_test",
+      "size_bytes": 275767880,
+      "allocated_bytes": 275771392
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_gdn_input_proj_conv_snapshot_test",
+      "size_bytes": 275851392,
+      "allocated_bytes": 275853312
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_gdn_input_proj_test",
+      "size_bytes": 275728368,
+      "allocated_bytes": 275730432
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_gdn_replay_fold_test",
+      "size_bytes": 275808320,
+      "allocated_bytes": 275812352
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_gdn_snapshot_capacity_test",
+      "size_bytes": 275644024,
+      "allocated_bytes": 275644416
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_gelu_test",
+      "size_bytes": 275570272,
+      "allocated_bytes": 275570688
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_gguf_linear_test",
+      "size_bytes": 114108624,
+      "allocated_bytes": 114110464
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_gguf_topk_test",
+      "size_bytes": 387129480,
+      "allocated_bytes": 387133440
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_http_error_handler_test",
+      "size_bytes": 284599944,
+      "allocated_bytes": 284602368
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_kv_cache_append_test",
+      "size_bytes": 275733696,
+      "allocated_bytes": 275734528
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_kvmem_score_test",
+      "size_bytes": 275621384,
+      "allocated_bytes": 275623936
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_l2norm_test",
+      "size_bytes": 275570176,
+      "allocated_bytes": 275570688
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_layer_norm_test",
+      "size_bytes": 275591112,
+      "allocated_bytes": 275591168
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_linear_add_bf16_a16_test",
+      "size_bytes": 275657176,
+      "allocated_bytes": 275660800
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_linear_add_fp8_test",
+      "size_bytes": 275638824,
+      "allocated_bytes": 275640320
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_linear_add_nvfp4_test",
+      "size_bytes": 275638504,
+      "allocated_bytes": 275640320
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_linear_add_q5_a16_test",
+      "size_bytes": 275657000,
+      "allocated_bytes": 275660800
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_linear_add_w8_a16_test",
+      "size_bytes": 275657064,
+      "allocated_bytes": 275660800
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_linear_bf16_a16_test",
+      "size_bytes": 387450152,
+      "allocated_bytes": 387452928
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_linear_dynamic_grouped_conv_add_test",
+      "size_bytes": 275642048,
+      "allocated_bytes": 275644416
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_linear_fp8_a16_test",
+      "size_bytes": 275696768,
+      "allocated_bytes": 275697664
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_linear_fp8_a8_test",
+      "size_bytes": 275696472,
+      "allocated_bytes": 275697664
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_linear_nvfp4_a16_test",
+      "size_bytes": 387464312,
+      "allocated_bytes": 387465216
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_linear_nvfp4_a4_test",
+      "size_bytes": 275692184,
+      "allocated_bytes": 275693568
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_linear_pair_w8_a16_test",
+      "size_bytes": 275613256,
+      "allocated_bytes": 275615744
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_linear_q4_a16_test",
+      "size_bytes": 387467984,
+      "allocated_bytes": 387469312
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_linear_q5_a16_test",
+      "size_bytes": 275696376,
+      "allocated_bytes": 275697664
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_linear_q6_a16_test",
+      "size_bytes": 275696376,
+      "allocated_bytes": 275697664
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_linear_swiglu_fp8_test",
+      "size_bytes": 275725920,
+      "allocated_bytes": 275726336
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_linear_swiglu_nvfp4_test",
+      "size_bytes": 275725920,
+      "allocated_bytes": 275726336
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_linear_swiglu_q4_a16_test",
+      "size_bytes": 275725920,
+      "allocated_bytes": 275726336
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_linear_swiglu_w8_a16_test",
+      "size_bytes": 275726024,
+      "allocated_bytes": 275726336
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_linear_topk_test",
+      "size_bytes": 275659240,
+      "allocated_bytes": 275660800
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_linear_w8_a16_test",
+      "size_bytes": 387472304,
+      "allocated_bytes": 387473408
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_mtp_pack_test",
+      "size_bytes": 275595640,
+      "allocated_bytes": 275599360
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_mtp_round_test",
+      "size_bytes": 277022624,
+      "allocated_bytes": 277024768
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_position_test",
+      "size_bytes": 275596216,
+      "allocated_bytes": 275599360
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_prepare_masked_block_test",
+      "size_bytes": 275587160,
+      "allocated_bytes": 275591168
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_prepare_ragged_prefix_test",
+      "size_bytes": 275616120,
+      "allocated_bytes": 275619840
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_qwen3_6_27b_load_plan_test",
+      "size_bytes": 391290560,
+      "allocated_bytes": 391290880
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_qwen3_6_27b_prefix_real_test",
+      "size_bytes": 281779200,
+      "allocated_bytes": 281780224
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_qwen3_6_27b_score_real_test",
+      "size_bytes": 281559176,
+      "allocated_bytes": 281563136
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_qwen3_6_27b_visual_scatter_test",
+      "size_bytes": 275570720,
+      "allocated_bytes": 275574784
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_qwen3_6_35b_a3b_dflash_real_test",
+      "size_bytes": 281606480,
+      "allocated_bytes": 281608192
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_qwen3_6_35b_a3b_real_test",
+      "size_bytes": 281576656,
+      "allocated_bytes": 281579520
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_qwen3_8_27b_dflash2_real_test",
+      "size_bytes": 281601872,
+      "allocated_bytes": 281604096
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_qwen3_8_kvmem_async_real_test",
+      "size_bytes": 395981160,
+      "allocated_bytes": 395984896
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_request_log_test",
+      "size_bytes": 282496064,
+      "allocated_bytes": 282497024
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_residual_add_test",
+      "size_bytes": 275570176,
+      "allocated_bytes": 275570688
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_rmsnorm_pack_tail_test",
+      "size_bytes": 275616760,
+      "allocated_bytes": 275619840
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_rmsnorm_rope_test",
+      "size_bytes": 275657328,
+      "allocated_bytes": 275660800
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_rmsnorm_test",
+      "size_bytes": 275637616,
+      "allocated_bytes": 275640320
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_rope_test",
+      "size_bytes": 275646696,
+      "allocated_bytes": 275648512
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_sampling_defaults_test",
+      "size_bytes": 280564640,
+      "allocated_bytes": 280567808
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_sampling_test",
+      "size_bytes": 275617800,
+      "allocated_bytes": 275619840
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_scalar_test",
+      "size_bytes": 275575056,
+      "allocated_bytes": 275578880
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_scatter_bf16_batch_test",
+      "size_bytes": 275620280,
+      "allocated_bytes": 275623936
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_scatter_test",
+      "size_bytes": 275645472,
+      "allocated_bytes": 275648512
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_sigmoid_mul_test",
+      "size_bytes": 275570472,
+      "allocated_bytes": 275570688
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_silu_mul_test",
+      "size_bytes": 275574656,
+      "allocated_bytes": 275574784
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_sliding_window_attention_test",
+      "size_bytes": 275731280,
+      "allocated_bytes": 275734528
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_softmax_attention_test",
+      "size_bytes": 277809112,
+      "allocated_bytes": 277811200
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_sparse_moe_test",
+      "size_bytes": 275681232,
+      "allocated_bytes": 275681280
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_speculative_round_test",
+      "size_bytes": 275717240,
+      "allocated_bytes": 275718144
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_target_logprobs_test",
+      "size_bytes": 275596632,
+      "allocated_bytes": 275599360
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_tp2_v3_manifest_test",
+      "size_bytes": 387976176,
+      "allocated_bytes": 387977216
+    },
+    {
+      "group": "old_build_test_elf",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_vision_pos_embed_test",
+      "size_bytes": 275583464,
+      "allocated_bytes": 275587072
+    },
+    {
+      "group": "historic_tmp_binary",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/diagnose-213k-20261020/full-kv-control/ninfer-serve-full-kv-control",
+      "size_bytes": 398828280,
+      "allocated_bytes": 398831616
+    },
+    {
+      "group": "historic_tmp_binary",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/diagnose-213k-20261020/selected-view-control/control",
+      "size_bytes": 395891464,
+      "allocated_bytes": 395894784
+    },
+    {
+      "group": "historic_tmp_binary",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/p0-20261020-baseline-serve",
+      "size_bytes": 398686904,
+      "allocated_bytes": 398688256
+    },
+    {
+      "group": "historic_tmp_binary",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-20261020/gguf-op128-test",
+      "size_bytes": 111742496,
+      "allocated_bytes": 111742976
+    },
+    {
+      "group": "historic_tmp_binary",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-20261020/replay-only-native",
+      "size_bytes": 395980712,
+      "allocated_bytes": 395980800
+    },
+    {
+      "group": "historic_tmp_binary",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-20261020/replay-only-serve",
+      "size_bytes": 398892856,
+      "allocated_bytes": 398893056
+    },
+    {
+      "group": "historic_tmp_binary",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round10/candidate-op-binary",
+      "size_bytes": 112408048,
+      "allocated_bytes": 112410624
+    },
+    {
+      "group": "historic_tmp_binary",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round15/isolated/libninfer_ggml_quants.a",
+      "size_bytes": 117101866,
+      "allocated_bytes": 117104640
+    },
+    {
+      "group": "historic_tmp_binary",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round15/isolated/ninfer_gguf_linear_test",
+      "size_bytes": 112515656,
+      "allocated_bytes": 112517120
+    },
+    {
+      "group": "historic_tmp_binary",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round17/isolated/libninfer_ggml_quants.a",
+      "size_bytes": 117294810,
+      "allocated_bytes": 117297152
+    },
+    {
+      "group": "historic_tmp_binary",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round17/isolated/ninfer_bench",
+      "size_bytes": 397852272,
+      "allocated_bytes": 397852672
+    },
+    {
+      "group": "historic_tmp_binary",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round17/isolated/ninfer_gguf_linear_test",
+      "size_bytes": 112691944,
+      "allocated_bytes": 112693248
+    },
+    {
+      "group": "historic_tmp_binary",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round18/isolated/libninfer_ggml_quants.a",
+      "size_bytes": 117419736,
+      "allocated_bytes": 117420032
+    },
+    {
+      "group": "historic_tmp_binary",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round18/isolated/ninfer_gguf_linear_test",
+      "size_bytes": 112813440,
+      "allocated_bytes": 112816128
+    },
+    {
+      "group": "historic_tmp_binary",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round19/isolated/libninfer_ggml_quants.a",
+      "size_bytes": 117484434,
+      "allocated_bytes": 117485568
+    },
+    {
+      "group": "historic_tmp_binary",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round19/isolated/ninfer_bench",
+      "size_bytes": 398024120,
+      "allocated_bytes": 398024704
+    },
+    {
+      "group": "historic_tmp_binary",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round19/isolated/ninfer_gguf_linear_test",
+      "size_bytes": 112871984,
+      "allocated_bytes": 112873472
+    },
+    {
+      "group": "historic_tmp_binary",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round2/baseline-bench",
+      "size_bytes": 395971912,
+      "allocated_bytes": 395972608
+    },
+    {
+      "group": "historic_tmp_binary",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round2/baseline-native",
+      "size_bytes": 395981160,
+      "allocated_bytes": 395984896
+    },
+    {
+      "group": "historic_tmp_binary",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round2/baseline-serve",
+      "size_bytes": 398893304,
+      "allocated_bytes": 398897152
+    },
+    {
+      "group": "historic_tmp_binary",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round2/bench1024",
+      "size_bytes": 395971912,
+      "allocated_bytes": 395972608
+    },
+    {
+      "group": "historic_tmp_binary",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round2/bench2048",
+      "size_bytes": 395971912,
+      "allocated_bytes": 395972608
+    },
+    {
+      "group": "historic_tmp_binary",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round2/op1024",
+      "size_bytes": 111758264,
+      "allocated_bytes": 111759360
+    },
+    {
+      "group": "historic_tmp_binary",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round2/op2048",
+      "size_bytes": 111758264,
+      "allocated_bytes": 111759360
+    },
+    {
+      "group": "historic_tmp_binary",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round2/op512",
+      "size_bytes": 111758264,
+      "allocated_bytes": 111759360
+    },
+    {
+      "group": "historic_tmp_binary",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round2/pair-bench",
+      "size_bytes": 395976952,
+      "allocated_bytes": 395980800
+    },
+    {
+      "group": "historic_tmp_binary",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round2/pair-serve",
+      "size_bytes": 398906536,
+      "allocated_bytes": 398909440
+    },
+    {
+      "group": "historic_tmp_binary",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round2/stale-bench512",
+      "size_bytes": 395971912,
+      "allocated_bytes": 395972608
+    },
+    {
+      "group": "historic_tmp_binary",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round2/stale-op512",
+      "size_bytes": 111758264,
+      "allocated_bytes": 111759360
+    },
+    {
+      "group": "historic_tmp_binary",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round21/native-prefix-probe-build/native-prefix-probe",
+      "size_bytes": 277262560,
+      "allocated_bytes": 277266432
+    },
+    {
+      "group": "historic_tmp_binary",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round22/measured-bin/ninfer-serve",
+      "size_bytes": 401025800,
+      "allocated_bytes": 401027072
+    },
+    {
+      "group": "historic_tmp_binary",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round23/isolated-stack40/libninfer_ggml_quants.a",
+      "size_bytes": 117735696,
+      "allocated_bytes": 117739520
+    },
+    {
+      "group": "historic_tmp_binary",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round23/isolated-stack40/ninfer_gguf_linear_test",
+      "size_bytes": 113088176,
+      "allocated_bytes": 113090560
+    },
+    {
+      "group": "historic_tmp_binary",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round23/isolated/libninfer_ggml_quants.a",
+      "size_bytes": 117735640,
+      "allocated_bytes": 117739520
+    },
+    {
+      "group": "historic_tmp_binary",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round23/isolated/ninfer_gguf_linear_test",
+      "size_bytes": 113088176,
+      "allocated_bytes": 113090560
+    },
+    {
+      "group": "historic_tmp_binary",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round24/qualified-bin/ninfer-serve",
+      "size_bytes": 401030128,
+      "allocated_bytes": 401031168
+    },
+    {
+      "group": "historic_tmp_binary",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round26-bundle/qualified-bin/ninfer-serve",
+      "size_bytes": 401305920,
+      "allocated_bytes": 401309696
+    },
+    {
+      "group": "historic_tmp_binary",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round26-bundle/qualified-bin/ninfer_bench",
+      "size_bytes": 398380800,
+      "allocated_bytes": 398381056
+    },
+    {
+      "group": "historic_tmp_binary",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round26-bundle/qualified-bin/ninfer_gguf_linear_test",
+      "size_bytes": 113106512,
+      "allocated_bytes": 113106944
+    },
+    {
+      "group": "historic_tmp_binary",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round27-bundle/measured-bin/ninfer-serve",
+      "size_bytes": 401548096,
+      "allocated_bytes": 401551360
+    },
+    {
+      "group": "historic_tmp_binary",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round27-bundle/measured-bin/ninfer_bench",
+      "size_bytes": 398631168,
+      "allocated_bytes": 398635008
+    },
+    {
+      "group": "historic_tmp_binary",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round27-bundle/measured-bin/ninfer_gguf_linear_test",
+      "size_bytes": 113316000,
+      "allocated_bytes": 113319936
+    },
+    {
+      "group": "historic_tmp_binary",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round27-bundle/qualified-bin/ninfer-serve",
+      "size_bytes": 401511312,
+      "allocated_bytes": 401514496
+    },
+    {
+      "group": "historic_tmp_binary",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round27-bundle/qualified-bin/ninfer_bench",
+      "size_bytes": 398590296,
+      "allocated_bytes": 398594048
+    },
+    {
+      "group": "historic_tmp_binary",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round27-bundle/qualified-bin/ninfer_gguf_linear_test",
+      "size_bytes": 113316000,
+      "allocated_bytes": 113319936
+    },
+    {
+      "group": "historic_tmp_binary",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round28-bundle/gdn-packed-fixture",
+      "size_bytes": 113706096,
+      "allocated_bytes": 113709056
+    },
+    {
+      "group": "historic_tmp_binary",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round28-bundle/measured-bin/ninfer-serve",
+      "size_bytes": 401878216,
+      "allocated_bytes": 401879040
+    },
+    {
+      "group": "historic_tmp_binary",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round28-bundle/measured-bin/ninfer_bench",
+      "size_bytes": 398957192,
+      "allocated_bytes": 398958592
+    },
+    {
+      "group": "historic_tmp_binary",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round28-bundle/measured-bin/ninfer_gguf_linear_test",
+      "size_bytes": 113678296,
+      "allocated_bytes": 113680384
+    },
+    {
+      "group": "historic_tmp_binary",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round29-bundle/fusion-fixture",
+      "size_bytes": 390939744,
+      "allocated_bytes": 390942720
+    },
+    {
+      "group": "historic_tmp_binary",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round29-bundle/initial-built-bin/fusion-fixture",
+      "size_bytes": 390939744,
+      "allocated_bytes": 390942720
+    },
+    {
+      "group": "historic_tmp_binary",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round29-bundle/initial-built-bin/ninfer-serve",
+      "size_bytes": 402309848,
+      "allocated_bytes": 402313216
+    },
+    {
+      "group": "historic_tmp_binary",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round29-bundle/initial-built-bin/ninfer_bench",
+      "size_bytes": 399384728,
+      "allocated_bytes": 399388672
+    },
+    {
+      "group": "historic_tmp_binary",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round29-bundle/initial-built-bin/ninfer_gguf_linear_test",
+      "size_bytes": 114108624,
+      "allocated_bytes": 114110464
+    },
+    {
+      "group": "historic_tmp_binary",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round29-bundle/initial-built-bin/ninfer_mtp_round_test",
+      "size_bytes": 277022624,
+      "allocated_bytes": 277024768
+    },
+    {
+      "group": "historic_tmp_binary",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round29-bundle/qualified-bin/ninfer",
+      "size_bytes": 400058392,
+      "allocated_bytes": 400060416
+    },
+    {
+      "group": "historic_tmp_binary",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round29-bundle/qualified-bin/ninfer-perplexity",
+      "size_bytes": 400046104,
+      "allocated_bytes": 400048128
+    },
+    {
+      "group": "historic_tmp_binary",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round29-bundle/qualified-bin/ninfer-serve",
+      "size_bytes": 402309848,
+      "allocated_bytes": 402313216
+    },
+    {
+      "group": "historic_tmp_binary",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round29-bundle/qualified-bin/ninfer_bench",
+      "size_bytes": 399384728,
+      "allocated_bytes": 399388672
+    },
+    {
+      "group": "historic_tmp_binary",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round29-bundle/qualified-bin/ninfer_gguf_linear_test",
+      "size_bytes": 114108624,
+      "allocated_bytes": 114110464
+    },
+    {
+      "group": "historic_tmp_binary",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round3/baseline-op",
+      "size_bytes": 111758264,
+      "allocated_bytes": 111759360
+    },
+    {
+      "group": "historic_tmp_binary",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round3/rejected-j64/op-candidate",
+      "size_bytes": 111916984,
+      "allocated_bytes": 111919104
+    },
+    {
+      "group": "historic_tmp_binary",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round4/baseline-op",
+      "size_bytes": 111764416,
+      "allocated_bytes": 111767552
+    },
+    {
+      "group": "historic_tmp_binary",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round4/measured-candidate/ninfer_bench",
+      "size_bytes": 396606520,
+      "allocated_bytes": 396607488
+    },
+    {
+      "group": "historic_tmp_binary",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round4/measured-candidate/ninfer_gguf_linear_test",
+      "size_bytes": 112398992,
+      "allocated_bytes": 112402432
+    },
+    {
+      "group": "historic_tmp_binary",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round5/measured-bin/ninfer-serve",
+      "size_bytes": 399532000,
+      "allocated_bytes": 399532032
+    },
+    {
+      "group": "historic_tmp_binary",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round5/measured-bin/ninfer_bench",
+      "size_bytes": 396606888,
+      "allocated_bytes": 396607488
+    },
+    {
+      "group": "historic_tmp_binary",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round6/rejected-candidate/ninfer_causal_softmax_attention_bench",
+      "size_bytes": 276613544,
+      "allocated_bytes": 276615168
+    },
+    {
+      "group": "historic_tmp_binary",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round6/rejected-candidate/ninfer_softmax_attention_test",
+      "size_bytes": 277371696,
+      "allocated_bytes": 277372928
+    },
+    {
+      "group": "historic_tmp_binary",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round9/measured-bin/ninfer-serve",
+      "size_bytes": 400465464,
+      "allocated_bytes": 400465920
+    },
+    {
+      "group": "historic_tmp_binary",
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round9/measured-bin/ninfer_bench",
+      "size_bytes": 397544440,
+      "allocated_bytes": 397545472
+    }
+  ],
+  "errors": [],
+  "finished_local": "2026-10-22T22:07:07.830505+08:00",
+  "after_free_bytes": 53104967680,
+  "verified_at": "2026-10-22T22:08:22.027654+08:00",
+  "verified_remaining_targets": 0,
+  "verified_protected_count": 15,
+  "verified_free_after_sync_bytes": 54148304896,
+  "verified_recovered_bytes": 45358559232,
+  "protected_checks": {
+    "GSQ real model": "/home/ran/ninfer-work/real-models/qwen3_8_gsq_rco_iq3_s_v3.ninfer",
+    "Bonsai real model": "/home/ran/ninfer-work/real-models/bonsai2_2b_v3.ninfer",
+    "213K raw snapshot": "/home/ran/ninfer-work/benchmarks/frozen-long-context/213k/prefix.nkv",
+    "213K canonical snapshot": "/home/ran/ninfer-work/benchmarks/frozen-long-context/213k/canonical-ready.nkv",
+    "256K raw snapshot": "/home/ran/ninfer-work/benchmarks/frozen-long-context/256k/prefix.nkv",
+    "256K canonical snapshot": "/home/ran/ninfer-work/benchmarks/frozen-long-context/256k/canonical-ready.nkv",
+    "current serve": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/apps/ninfer-serve",
+    "latest Cold layer test": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_kvmem_layer_cold_test",
+    "latest source layer test": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_kvmem_layer_source_test",
+    "latest compact test": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_kvmem_compact_test",
+    "OpenSpec tasks": "/home/ran/ninfer-work/openspec/changes/absorb-donor-techniques-and-optimize-sm89/tasks.md",
+    "S3 MTP4 quality evidence": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-s3-20261022/mtp4-213k-native-restore/checkpoint-receipt.json",
+    "S4 NSYS trace": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-s4-20261022/trace.nsys-rep",
+    "source code": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/targets/qwen3_6/impl/runtime/logical_kv_store.h",
+    "Git HEAD": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/.git/HEAD"
+  }
+}

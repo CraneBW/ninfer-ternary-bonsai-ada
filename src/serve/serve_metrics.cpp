@@ -110,6 +110,7 @@ std::string ServeMetrics::render(const ninfer::RuntimeStats& stats,
     metric(out, "ninfer:draft_accepted_tokens_total", accepted);
 
     metric(out, "ninfer:computed_prefill_tokens_total", stats.computed_prefill_tokens);
+    metric(out, "ninfer:restored_prefill_tokens_total", stats.restored_prefill_tokens);
     metric(out, "ninfer:committed_decode_tokens_total", stats.committed_decode_tokens);
     metric(out, "ninfer:reused_prompt_tokens_total", stats.reused_prompt_tokens);
     metric(out, "ninfer:decode_rounds_total", stats.decode_rounds);

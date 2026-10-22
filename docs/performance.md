@@ -312,3 +312,39 @@ R29 / v1.0.0 发布验收（2026-10-21）：按用户要求先算理论与资源
 最终K15/Graph/sync/W32768/物理36864/HostKV0原213K六题6/6精确、HTTP/terminal/usage完整、server/service0；248.360s、cgroup峰值16.9G/swap329.5M（20G/2G，非OOM）。整组history replay185836/reused10240/query162、718压实/3010Coldspill/36998sourceK恢复、staging2297856B保持。单臂API TTFT首题152.592s、后五题中位17.715s，仅作观测，不认领配对TTFT或新P4改善；原位置实验仍失败且默认0，15.4和16.1–16.4仍未完成。
 
 全新README、CMake软件版本1.0.0、完整整体原值与原题/数值证据纳入源代码版本；公开报告见 docs/releases/v1.0.0.md 与 docs/releases/v1.0.0/。本机完整失败和精确二进制保存在 perf-ada-round29-bundle。权重、二进制、Cold后备、profiler数据和外部所有权q4诊断改动不纳入源码提交。发布推送/tag状态以实际收据为准。
+
+## 当前本机200W默认（2026-10-21）
+
+用户明确接受200W，开机自启服务已安装启用；主线只维护Qwen3.8，Qwen3.6-27B本地Groupwise/NVFP4权重删除。短MTP7与长MTP15均补齐200/300W三对整体性能，完整输出一致。32K decode配对中位−3.38%，prefill−24.95%；4K decode−10.34%，prefill−22.18%。初始5%筛选标准由用户的200W选择覆盖。100/150W剩余长重复取消，不把中断当成通过。详见[完整功耗报告](performance/2026-10-21-power-cap.md)。
+
+既有Bonsai27B v2另在200W完成4K/32K普通与MTP7测速：MTP7 decode分别175.70/171.12 tok/s，prefill1927.12/1704.82 tok/s；两输入各模式三次中位，完整输出一致。[记录](performance/2026-10-21-bonsai27b-200w.md)。
+
+## 完整前缀快照恢复默认提速（2026-10-22，200W）
+
+已有Qwen3.8 GSQ、INT8 KV、MTP15、C1、Graph、原213K六题、32K工作集，从相同q0快照比较同binary legacy/indexed。三对load24.318→10.775s、首次TTFT47.422→34.160s、session160.600→148.646s（各臂独立中位）；成对用时减少中位分别55.02%、27.58%、7.34%。原题36/36和256K6/6通过，索引默认启用，仍有完整预验证与消费时块校验。history replay185836/reused10240/restored212260保持；后五题TTFT成对减少-1.08%，不认领后续decode或resident prefill收益。不是cold-prefill吞吐，没有物理冷NVMe吞吐结论。
+
+[计时前理论、来源、故障资格、采用和回退](maintainer/2026-10-22-checkpoint-io-optimization.md)；[原值和测量/最终binary身份](performance/2026-10-22-checkpoint-io.json)。
+
+## Canonical续问复用（2026-10-22，200W）
+
+相同GSQ/INT8/MTP15/Graph/C1、32K总工作预算、sync、indexed前缀加载；同binary原213K三对36/36、256K6/6精确正确。六题client wall中位145.232→36.110s，成对减少中位75.49%；后五题TTFT合计111.160→2.027s，成对减少98.18%；后续单题15样本中位22.061→0.404s。历史回放185836→32228、六轮→一轮，query replay162→16；完整StateImage代际/选页/精确prefix及已驻留词法证据匹配才直接续算，复用现有512token reserve。
+
+固定快照工具默认启用，参考臂 `--no-canonical-query-reuse`；普通Serve全局仍0，显式环境变量1启用。首TTFT33.819→33.544s、load10.733→10.667s，均不认领稳定提速；首次仍一次canonical重建。不是cold-prefill、resident decode或Async P4结果。原位置R21仍失败关闭；新逐层流水未完成。重现上一轮纯I/O或canonical-prepare对照时，加 `--no-canonical-query-reuse` 固定原选页政策。
+
+[实现、来源、命令与资格](maintainer/2026-10-22-canonical-query-reuse.md)；[三对原值、工作量与配置](performance/2026-10-22-canonical-query-reuse.json)。
+
+## Canonical-ready完整快照（2026-10-22，200W）
+
+固定原213K，同binary、indexed、query-reuse=1，两臂只切换ABI1原q0与ABI2重建完成q0：三对36/36，首TTFT中位32.988→10.351s，session35.538→13.111s，成对减少中位68.62%与63.11%；history replay32228/1轮→0/0，source rebuild522→0。load10.309→9.978s；后五题合计2.028→2.308s（第一次续问约多0.28s），后续单题中位0.409→0.413s，该回退保留。
+
+新包保存完整Main/MTP、StateImage、冻结Q与四个Host回放检查点；原包均保留。从已有ABI1派生，不重复213K/256K初始prefill。固定工具auto优先已有ABI2；显式raw可复现旧路线。256K保存6/6、工具新默认重启6/6，history replay0；首次索引创建计入该次load29.283s，未做256K成对性能。不称为cold-prefill、resident吞吐或Async P4，不叠加历史百分比。新暂存153954304B pinned、Device新增0；全程200W，300W发布终测未运行。
+
+[实现、理论、来源、成本和命令](maintainer/2026-10-22-canonical-ready-checkpoint.md)；[同binary各臂原值与资格](performance/2026-10-22-canonical-ready-checkpoint.json)。
+
+## 完整快照加载页流水（2026-10-22，200W）
+
+同binary213K/ABI2/indexed/query-reuse=1，三对36/36；load中位10.886→10.380s、首TTFT11.108→10.604s、session13.881→13.436s，成对减少中位4.64%/4.71%/3.47%。首对参考显著偏慢，全部原值保留，不据它认领35%稳定收益；后两对session各省约0.45s。后续单题中位0.413→0.418s，不认领decode/后续改善。
+
+合并私有COW source-K、两现有staging槽、Host直接读及既有CUDA13 batch-copy；无新增Device/pinned容量，原ABI1/2保留。raw213K追加6/6实际消费522次source恢复，256K追加6/6仅功能资格，后者仍显式opt-in。213K工具默认开启，可用 `--no-checkpoint-load-pipeline` 同binary回退；重现旧批次时两臂均加该项。sync不变、R21与真正层消费者/P4未完成；不报告物理冷盘带宽，不外推256K或相加历史百分比。
+
+[来源、理论与完整边界](maintainer/2026-10-22-checkpoint-load-pipeline.md)；[三对原值和48条正确性收据](performance/2026-10-22-checkpoint-load-pipeline.json)。

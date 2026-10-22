@@ -1,3 +1,6 @@
+#include "kvmem/prefix_checkpoint_file.h"
+#include <fstream>
+#include <iterator>
 // MODIFIED for zatfung (zat6 疾 fung1 风 引擎).
 // Store-level K1b compaction test: a real LogicalKVPageStore +
 // KVAddressSpaceStore over a real page pool, driving the lifecycle exactly
@@ -9,6 +12,7 @@
 
 #include <cuda_runtime.h>
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -16,6 +20,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <vector>
 #include <thread>
 
@@ -173,7 +178,7 @@ std::int64_t in_page_elems(int leading, int head, int token, int d) {
 // never at physical page 36. Recreate the same lifecycle as a chunked prefill:
 // compact, restore the logical growth entitlement, regrow to the claim, then
 // compact for generation again. Repeat to exercise Host/NVMe spill as well.
-void test_generation_device_claim() {
+void test_generation_device_claim(bool cold_prefetch = false) {
     constexpr std::uint32_t physical_pages = 36;  // --kv-device-tokens 2304
     constexpr std::uint32_t budget_pages   = 32;  // --kvmem-budget 2048
     constexpr std::uint32_t reserve_pages  = 2;   // --kvmem-gen-reserve 128
@@ -205,6 +210,10 @@ void test_generation_device_claim() {
     CHECK(cudaMalloc(&backing, allocation_bytes) == cudaSuccess, "claim: cudaMalloc");
     if (!backing) { throw std::runtime_error("claim: no device backing"); }
     CHECK(cudaMemset(backing, 0, allocation_bytes) == cudaSuccess, "claim: zero KV pages");
+    // Keep the original claim fixture synchronous. The opt-in variant only
+    // enables the two-slot Cold queue at the final restored-evidence batch.
+    std::unique_ptr<DeviceContext> prefetch_device;
+    if (cold_prefetch) { prefetch_device = std::make_unique<DeviceContext>(); }
     {
         DeviceKVPagePool pool(DeviceSpan{backing, allocation_bytes}, pool_layout);
         KVExecutionTablePool tables(DeviceSpan{backing, allocation_bytes}, table_layout, pool);
@@ -295,9 +304,30 @@ void test_generation_device_claim() {
                   *handle, store.committed_frontier(*handle) + 1),
               "claim: lexical restore must not depend on generation capacity pressure");
         const std::uint64_t stages_before = store.kvmem_usage().stage_in_blocks;
-        CHECK(store.kvmem_compact(*handle, budget_pages * kTokens) ==
+        const std::uint64_t cold_reads_before = store.kvmem_usage().nvme_prefetch_submitted;
+        if (cold_prefetch) { store.enable_kvmem_async_d2h(*prefetch_device); }
+        CHECK(store.kvmem_compact(*handle, budget_pages * kTokens,
+                                  cold_prefetch ? prefetch_device->stream : nullptr) ==
                   budget_pages * kTokens,
               "claim: completion window must grow using its own active reservation");
+        if (cold_prefetch) {
+            (void)store.retire_kvmem_transfers(true);
+            const auto usage = store.kvmem_usage();
+            CHECK(usage.nvme_prefetch_submitted >= cold_reads_before + 2 &&
+                      usage.nvme_prefetch_submitted == usage.nvme_prefetch_completed,
+                  "claim: two pending Cold sources must finish before publishing (%llu/%llu)",
+                  static_cast<unsigned long long>(usage.nvme_prefetch_submitted),
+                  static_cast<unsigned long long>(usage.nvme_prefetch_completed));
+            CHECK(store.kvmem_inflight_pages() == 0,
+                  "claim: Cold batch left a GPU source in flight");
+            std::printf("claim Cold queue submitted=%llu completed=%llu wait_us=%llu "
+                        "transfer_us=%llu staging=%zu\n",
+                        static_cast<unsigned long long>(usage.nvme_prefetch_submitted - cold_reads_before),
+                        static_cast<unsigned long long>(usage.nvme_prefetch_completed),
+                        static_cast<unsigned long long>(usage.nvme_prefetch_wait_us),
+                        static_cast<unsigned long long>(usage.transfer_us),
+                        usage.source_k_staging_bytes);
+        }
         CHECK(!store.kvmem_lexical_restore_needed(*handle),
               "claim: completed restore must make both evidence pages device-visible");
         CHECK(store.kvmem_usage().stage_in_blocks >= stages_before + reserve_pages,
@@ -318,12 +348,241 @@ void test_generation_device_claim() {
 
 } // namespace
 
+// A real 16-layer PageMajor GPU producer and sixteen independent consumer
+// waits. Unlike the small two-layer store fixture, this tests the actual SM89
+// Main16 geometry and the same resident-K rephase math on both streams.
+void test_layer_ready() {
+    constexpr int layers = 16;
+    constexpr int physical_pages = 8;
+#if defined(_WIN32)
+    CHECK(::_putenv_s("NINFER_KVMEM_LAYER_READY", "1") == 0, "enable layer-ready opt-in");
+#else
+    CHECK(::setenv("NINFER_KVMEM_LAYER_READY", "1", 1) == 0, "enable layer-ready opt-in");
+#endif
+    DeviceContext device;
+    KVPageGeometry geometry;
+    geometry.page_tokens = kTokens;
+    geometry.device_plane_order = PagedKVPlaneOrder::PageMajor;
+    for (int layer = 0; layer < layers; ++layer) {
+        geometry.planes.push_back({DType::I8, 256, kHeads, 256});
+        geometry.planes.push_back({DType::I8, 256, kHeads, 256});
+        geometry.planes.push_back({DType::FP16, 4, kHeads, 256});
+        geometry.planes.push_back({DType::FP16, 4, kHeads, 256});
+    }
+    LayoutBuilder builder;
+    const auto layout = plan_device_kv_page_pool(
+        builder, DeviceKVPagePoolSpec{.page_group_count = physical_pages, .geometry = geometry});
+    const auto tables_layout = plan_kv_execution_tables(
+        builder, KVExecutionTableSpec{.logical_page_capacity = physical_pages, .table_rows = 1});
+    DeviceBuffer backing(layout.payload_bytes() + tables_layout.metadata_bytes() + (1U << 20));
+    CUDA_CHECK(cudaMemset(backing.p, 0, backing.bytes));
+    DeviceKVPagePool pool({backing.p, backing.bytes}, layout);
+    std::array<std::vector<std::int8_t>, layers> original_codes;
+    std::array<std::vector<unsigned short>, layers> original_scales;
+    for (int layer = 0; layer < layers; ++layer) {
+        const Tensor codes = pool.plane(static_cast<std::size_t>(layer) * 4);
+        const Tensor scales = pool.plane(static_cast<std::size_t>(layer) * 4 + 2);
+        const auto code_stride = static_cast<std::size_t>(codes.nb[3]);
+        const auto scale_stride = static_cast<std::size_t>(scales.nb[3]);
+        std::vector<std::byte> code_bytes(code_stride * physical_pages);
+        std::vector<std::byte> scale_bytes(scale_stride * physical_pages);
+        original_codes[layer].resize(kHeads * kTokens * kDim);
+        original_scales[layer].resize(kHeads * kTokens * kGroups);
+        for (int head = 0; head < kHeads; ++head) {
+            for (int t = 0; t < kTokens; ++t) {
+                const auto element = static_cast<std::size_t>(head * kTokens + t);
+                for (int d = 0; d < kDim; ++d) {
+                    const auto value = static_cast<std::int8_t>(
+                        ((layer * 11 + head * 7 + t * 3 + d * 13) % 47) - 23);
+                    original_codes[layer][element * kDim + d] = value;
+                    for (int physical = 0; physical < physical_pages; ++physical) {
+                        code_bytes[static_cast<std::size_t>(physical) * code_stride +
+                                   in_page_elems(kDim, head, t, d)] = static_cast<std::byte>(value);
+                    }
+                }
+                for (int g = 0; g < kGroups; ++g) {
+                    const auto bits = __half_as_ushort(__float2half(0.025f +
+                        0.002f * static_cast<float>((layer + head + t + g) % 7)));
+                    original_scales[layer][element * kGroups + g] = bits;
+                    for (int physical = 0; physical < physical_pages; ++physical) {
+                        const auto offset = static_cast<std::size_t>(physical) * scale_stride +
+                            static_cast<std::size_t>(in_page_elems(kGroups, head, t, g)) * 2;
+                        std::memcpy(scale_bytes.data() + offset, &bits, sizeof(bits));
+                    }
+                }
+            }
+        }
+        CHECK(cudaMemcpy(codes.data, code_bytes.data(), code_bytes.size(), cudaMemcpyHostToDevice)
+                  == cudaSuccess, "layer-ready input K codes H2D layer=%d", layer);
+        CHECK(cudaMemcpy(scales.data, scale_bytes.data(), scale_bytes.size(), cudaMemcpyHostToDevice)
+                  == cudaSuccess, "layer-ready input K scales H2D layer=%d", layer);
+    }
+    PinnedHostBuffer metadata(3 * sizeof(std::int32_t));
+    DeviceBuffer device_metadata(3 * sizeof(std::int32_t));
+    const KvmemReropeWorkspace workspace{
+        {static_cast<std::int32_t*>(metadata.data()), 3},
+        {static_cast<std::int32_t*>(device_metadata.p), 3}};
+    const std::array<std::int32_t, 1> sync_page{1};
+    const std::array<std::int32_t, 1> async_page{0};
+    const std::array<std::int32_t, 1> from{64};
+    const std::array<std::int32_t, 1> to{128};
+    kvmem_rerope_pages(pool, sync_page.data(), from.data(), to.data(), 1, workspace, device.stream);
+
+    LayerReadyFence ready;
+    ready.begin(device.stream);
+    std::array<cudaEvent_t, layers> events{};
+    for (int l = 0; l < layers; ++l) { events[l] = ready.ready_event(l); }
+    kvmem_rerope_pages_layer_ready(pool, async_page.data(), from.data(), to.data(), 1,
+                                   workspace, events, ready.producer_stream());
+    for (int l = 0; l < layers; ++l) { ready.mark_ready(l); }
+
+    std::size_t code_page_bytes = static_cast<std::size_t>(pool.plane(0).nb[3]);
+    std::size_t scale_page_bytes = static_cast<std::size_t>(pool.plane(2).nb[3]);
+    PinnedHostBuffer readback(static_cast<std::size_t>(layers) * (code_page_bytes + scale_page_bytes));
+    for (int l = 0; l < layers; ++l) {
+        const auto codes = pool.plane(static_cast<std::size_t>(l) * 4);
+        const auto scales = pool.plane(static_cast<std::size_t>(l) * 4 + 2);
+        auto* target = static_cast<std::byte*>(readback.data()) +
+            static_cast<std::size_t>(l) * (code_page_bytes + scale_page_bytes);
+        ready.wait_before_layer(l, device.stream);
+        CHECK(cudaMemcpyAsync(target, codes.data, code_page_bytes, cudaMemcpyDeviceToHost,
+                              device.stream) == cudaSuccess,
+              "layer-ready consumer K read layer=%d", l);
+        CHECK(cudaMemcpyAsync(target + code_page_bytes, scales.data, scale_page_bytes,
+                              cudaMemcpyDeviceToHost, device.stream) == cudaSuccess,
+              "layer-ready consumer scale read layer=%d", l);
+        ready.release_after_layer(l, device.stream);
+    }
+    CUDA_CHECK(cudaStreamSynchronize(device.stream));
+    ready.retire();
+
+    for (int l = 0; l < layers; ++l) {
+        const auto codes = pool.plane(static_cast<std::size_t>(l) * 4);
+        const auto scales = pool.plane(static_cast<std::size_t>(l) * 4 + 2);
+        const auto* result = static_cast<const std::byte*>(readback.data()) +
+            static_cast<std::size_t>(l) * (code_page_bytes + scale_page_bytes);
+        std::vector<std::byte> sync_codes(code_page_bytes), sync_scales(scale_page_bytes);
+        CHECK(cudaMemcpy(sync_codes.data(), static_cast<const std::byte*>(codes.data) + codes.nb[3],
+                         code_page_bytes, cudaMemcpyDeviceToHost) == cudaSuccess,
+              "layer-ready sync reference codes layer=%d", l);
+        CHECK(cudaMemcpy(sync_scales.data(), static_cast<const std::byte*>(scales.data) + scales.nb[3],
+                         scale_page_bytes, cudaMemcpyDeviceToHost) == cudaSuccess,
+              "layer-ready sync reference scales layer=%d", l);
+        CHECK(std::memcmp(result, sync_codes.data(), code_page_bytes) == 0 &&
+                  std::memcmp(result + code_page_bytes, sync_scales.data(), scale_page_bytes) == 0,
+              "layer-ready GPU output differs from synchronous kernel layer=%d", l);
+        // Independent CPU dequant/Hadamard/RoPE oracle on a real 64-column tail.
+        std::int8_t expected_codes[kDim];
+        unsigned short expected_scales[kGroups];
+        const int head = l % kHeads;
+        const int token = (l * 5 + 13) % kTokens;
+        const auto index = static_cast<std::size_t>(head * kTokens + token);
+        expected_rephase(original_codes[l].data() + index * kDim,
+                         original_scales[l].data() + index * kGroups,
+                         from[0] + token, to[0] + token, expected_codes, expected_scales);
+        for (int d = 0; d < kDim; ++d) {
+            const auto output = static_cast<std::int8_t>(
+                result[in_page_elems(kDim, head, token, d)]);
+            CHECK(std::abs(int(output) - int(expected_codes[d])) <= 2,
+                  "layer-ready CPU oracle layer=%d token=%d dim=%d", l, token, d);
+        }
+    }
+    CHECK(ready.epoch() == 1 && !ready.active(), "layer-ready epoch/retirement");
+
+    // Simulate a cancelled prefill: its producer has already been submitted,
+    // but no layer consumer is allowed to use or release the target. Drain
+    // both streams before dropping the pinned metadata / target lifetime.
+    LayerReadyFence abandoned;
+    abandoned.begin(device.stream);
+    for (int l = 0; l < layers; ++l) { events[l] = abandoned.ready_event(l); }
+    kvmem_rerope_pages_layer_ready(pool, sync_page.data(), to.data(), from.data(), 1,
+                                   workspace, events, abandoned.producer_stream());
+    for (int l = 0; l < layers; ++l) { abandoned.mark_ready(l); }
+    abandoned.drain_consumers();
+    CHECK(!abandoned.active(), "layer-ready cancellation must drain queued GPU producer");
+
+    // A validation failure must never record a ready event or publish a page.
+    LayerReadyFence rejected;
+    rejected.begin(device.stream);
+    for (int l = 0; l < layers; ++l) { events[l] = rejected.ready_event(l); }
+    const std::array<std::int32_t, 1> invalid_page{-1};
+    bool refused = false;
+    try {
+        kvmem_rerope_pages_layer_ready(pool, invalid_page.data(), from.data(), to.data(), 1,
+                                       workspace, events, rejected.producer_stream());
+    } catch (const std::invalid_argument&) { refused = true; }
+    rejected.drain_consumers();
+    CHECK(refused && !rejected.active(),
+          "layer-ready failed prepare must remain uncommitted and drained");
+
+    // Drive the actual KVAddressSpaceStore producer route, including real
+    // block selection/re-mapping and the generation-bound prefill ticket.
+    KVExecutionTablePool tables({backing.p, backing.bytes}, tables_layout, pool);
+    LogicalKVPageStore pages(pool, physical_pages);
+    DeviceBuffer store_metadata(3 * physical_pages * sizeof(std::int32_t));
+    KVAddressSpaceStore store(pages, tables, 1, physical_pages,
+                             KvMemOptions{.enabled = true},
+                             {store_metadata.p, store_metadata.bytes});
+    const auto address = store.create_inactive();
+    CHECK(address.has_value(), "layer-ready store address created");
+    if (!address) { throw std::runtime_error("layer-ready address unavailable"); }
+    store.activate(*address, physical_pages, 0);
+    store.ensure_mapped_to_tokens(*address, 6 * kTokens);
+    store.commit_frontier(*address, 6 * kTokens);
+    store.deactivate(*address);
+    const std::uint32_t compacted = store.kvmem_compact(
+        *address, 4 * kTokens, device.stream, {}, false, 0, {}, std::nullopt, true);
+    CHECK(compacted == 4 * kTokens, "layer-ready store compacted window=%u", compacted);
+    auto* consumer = store.kvmem_layer_ready_for(*address);
+    CHECK(consumer != nullptr, "layer-ready real store producer was not bound");
+    if (consumer != nullptr) {
+        const auto window = store.window_page_handles(*address);
+        CHECK(window.size() == 4, "layer-ready store retained four pages");
+        if (window.empty()) { throw std::logic_error("layer-ready selected no pages"); }
+        const int physical = pool.physical_index_of(pages.physical(window.back()));
+        PinnedHostBuffer store_reads(code_page_bytes * layers);
+        for (int l = 0; l < layers; ++l) {
+            consumer->wait_before_layer(l, device.stream);
+            const auto plane = pool.plane(static_cast<std::size_t>(l) * 4);
+            CHECK(cudaMemcpyAsync(static_cast<std::byte*>(store_reads.data()) +
+                                      static_cast<std::size_t>(l) * code_page_bytes,
+                                  static_cast<const std::byte*>(plane.data) +
+                                      static_cast<std::size_t>(physical) * plane.nb[3],
+                                  code_page_bytes, cudaMemcpyDeviceToHost, device.stream) == cudaSuccess,
+                  "layer-ready store consumer D2H layer=%d", l);
+            consumer->release_after_layer(l, device.stream);
+        }
+        CUDA_CHECK(cudaStreamSynchronize(device.stream));
+    }
+    CHECK(store.kvmem_layer_ready_for(KVAddressSpaceHandle{}) == nullptr,
+          "layer-ready stale/empty address cannot claim current ticket");
+    // A second plan may select different blocks even with the same budget;
+    // it must use the synchronous fallback and revoke the old event epoch.
+    (void)store.kvmem_compact(*address, 4 * kTokens, device.stream);
+    CHECK(store.kvmem_layer_ready_for(*address) == nullptr,
+          "layer-ready previous ticket must be revoked before next compact");
+    CHECK(store.kvmem_inflight_pages() == 0,
+          "layer-ready store must retire all inflight physical pages");
+    std::printf("layer-ready Main16 GPU fence+CPU oracle+store compact finished\n");
+}
+
 int main(int argc, char** argv) {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     std::srand(4242);
-    if (argc == 2 && std::strcmp(argv[1], "--claim") == 0) {
+    if (argc == 2 && std::strcmp(argv[1], "--layer-ready") == 0) {
+        try { test_layer_ready(); }
+        catch (const std::exception& e) {
+            std::printf("layer-ready exception: %s\n", e.what());
+            return 2;
+        }
+        std::printf("layer-ready failures=%d  VERDICT: %s\n", failures,
+                    failures == 0 ? "PASS" : "FAIL");
+        return failures == 0 ? 0 : 1;
+    }
+    const bool claim_prefetch = argc == 2 && std::strcmp(argv[1], "--claim-prefetch") == 0;
+    if (claim_prefetch || (argc == 2 && std::strcmp(argv[1], "--claim") == 0)) {
         try {
-            test_generation_device_claim();
+            test_generation_device_claim(claim_prefetch);
         } catch (const std::exception& error) {
             std::printf("claim exception: %s\n", error.what());
             return 2;
@@ -332,7 +591,13 @@ int main(int argc, char** argv) {
                     failures == 0 ? "PASS" : "FAIL");
         return failures == 0 ? 0 : 1;
     }
-    const bool exercise_cold = argc == 2 && std::strcmp(argv[1], "--cold") == 0;
+    const bool checkpoint = argc == 2 && std::strcmp(argv[1], "--checkpoint") == 0;
+    // Exercise the real Cold read-ahead owner on a small native page geometry.
+    // Keep initial demotions synchronous so the same independent K/V oracle
+    // establishes a stable archived source before enabling the async route.
+    const bool cold_prefetch = argc == 2 && std::strcmp(argv[1], "--cold-prefetch") == 0;
+    const bool exercise_cold = checkpoint || cold_prefetch ||
+                               (argc == 2 && std::strcmp(argv[1], "--cold") == 0);
     const bool cancel_async = argc == 2 && std::strcmp(argv[1], "--async-cancel") == 0;
     const bool exercise_async = cancel_async ||
                                 (argc == 2 && std::strcmp(argv[1], "--async") == 0);
@@ -625,6 +890,49 @@ int main(int argc, char** argv) {
                   "async: completed batch releases its held source pages");
             device.synchronize();
         }
+        if (checkpoint) {
+            const auto path = std::filesystem::temp_directory_path() /
+                ("ninfer-prefix-roundtrip-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+            store.activate(*handle,kPages,0);
+            {
+                kvmem::PrefixCheckpointWriter file(path.string());
+                store.save_benchmark_prefix(*handle,file.stream(),device.stream);file.finish();
+            }
+            const auto previous=*handle;
+            store.deactivate(*handle);
+            CHECK(store.release(*handle), "checkpoint: release original complete owner");
+            handle=store.create_inactive();
+            if(!handle) throw std::runtime_error("checkpoint: fresh address unavailable");
+            store.activate(*handle,kPages,0);
+            {
+                kvmem::PrefixCheckpointReader file(path.string());
+                store.load_benchmark_prefix(*handle,file.stream(),device.stream);file.finish();
+            }
+            CHECK(!store.valid(previous), "checkpoint: old generation remains invalid");
+            const auto second=path.string()+".roundtrip";
+            {
+                kvmem::PrefixCheckpointWriter file(second);
+                store.save_benchmark_prefix(*handle,file.stream(),device.stream);file.finish();
+            }
+            std::ifstream a(path,std::ios::binary),b(second,std::ios::binary);
+            const std::vector<char> before((std::istreambuf_iterator<char>(a)),{});
+            const std::vector<char> after((std::istreambuf_iterator<char>(b)),{});
+            CHECK(before==after, "checkpoint: all native/raw-K/metadata bytes across generation");
+            a.close();b.close();
+            { // A real corrupted payload must be rejected before a store load.
+                std::fstream f(second,std::ios::binary|std::ios::in|std::ios::out);
+                f.seekp(32);const char bad=static_cast<char>(after.at(32)^1);f.write(&bad,1);
+            }
+            bool corrupt=false;
+            try { kvmem::PrefixCheckpointReader file(second); }
+            catch(const kvmem::SnapshotCorrupt&) { corrupt=true; }
+            CHECK(corrupt,"checkpoint: corrupted payload rejected before mutation");
+            std::filesystem::remove(path);std::filesystem::remove(second);
+            std::filesystem::remove(path.string()+".xxh3idx");
+            std::filesystem::remove(second+".xxh3idx");
+            store.deactivate(*handle);
+            std::printf("checkpoint native/Host/Cold/rawK generation roundtrip complete\n");
+        }
         CHECK(w1 == 4 * kTokens, "compact window = %u (want 256)", w1);
         std::printf("compact #1 -> window %u tokens\n", w1);
 
@@ -863,7 +1171,9 @@ int main(int argc, char** argv) {
             // NVMe. Keeping block 2 at slot 1 avoids a third K re-phase that
             // would exceed this test's existing one-LSB numerical oracle.
             const std::uint64_t spills_before = store.kvmem_host_to_cold_spills();
-            CHECK(store.kvmem_compact(*handle, 4 * kTokens, nullptr, {2, 4}) == 4 * kTokens,
+            if (cold_prefetch) { store.enable_kvmem_async_d2h(device); }
+            CHECK(store.kvmem_compact(*handle, 4 * kTokens,
+                                      cold_prefetch ? device.stream : nullptr, {2, 4}) == 4 * kTokens,
                   "compact #4 cold restore");
             int sel4[4] = {0, 2, 4, 5};
             std::printf("verifying cold compact #4\n");
@@ -878,11 +1188,20 @@ int main(int argc, char** argv) {
 
             // Re-select the page that was Host-backed, then spilled to disk;
             // verify its recovered K/V with the independent CPU oracle.
-            CHECK(store.kvmem_compact(*handle, 4 * kTokens, exercise_async ? device.stream : nullptr, {1}) == 4 * kTokens,
+            CHECK(store.kvmem_compact(*handle, 4 * kTokens,
+                                      (exercise_async || cold_prefetch) ? device.stream : nullptr, {1}) == 4 * kTokens,
                   "compact #5 former-Host cold restore");
             int sel5[4] = {0, 1, 4, 5};
             std::printf("verifying cold compact #5\n");
             verify_window(sel5, 4);
+            if (cold_prefetch) {
+                CHECK(store.kvmem_usage().nvme_prefetch_submitted >= 2 &&
+                          store.kvmem_usage().nvme_prefetch_submitted ==
+                              store.kvmem_usage().nvme_prefetch_completed,
+                      "cold read-ahead did not retire its real Cold page owners");
+                CHECK(store.retire_kvmem_transfers(true) || store.kvmem_inflight_pages() == 0,
+                      "cold read-ahead left unretired H2D/D2H work");
+            }
         }
 
         if (exercise_async) {

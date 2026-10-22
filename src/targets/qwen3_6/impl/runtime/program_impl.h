@@ -1,3 +1,5 @@
+#include "kvmem/prefix_checkpoint_file.h"
+#include "kvmem/original_replay_diagnostic.h"
 // MODIFIED for the NInfer ternary port (Ternary Bonsai 2 27B on NInfer / Ada sm_89).
 // This file differs from upstream NInfer; see patches/ in the release bundle
 // for the change list, rebuild steps and required verification.
@@ -52,6 +54,30 @@ bool original_kv_positions_requested() {
     if (!value || std::strcmp(value, "0") == 0) { return false; }
     if (std::strcmp(value, "1") == 0) { return true; }
     throw std::invalid_argument("NINFER_KVMEM_ORIGINAL_POSITIONS must be 0 or 1");
+}
+
+// Startup-fixed, same-binary candidate. Keep canonical replay mathematics;
+// avoid preparing payloads that the immediately following replay overwrites.
+bool canonical_prepare_requested() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("NINFER_KVMEM_CANONICAL_PREPARE");
+        if (!value || std::strcmp(value, "0") == 0) { return false; }
+        if (std::strcmp(value, "1") == 0) { return true; }
+        throw std::invalid_argument("NINFER_KVMEM_CANONICAL_PREPARE must be 0 or 1");
+    }();
+    return enabled;
+}
+
+// Keep a proven canonical view when it already contains the lexical evidence.
+// It is a retrieval-policy candidate, not original-timeline query-only replay.
+bool canonical_query_reuse_requested() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("NINFER_KVMEM_CANONICAL_QUERY_REUSE");
+        if (!value || std::strcmp(value, "0") == 0) { return false; }
+        if (std::strcmp(value, "1") == 0) { return true; }
+        throw std::invalid_argument("NINFER_KVMEM_CANONICAL_QUERY_REUSE must be 0 or 1");
+    }();
+    return enabled;
 }
 
 using Clock = std::chrono::steady_clock;
@@ -6747,7 +6773,9 @@ void ProgramImplCore::retire_continuation_slot(std::uint32_t index) noexcept {
     if (index >= continuation_capacity) { std::terminate(); }
     SequenceState& sequence     = continuation_states[index];
     for (auto& cache : replay_prefix_caches_) {
-        if (sequence.kv && cache.owner == sequence.kv->text) { cache.frontiers = {}; }
+        if (sequence.kv && cache.owner == sequence.kv->text) {
+            cache.frontiers = {}; cache.canonical_frontier = 0; cache.canonical_states.clear();
+        }
     }
     sequence.execution_frontier = 0;
     sequence.ledger_frontier    = 0;
@@ -7270,6 +7298,7 @@ PrefillProgress ProgramImplCore::wrap_prefill(std::uint32_t lane, runtime::Prefi
     PrefillProgress out;
     out.summary                 = step.summary;
     out.processed_prompt_tokens = step.processed_prompt_tokens;
+    out.restored_prompt_tokens = step.restored_prompt_tokens;
     out.complete                = step.complete;
     out.timing                  = step.timing;
     if (step.complete) {
@@ -11053,6 +11082,18 @@ void ProgramImplCore::settle_state_fork(SequenceState& sequence) {
     const bool external_source         = sequence.state.read_has_external_owner();
     state_store->commit_fork(source, destination);
     sequence.state = ActiveStateBinding{.read = destination, .write = destination};
+    for (auto& cache : replay_prefix_caches_) {
+        if (sequence.kv && cache.owner == sequence.kv->text && cache.canonical_frontier != 0) {
+            std::erase_if(cache.canonical_states, [&](auto handle) { return !state_store->valid(handle); });
+            if (std::find(cache.canonical_states.begin(), cache.canonical_states.end(), source) != cache.canonical_states.end() &&
+                std::find(cache.canonical_states.begin(), cache.canonical_states.end(), destination) == cache.canonical_states.end()) {
+                // Preserve the immutable source certificate as well: a later
+                // turn closure can legitimately resume that earlier branch.
+                // Pruning stale generation handles bounds this by live states.
+                cache.canonical_states.push_back(destination);
+            }
+        }
+    }
     if (!external_source && state_store->checkpoint_references(source) == 0 &&
         !state_store->release(source)) {
         throw std::logic_error("unreferenced StateImage fork source could not be released");
@@ -12044,6 +12085,198 @@ void ProgramImplCore::validate_licensed_tokens(std::span<const TokenId> tokens) 
     }
 }
 
+// KVMem's bounded snapshot codec; completeness/host checkpoint pairing follows
+// the local ninfer-4080-32g session_snapshot implementation. ABI1 remains the
+// pre-probe q0; ABI2 additionally freezes the completed canonical reconstruction.
+bool ProgramImplCore::benchmark_prefix_checkpoint(SequenceState& sequence,
+                                                   RequestControl::Prefill& staged,
+                                                   bool loading, bool canonical_ready) {
+    const char* path=std::getenv(canonical_ready ? "NINFER_BENCH_CANONICAL_CHECKPOINT"
+                                                : "NINFER_BENCH_PREFIX_CHECKPOINT");
+    auto& consumed=canonical_ready ? benchmark_canonical_checkpoint_consumed_ : benchmark_checkpoint_consumed_;
+    if(!path || consumed) return false;
+    if (staged.prompt.query_begin <= text_kv_addresses->kvmem_budget_tokens()) return false;
+    const char* mode=std::getenv(canonical_ready ? "NINFER_BENCH_CANONICAL_CHECKPOINT_MODE"
+                                                : "NINFER_BENCH_PREFIX_CHECKPOINT_MODE");
+    if(!mode || (std::strcmp(mode,"save") && std::strcmp(mode,"load")))
+        throw std::invalid_argument("benchmark checkpoint mode must be save or load");
+    if(loading!=(std::strcmp(mode,"load")==0)) return false;
+    if(!loading && staged.cursor!=staged.prompt.query_begin) return false;
+    const char* binding=std::getenv("NINFER_BENCH_CHECKPOINT_MODEL_SHA256");
+    if(!binding || std::strlen(binding)!=64 || max_concurrency!=1 || original_kv_positions ||
+       !text_kv_addresses->kvmem_enabled() || staged.base!=0 ||
+       staged.prompt.has_media() || staged.prompt.query_begin==0 ||
+       staged.prompt.query_begin>=staged.prompt_tokens || !sequence.kv ||
+       !sequence.kv->backend || speculative_backend!=SpeculativeBackend::Mtp ||
+       sequence.rewrite_checkpoint.valid || sequence.endpoint_valid ||
+       staged.next_capture != 0 || staged.pending_capture_offer != 0 || !sequence.long_anchors.empty() ||
+       !replay_state_images_ || (loading && staged.cursor!=0) ||
+       (canonical_ready && !canonical_query_reuse_requested())) {
+        throw std::invalid_argument("benchmark checkpoint needs fresh exclusive text/MTP canonical q0");
+    }
+    auto& cache=replay_prefix_caches_[sequence.lane];
+    if(!canonical_ready || loading) {
+        for(const auto f:cache.frontiers) if(f) throw std::logic_error("benchmark q0 has replay checkpoints");
+    }
+    const auto selectors=state_selectors(sequence);
+    if(sequence.state.fork_pending || selectors.source!=selectors.destination)
+        throw std::logic_error("benchmark checkpoint state is shared");
+    const auto began=Clock::now();
+    (void)text_kv_addresses->retire_kvmem_transfers(true);
+    (void)backend_kv_addresses->retire_kvmem_transfers(true);
+    device.synchronize();
+    // ABI2 must not overwrite an active partial replay checkpoint with q0.
+    // One bounded benchmark-only staging image; no additional device memory.
+    std::optional<PinnedHostBuffer> scratch;
+    auto host=replay_state_images_->writable_view(cache.slots[0]);
+    if(canonical_ready) {
+        scratch.emplace(host.layout->image_bytes);
+        host.data=static_cast<std::byte*>(scratch->data());
+    }
+    const std::uint64_t magic=0x31514650534E494EULL;
+    const std::string id(binding);
+    const auto* query=text_kv_addresses->kvmem_query_capture();
+    const auto validate_view=[&](const std::vector<std::uint32_t>& positions,
+                                const std::vector<TokenId>& tokens,
+                                const std::array<std::uint32_t,4>& frontiers,
+                                std::uint32_t C) {
+        if(C==0 || positions.size()!=C || tokens.size()!=C) {
+            throw std::invalid_argument("canonical checkpoint view extent mismatch");
+        }
+        for(std::size_t i=0;i<positions.size();++i) {
+            if(positions[i]>=staged.prompt.query_begin ||
+               (i && positions[i]<=positions[i-1]) ||
+               tokens[i]!=staged.prompt.token_ids[positions[i]]) {
+                throw std::invalid_argument("canonical checkpoint exact history mismatch");
+            }
+        }
+        for(const auto f:frontiers) if(f>C || f%prefill_chunk) {
+            throw std::invalid_argument("canonical checkpoint partial state boundary mismatch");
+        }
+    };
+    struct Boundary {
+        std::int32_t kv_offset,rope_delta;
+        std::uint32_t execution,ledger,main_valid,mtp_valid,floor;
+    };
+    if(loading) {
+        ninfer::kvmem::PrefixCheckpointReader file(path);auto& in=file.stream();
+        in.expect(magic);in.expect<std::uint32_t>(canonical_ready ? 2 : 1);
+        auto saved_id=in.vector<char>(64);
+        if(std::string(saved_id.begin(),saved_id.end())!=id) throw std::invalid_argument("checkpoint model hash mismatch");
+        in.expect(capacity);in.expect(kv_capacity);in.expect(prefill_chunk);in.expect(draft_window);
+        in.expect(attn_scale);in.expect<std::uint32_t>(static_cast<std::uint32_t>(kv_storage));
+        in.expect(staged.prompt.query_begin);in.expect<std::size_t>(host.layout->image_bytes);
+        const auto tokens=in.vector<TokenId>(capacity+1ULL);
+        if(tokens!=staged.prompt.token_ids) throw std::invalid_argument("checkpoint exact prompt mismatch");
+        const auto b=in.pod<Boundary>();
+        if(b.kv_offset>0 || std::int64_t(staged.prompt.query_begin)+b.kv_offset!=b.main_valid ||
+           b.mtp_valid!=b.main_valid || b.main_valid>text_kv_addresses->kvmem_budget_tokens())
+            throw std::invalid_argument("checkpoint q0 frontier mismatch");
+        std::vector<std::uint32_t> positions;
+        std::vector<TokenId> view_tokens;
+        std::array<std::uint32_t,4> frontiers{};
+        std::vector<float> sums;
+        if(canonical_ready) {
+            in.expect<std::uint8_t>(canonical_query_reuse_requested());
+            in.expect<std::uint8_t>(canonical_prepare_requested());
+            if(!query) throw std::invalid_argument("checkpoint query buffer missing");
+            in.expect(query->layers);in.expect(query->q_heads);in.expect(query->head_dim);in.expect(query->kv_heads);
+            const auto count=std::size_t(query->layers)*query->q_heads*query->head_dim;
+            sums=in.vector<float>(count);
+            if(sums.size()!=count) throw std::invalid_argument("checkpoint query sum extent mismatch");
+            for(const auto x:sums) if(!std::isfinite(x)) throw std::invalid_argument("checkpoint nonfinite query sum");
+            positions=in.vector<std::uint32_t>(text_kv_addresses->kvmem_budget_tokens());
+            view_tokens=in.vector<TokenId>(text_kv_addresses->kvmem_budget_tokens());
+            for(auto& f:frontiers) f=in.scalar<std::uint32_t>();
+            validate_view(positions,view_tokens,frontiers,b.main_valid);
+            if(b.execution!=b.main_valid) throw std::invalid_argument("checkpoint incomplete canonical execution");
+        }
+        text_kv_addresses->load_benchmark_prefix(sequence.kv->text,in,device.stream);
+        backend_kv_addresses->load_benchmark_prefix(*sequence.kv->backend,in,device.stream);
+        in.read(host.data,host.layout->image_bytes);
+        if(canonical_ready) {
+            for(std::size_t i=0;i<frontiers.size();++i) if(frontiers[i]) {
+                const auto partial=replay_state_images_->writable_view(cache.slots[i]);
+                in.read(partial.data,partial.layout->image_bytes);
+            }
+        }
+        file.finish();
+        if(canonical_ready) {
+            if(text_kv_addresses->kvmem_window_token_positions(sequence.kv->text)!=positions ||
+               backend_kv_addresses->kvmem_window_token_positions(*sequence.kv->backend)!=positions) {
+                throw std::invalid_argument("checkpoint native/canonical view mismatch");
+            }
+            std::vector<std::uint32_t> older_matches;
+            const auto lexical=ninfer::kvmem::kvmem_lexical_recall_pages(staged.prompt.token_ids,
+                staged.prompt.query_begin,std::span<const TokenId>(staged.prompt.lexical_query_token_ids),
+                static_cast<std::uint32_t>(kPagedKVPageSize),&older_matches,4);
+            text_kv_addresses->set_kvmem_lexical_pages(sequence.kv->text,lexical,older_matches);
+            backend_kv_addresses->set_kvmem_lexical_pages(*sequence.kv->backend,lexical,older_matches);
+            text_kv_addresses->reset_kvmem_query(staged.prompt.query_begin,staged.prompt.query_end,
+                staged.prompt.action_begin,staged.prompt.action_end,staged.prompt.system_prefix_end,
+                staged.prompt.closed_thinking_spans);
+            text_kv_addresses->restore_benchmark_query(sums,device.stream);
+            cache.owner=sequence.kv->text;cache.positions=std::move(positions);cache.tokens=std::move(view_tokens);
+            cache.frontiers=frontiers;cache.canonical_frontier=b.main_valid;
+            cache.canonical_states={sequence.state.write};
+            staged.query_replayed=true;staged.query_reselected=true;staged.query_captured=true;
+            // This process did not execute the probe: count its query suffix
+            // exactly once, rather than hiding it as a second execution.
+            staged.hidden_replay_tokens=0;
+            sequence.tail_hidden_valid=true;
+        }
+        state_images->copy_from_host({host.data,host.layout},selectors.destination,device.stream);
+        device.synchronize();
+        sequence.kv_offset=b.kv_offset;sequence.rope_delta=b.rope_delta;
+        sequence.execution_frontier=b.execution;sequence.ledger_frontier=b.ledger;
+        sequence.text_kv_valid=b.main_valid;sequence.mtp_kv_valid=b.mtp_valid;
+        sequence.kv_reuse_floor=b.floor;staged.cursor=staged.prompt.query_begin;
+    } else {
+        if(canonical_ready) {
+            if(!staged.query_replayed || !staged.query_captured || cache.owner!=sequence.kv->text ||
+               cache.canonical_frontier!=sequence.text_kv_valid ||
+               std::find(cache.canonical_states.begin(),cache.canonical_states.end(),sequence.state.write)==cache.canonical_states.end()) {
+                throw std::logic_error("checkpoint canonical reconstruction incomplete");
+            }
+            validate_view(cache.positions,cache.tokens,cache.frontiers,sequence.text_kv_valid);
+        }
+        ninfer::kvmem::PrefixCheckpointWriter file(path);auto& out=file.stream();
+        out.scalar(magic);out.scalar<std::uint32_t>(canonical_ready ? 2 : 1);out.vector(std::vector<char>(id.begin(),id.end()));
+        out.scalar(capacity);out.scalar(kv_capacity);out.scalar(prefill_chunk);out.scalar(draft_window);
+        out.scalar(attn_scale);out.scalar<std::uint32_t>(static_cast<std::uint32_t>(kv_storage));
+        out.scalar(staged.prompt.query_begin);out.scalar<std::size_t>(host.layout->image_bytes);
+        out.vector(staged.prompt.token_ids);
+        out.pod(Boundary{sequence.kv_offset,sequence.rope_delta,sequence.execution_frontier,
+                        sequence.ledger_frontier,sequence.text_kv_valid,sequence.mtp_kv_valid,sequence.kv_reuse_floor});
+        if(canonical_ready) {
+            out.scalar<std::uint8_t>(canonical_query_reuse_requested());
+            out.scalar<std::uint8_t>(canonical_prepare_requested());
+            if(!query) throw std::logic_error("checkpoint query buffer missing");
+            out.scalar(query->layers);out.scalar(query->q_heads);out.scalar(query->head_dim);out.scalar(query->kv_heads);
+            out.vector(text_kv_addresses->benchmark_query_sums(device.stream));
+            out.vector(cache.positions);out.vector(cache.tokens);
+            for(const auto f:cache.frontiers) out.scalar(f);
+        }
+        text_kv_addresses->save_benchmark_prefix(sequence.kv->text,out,device.stream);
+        backend_kv_addresses->save_benchmark_prefix(*sequence.kv->backend,out,device.stream);
+        std::memset(host.data,0,host.layout->image_bytes);
+        state_images->copy_to_host(selectors.destination,host,device.stream);device.synchronize();
+        out.write(host.data,host.layout->image_bytes);
+        if(canonical_ready) {
+            for(std::size_t i=0;i<cache.frontiers.size();++i) if(cache.frontiers[i]) {
+                const auto partial=replay_state_images_->view(cache.slots[i]);
+                out.write(partial.data,partial.layout->image_bytes);
+            }
+        }
+        file.finish();
+    }
+    consumed=true;
+    std::fprintf(stderr,"KVMEM_BENCH_CHECKPOINT action=%s prefix_tokens=%u seconds=%.6f complete=1 phase=%s abi=%u\n",
+        loading?"load":"save",staged.prompt.query_begin,
+        std::chrono::duration<double>(Clock::now()-began).count(),canonical_ready?"canonical":"raw",canonical_ready?2:1);
+    return true;
+}
+
 runtime::PrefillStepResult
 ProgramImplCore::advance_prefill(SequenceState& sequence, RequestControl& request,
                                  runtime::ExecutionTiming* failed_timing) {
@@ -12061,6 +12294,12 @@ ProgramImplCore::advance_prefill(SequenceState& sequence, RequestControl& reques
                                         .prefix_reuse_path    = staged.reuse};
     std::uint32_t processed_prompt_tokens = 0;
     const auto started                    = Clock::now();
+    if (staged.cursor == 0 && (benchmark_prefix_checkpoint(sequence, staged, true, true) ||
+                               benchmark_prefix_checkpoint(sequence, staged, true))) {
+        return runtime::PrefillStepResult{.summary=summary,
+            .processed_prompt_tokens=staged.cursor, .restored_prompt_tokens=staged.cursor,
+            .timing=timing.finish()};
+    }
     // Adapt KVMem's query probe/rewind protocol. A compacted hybrid history
     // additionally needs a coherent GDN/KV execution of the selected token view.
     const bool query_probe = text_kv_addresses->kvmem_enabled() &&
@@ -12165,6 +12404,110 @@ ProgramImplCore::advance_prefill(SequenceState& sequence, RequestControl& reques
                          q0, sequence.text_kv_valid, host.layout->image_bytes);
         };
 
+        // R21 causal control: compute the unchanged question without executing
+        // a probe/rewind, using a reference run's exact final native selection.
+        // The full q0 state and all selected valid K/V/scale bytes must match.
+        // KVMem's coupled Main/MTP selector and native transfers are reused;
+        // this is an explicit diagnostic, never a qualified inference profile.
+        const auto bypass_original_probe = [&] {
+            using Diagnostic = ninfer::kvmem::OriginalReplayDiagnostic;
+            const char* path = std::getenv("NINFER_KVMEM_ORIGINAL_DIAG_BYPASS");
+            const auto q0 = staged.prompt.query_begin;
+            if (!path || !original_kv_positions || !query_probe || staged.cursor != q0 ||
+                !Diagnostic::selected_query(q0)) { return false; }
+            if (!staged.original_query_checkpoint_ready || !sequence.kv->backend) {
+                throw std::logic_error("original no-probe control needs complete Main/MTP q0");
+            }
+            const auto& cache = replay_prefix_caches_[sequence.lane];
+            const auto host = replay_state_images_->view(cache.slots[0]);
+            const auto digest = Diagnostic::digest(host.data, host.layout->image_bytes);
+            const auto control = Diagnostic::load(path, q0,
+                staged.original_prefix_tokens, digest, text_kv_addresses->kvmem_budget_tokens());
+            const auto main_entitlement = text_kv_addresses->mapping_limit(sequence.kv->text);
+            const auto mtp_entitlement = backend_kv_addresses->mapping_limit(*sequence.kv->backend);
+            const auto budget = static_cast<std::uint32_t>(control.selected.size()) * kPagedKVPageSize;
+            const auto C = text_kv_addresses->kvmem_compact(sequence.kv->text, budget,
+                device.stream, {}, false, 0, control.selected);
+            const auto M = backend_kv_addresses->kvmem_compact(*sequence.kv->backend, budget,
+                device.stream, {}, false, 0, control.selected);
+            resize_sequence_kv_entitlement(sequence, main_entitlement, mtp_entitlement);
+            if (C != control.frontier || M != C ||
+                Diagnostic::native(*text_kv_addresses, sequence.kv->text, device.stream) != control.main ||
+                Diagnostic::native(*backend_kv_addresses, *sequence.kv->backend, device.stream) != control.mtp) {
+                throw std::logic_error("original no-probe control native bytes/frontier mismatch");
+            }
+            // No StateImage restoration occurred in this arm. Confirm that
+            // moving the native view did not change any recurrent state byte.
+            const auto check = replay_state_images_->writable_view(cache.slots[1]);
+            std::memset(check.data, 0, check.layout->image_bytes);
+            state_images->copy_to_host(state_selectors(sequence).destination, check, device.stream);
+            device.synchronize();
+            if (Diagnostic::digest(check.data, check.layout->image_bytes) != control.state) {
+                throw std::logic_error("original no-probe control recurrent bytes changed");
+            }
+            text_kv_addresses->freeze_kvmem_query();
+            staged.query_replayed = true; staged.query_reselected = true;
+            sequence.kv_offset = static_cast<std::int32_t>(C) - static_cast<std::int32_t>(q0);
+            sequence.execution_frontier = sequence.text_kv_valid = sequence.mtp_kv_valid = C;
+            sequence.mtp_draft_count = 0; sequence.tail_hidden_valid = true;
+            std::fprintf(stderr, "KVMEM_ORIGINAL_DIAG arm=no_probe q0=%u cache=%u state_exact=1 native_exact=1 selected=%zu\n",
+                q0, C, control.selected.size());
+            return true;
+        };
+
+        const auto reuse_canonical_query = [&] {
+            const auto q0 = staged.prompt.query_begin;
+            if (original_kv_positions || !canonical_query_reuse_requested() || !query_probe ||
+                staged.cursor != q0) { return false; }
+            const bool capture_due = staged.next_capture < staged.capture_groups.size() &&
+                staged.capture_groups[staged.next_capture].frontier <= q0;
+            if (std::getenv("NINFER_KVMEM_CANONICAL_QUERY_TRACE")) {
+                std::fprintf(stderr, "KVMEM_CANONICAL_QUERY_ENTRY q0=%u base=%u query_captured=%d fork=%d capture_due=%d\n",
+                    q0, staged.base, staged.query_captured, sequence.state.fork_pending, capture_due);
+            }
+            if (max_concurrency != 1 || !staged.query_captured || staged.base == 0 || sequence.state.fork_pending ||
+                !replay_state_images_ || !sequence.kv->backend || capture_due) { return false; }
+            const auto& cache = replay_prefix_caches_[sequence.lane];
+            const auto C = sequence.text_kv_valid;
+            const auto suffix = staged.prompt_tokens - q0;
+            const bool state_lineage = std::find(cache.canonical_states.begin(), cache.canonical_states.end(),
+                                                 sequence.state.write) != cache.canonical_states.end();
+            const bool lexical_resident = text_kv_addresses->kvmem_lexical_candidates_resident(sequence.kv->text) &&
+                backend_kv_addresses->kvmem_lexical_candidates_resident(*sequence.kv->backend);
+            if (std::getenv("NINFER_KVMEM_CANONICAL_QUERY_TRACE")) {
+                std::fprintf(stderr, "KVMEM_CANONICAL_QUERY_GATE q0=%u owner=%d state_lineage=%d complete=%u cache=%u suffix=%u lexical_resident=%d\n",
+                    q0, cache.owner == sequence.kv->text, state_lineage, cache.canonical_frontier, C, suffix, lexical_resident);
+            }
+            if (cache.owner != sequence.kv->text || cache.canonical_frontier == 0 ||
+                !state_lineage ||
+                cache.canonical_frontier != cache.positions.size() || cache.tokens.size() != cache.positions.size() ||
+                C != kv_tokens(sequence.kv_offset, q0) || sequence.mtp_kv_valid != C ||
+                std::uint64_t(C) + suffix + 2ULL * draft_window + 1 > text_kv_addresses->kvmem_budget_tokens() ||
+                !lexical_resident) {
+                return false;
+            }
+            const auto positions = text_kv_addresses->kvmem_window_token_positions(sequence.kv->text);
+            if (positions.size() != C || positions.size() < cache.positions.size() ||
+                !std::equal(cache.positions.begin(), cache.positions.end(), positions.begin()) ||
+                backend_kv_addresses->kvmem_window_token_positions(*sequence.kv->backend) != positions) {
+                return false;
+            }
+            for (std::size_t i = 0; i < cache.positions.size(); ++i) {
+                if (cache.positions[i] >= q0 || cache.tokens[i] != staged.prompt.token_ids[cache.positions[i]]) {
+                    return false;
+                }
+            }
+            // The Engine supplied a complete exact-prefix state, descended
+            // from this same fully executed canonical view. Do not change the
+            // selection or zero/restore GDN. Capture this query's Q once for
+            // the ordinary end-of-prompt LRFU update.
+            staged.query_replayed = true; staged.query_reselected = true;
+            history_reused_tokens_ += C;
+            std::fprintf(stderr, "KVMEM_CANONICAL_QUERY_REUSE q0=%u history_tokens=%u suffix=%u state_lineage=1 lexical_resident=1\n",
+                q0, C, suffix);
+            return true;
+        };
+
         if (!staged.window_replay_ids.empty()) {
             const auto count = std::min<std::uint32_t>(
                 prefill_chunk, staged.window_replay_ids.size() - staged.window_replay_cursor);
@@ -12178,9 +12521,24 @@ ProgramImplCore::advance_prefill(SequenceState& sequence, RequestControl& reques
                 mark_workspace_usage(workspace_plan.dflash_context);
             }
             timing.pause();
+            schedule_state.text_layer_ready = sequence.kv
+                ? text_kv_addresses->kvmem_layer_ready_for(sequence.kv->text) : nullptr;
             auto result = schedule::prefill_text_chunk(schedule_state, staged.window_replay_ids,
                                                        count, std::nullopt, false);
             timing.include(result.timing);
+            if (const char* trace = std::getenv("NINFER_KVMEM_STAGE_TRACE");
+                trace && std::strcmp(trace, "1") == 0) {
+                // Program's existing phase clock measures the actual chunk
+                // traversal, including its device completion wait. Keep this
+                // separate from asynchronous Cold/H2D source event times.
+                std::fprintf(stderr,
+                    "KVMEM_STAGE_FORWARD tokens=%u submit_us=%llu wait_us=%llu "
+                    "post_us=%llu elapsed_us=%llu\n", count,
+                    static_cast<unsigned long long>(result.timing.submit_host_ns / 1000),
+                    static_cast<unsigned long long>(result.timing.device_wait_ns / 1000),
+                    static_cast<unsigned long long>(result.timing.post_host_ns / 1000),
+                    static_cast<unsigned long long>(result.timing.elapsed_ns() / 1000));
+            }
             timing.resume_post();
             if (result.processed_tokens != count || result.finalized) {
                 throw std::logic_error("KVMem history replay made invalid progress");
@@ -12199,7 +12557,15 @@ ProgramImplCore::advance_prefill(SequenceState& sequence, RequestControl& reques
                 auto& cache = replay_prefix_caches_[sequence.lane];
                 const auto total = static_cast<std::uint32_t>(staged.window_replay_ids.size());
                 const auto span = text_kv_addresses->kvmem_budget_tokens();
-                const std::array<std::uint32_t, 4> boundaries{
+                // Four existing Host slots: cover early common prefixes rather
+                // than spending one on the almost-entire, query-specific view.
+                const std::array<std::uint32_t, 4> boundaries = canonical_prepare_requested()
+                    ? std::array<std::uint32_t, 4>{
+                        (span / 32 / prefill_chunk) * prefill_chunk,
+                        (span / 16 / prefill_chunk) * prefill_chunk,
+                        (span / 8 / prefill_chunk) * prefill_chunk,
+                        (span / 4 / prefill_chunk) * prefill_chunk}
+                    : std::array<std::uint32_t, 4>{
                     (span / 16 / prefill_chunk) * prefill_chunk,
                     (span / 8 / prefill_chunk) * prefill_chunk,
                     (span / 4 / prefill_chunk) * prefill_chunk,
@@ -12217,6 +12583,12 @@ ProgramImplCore::advance_prefill(SequenceState& sequence, RequestControl& reques
             }
             if (staged.window_replay_cursor == staged.window_replay_ids.size()) {
                 copy_tail(sequence, prefill_hidden.slice(1, static_cast<std::int32_t>(count) - 1, 1));
+                if (replay_state_images_) {
+                    auto& cache = replay_prefix_caches_[sequence.lane];
+                    cache.canonical_frontier = staged.window_replay_cursor;
+                    cache.canonical_states = {sequence.state.write};
+                }
+                (void)benchmark_prefix_checkpoint(sequence, staged, false, true);
                 staged.window_replay_ids.clear();
                 ++history_replay_rounds_;
                 if (std::getenv("NINFER_KVMEM_TRACE")) {
@@ -12239,6 +12611,9 @@ ProgramImplCore::advance_prefill(SequenceState& sequence, RequestControl& reques
             if (sequence.kv && cache.owner == sequence.kv->text) {
                 for (auto& frontier : cache.frontiers) {
                     if (write_begin < frontier) { frontier = 0; }
+                }
+                if (write_begin < cache.canonical_frontier) {
+                    cache.canonical_frontier = 0; cache.canonical_states.clear();
                 }
             }
         }
@@ -12280,6 +12655,10 @@ ProgramImplCore::advance_prefill(SequenceState& sequence, RequestControl& reques
         }
 
         capture_original_query_prefix(0);
+        if (bypass_original_probe()) {
+            staged.elapsed_seconds += std::chrono::duration<double>(Clock::now() - started).count();
+            return runtime::PrefillStepResult{.summary = summary, .timing = timing.finish()};
+        }
         if (staged.cursor < staged.prompt_tokens) {
             if (!staged.query_captured) {
                 std::vector<std::uint32_t> older_matches;
@@ -12313,6 +12692,10 @@ ProgramImplCore::advance_prefill(SequenceState& sequence, RequestControl& reques
                                                      staged.prompt.closed_thinking_spans);
                 staged.query_captured = true;
             }
+            if (reuse_canonical_query()) {
+                staged.elapsed_seconds += std::chrono::duration<double>(Clock::now() - started).count();
+                return runtime::PrefillStepResult{.summary = summary, .timing = timing.finish()};
+            }
             const std::uint32_t nominal =
                 std::min(prefill_chunk, staged.prompt_tokens - staged.cursor);
             mark_workspace_usage(staged.prepare_mtp ? workspace_plan.mtp_prefill
@@ -12342,7 +12725,8 @@ ProgramImplCore::advance_prefill(SequenceState& sequence, RequestControl& reques
             // Move the window-external pages to Host so the incoming piece fits the pool. The
             // retained window is the configured budget, narrowed only as far as the piece needs.
             const auto kvmem_offload = [&](std::uint32_t incoming_tokens,
-                                           bool complete_query = false) {
+                                           bool complete_query = false,
+                                           bool canonical_replay = false) {
                 if (incoming_tokens == 0 || !sequence.kv) { return; }
                 // Capacity pressure and missing lexical evidence can both
                 // require a new working set before this piece is computed.
@@ -12383,15 +12767,34 @@ ProgramImplCore::advance_prefill(SequenceState& sequence, RequestControl& reques
                     (kvmem_window_pages - needed) * static_cast<std::uint32_t>(kPagedKVPageSize);
                 const std::uint32_t configured =
                     text_kv_addresses->kvmem_window_edge(staged.prompt_tokens);
-                const std::uint32_t budget =
+                std::uint32_t budget =
                     configured == 0 ? room : std::min(configured, room);
+                if (canonical_replay && canonical_query_reuse_requested() &&
+                    max_concurrency == 1 && speculative_backend == SpeculativeBackend::Mtp) {
+                    // Reuse the configured generation reserve as actual headroom
+                    // for direct continuations. Otherwise a 511-page view leaves
+                    // only 64 tokens, forcing another rebuild on the next turn.
+                    // The full working set + reserve stays within the same budget.
+                    budget = std::min(budget, text_kv_addresses->kvmem_budget_tokens() -
+                        text_kv_addresses->kvmem_gen_reserve_tokens());
+                }
                 // A retained shared prefix stays at its baked slots: moving it would re-phase
                 // pages other sequences read through their own frontiers. Only the private
                 // suffix may be repacked behind it.
                 const std::uint32_t pinned_prefix_pages =
                     text_kv_addresses->kvmem_shared_prefix_pages(sequence.kv->text);
+                std::optional<std::uint32_t> replay_from;
+                if (canonical_replay && canonical_prepare_requested() && replay_state_images_) {
+                    const auto& cache = replay_prefix_caches_[sequence.lane];
+                    // Conservatively prepare every possible reusable prefix.
+                    // Exact token/position identity and the chosen checkpoint
+                    // are still validated below, after retrieval has selected.
+                    replay_from = cache.owner == sequence.kv->text
+                        ? *std::max_element(cache.frontiers.begin(), cache.frontiers.end()) : 0U;
+                }
                 const std::uint32_t window = text_kv_addresses->kvmem_compact(
-                    sequence.kv->text, budget, device.stream, {}, false, pinned_prefix_pages);
+                    sequence.kv->text, budget, device.stream, {}, false, pinned_prefix_pages,
+                    {}, replay_from, !canonical_replay && !staged.vision);
                 if (window == 0) {
                     throw std::runtime_error(
                         "KVMem prefill offload could not move the window-external KV pages: a KV "
@@ -12410,7 +12813,7 @@ ProgramImplCore::advance_prefill(SequenceState& sequence, RequestControl& reques
                         backend_kv_addresses->kvmem_shared_prefix_pages(*sequence.kv->backend);
                     const std::uint32_t draft_window = backend_kv_addresses->kvmem_compact(
                         *sequence.kv->backend, budget, device.stream, {}, false,
-                        draft_pinned_prefix_pages, selected);
+                        draft_pinned_prefix_pages, selected, replay_from);
                     if (draft_window != window) {
                         throw std::runtime_error(
                             "KVMem prefill offload compacted the draft window to a different "
@@ -12517,6 +12920,8 @@ ProgramImplCore::advance_prefill(SequenceState& sequence, RequestControl& reques
                 }
                 schedule::PrefillChunkResult result;
                 timing.pause();
+                schedule_state.text_layer_ready = sequence.kv
+                    ? text_kv_addresses->kvmem_layer_ready_for(sequence.kv->text) : nullptr;
                 if (staged.vision) {
                     if (!workspace_plan.vision) {
                         throw std::logic_error("active Vision prefill lost its workspace plan");
@@ -12556,6 +12961,17 @@ ProgramImplCore::advance_prefill(SequenceState& sequence, RequestControl& reques
                 // an immutable source, close the Fork before potentially freezing a new rewrite.
                 settle_state_fork(sequence);
                 capture_original_query_prefix(result.processed_tokens);
+                (void)benchmark_prefix_checkpoint(sequence, staged, false);
+                if (bypass_original_probe()) {
+                    staged.elapsed_seconds += std::chrono::duration<double>(Clock::now() - started).count();
+                    return runtime::PrefillStepResult{.summary = summary,
+                        .processed_prompt_tokens = processed_prompt_tokens, .timing = timing.finish()};
+                }
+                if (reuse_canonical_query()) {
+                    staged.elapsed_seconds += std::chrono::duration<double>(Clock::now() - started).count();
+                    return runtime::PrefillStepResult{.summary = summary,
+                        .processed_prompt_tokens = processed_prompt_tokens, .timing = timing.finish()};
+                }
                 if (query_probe && staged.cursor == staged.prompt_tokens && original_kv_positions) {
                     // Complete KVMem original-timeline rewind. Full native prefix remains in
                     // the single-owner Device/Host/Cold directory; no packed-slot re-RoPE.
@@ -12622,6 +13038,24 @@ ProgramImplCore::advance_prefill(SequenceState& sequence, RequestControl& reques
                     }
                     std::fprintf(stderr, "KVMEM_ORIGINAL query_replay q0=%u end=%u cache=%u history_tokens=0 state_verified=%d\n",
                                  q0, staged.prompt_tokens, sequence.text_kv_valid, state_verified ? 1 : 0);
+                    using Diagnostic = ninfer::kvmem::OriginalReplayDiagnostic;
+                    if (const char* path = std::getenv("NINFER_KVMEM_ORIGINAL_DIAG_SAVE");
+                        path && Diagnostic::selected_query(q0)) {
+                        if (!state_verified || !sequence.kv->backend) {
+                            throw std::logic_error("original diagnostic export needs verified complete Main/MTP state");
+                        }
+                        const auto host = replay_state_images_->view(cache.slots[0]);
+                        Diagnostic record;
+                        record.q0 = q0; record.frontier = sequence.text_kv_valid;
+                        record.prefix = staged.original_prefix_tokens;
+                        record.selected = text_kv_addresses->kvmem_selected_blocks(sequence.kv->text);
+                        record.state = Diagnostic::digest(host.data, host.layout->image_bytes);
+                        record.main = Diagnostic::native(*text_kv_addresses, sequence.kv->text, device.stream);
+                        record.mtp = Diagnostic::native(*backend_kv_addresses, *sequence.kv->backend, device.stream);
+                        record.save(path);
+                        std::fprintf(stderr, "KVMEM_ORIGINAL_DIAG arm=probe_restore q0=%u cache=%u state_exact=1 selected=%zu\n",
+                            q0, record.frontier, record.selected.size());
+                    }
                     staged.elapsed_seconds += std::chrono::duration<double>(Clock::now() - started).count();
                     return runtime::PrefillStepResult{
                         .summary = summary,
@@ -12653,7 +13087,7 @@ ProgramImplCore::advance_prefill(SequenceState& sequence, RequestControl& reques
                     sequence.mtp_draft_count = 0;
                     // Scoring keeps the probe sums; replay cannot add the same Q again.
                     text_kv_addresses->freeze_kvmem_query();
-                    kvmem_offload(staged.hidden_replay_tokens, true);
+                    kvmem_offload(staged.hidden_replay_tokens, true, true);
                     if (std::getenv("NINFER_KVMEM_TRACE")) {
                         std::fprintf(stderr,
                             "KVMEM_TRACE query_replay begin=%u end=%u tokens=%u window=%u\n",
@@ -12681,6 +13115,10 @@ ProgramImplCore::advance_prefill(SequenceState& sequence, RequestControl& reques
                             while (common < positions.size() && common < cache.positions.size() &&
                                    positions[common] == cache.positions[common] &&
                                    staged.window_replay_ids[common] == cache.tokens[common]) { ++common; }
+                            if (std::getenv("NINFER_KVMEM_PREFIX_TRACE")) {
+                                std::fprintf(stderr, "KVMEM_TRACE canonical_common tokens=%zu old=%zu new=%zu\n",
+                                             common, cache.positions.size(), positions.size());
+                            }
                             for (std::size_t i = 0; i < cache.frontiers.size(); ++i) {
                                 if (cache.frontiers[i] <= common && cache.frontiers[i] < positions.size() && cache.frontiers[i] > reuse) {
                                     reuse = cache.frontiers[i]; reuse_slot = i;
@@ -12696,6 +13134,7 @@ ProgramImplCore::advance_prefill(SequenceState& sequence, RequestControl& reques
                         cache.owner = sequence.kv->text;
                         cache.positions = positions;
                         cache.tokens = staged.window_replay_ids;
+                        cache.canonical_frontier = 0; cache.canonical_states.clear();
                     }
                     text_kv_addresses->begin_kvmem_window_replay(sequence.kv->text, reuse, device.stream);
                     if (sequence.kv->backend) {
@@ -12824,6 +13263,13 @@ ProgramImplCore::advance_prefill(SequenceState& sequence, RequestControl& reques
         timing.begin_wait();
         device.synchronize();
         timing.end_wait();
+        if (original_kv_positions &&
+            (std::getenv("NINFER_KVMEM_ORIGINAL_DIAG_SAVE") ||
+             std::getenv("NINFER_KVMEM_ORIGINAL_DIAG_BYPASS")) &&
+            ninfer::kvmem::OriginalReplayDiagnostic::selected_query(staged.prompt.query_begin)) {
+            std::fprintf(stderr, "KVMEM_ORIGINAL_DIAG first_main_token=%d q0=%u\n",
+                host_tokens[0], staged.prompt.query_begin);
+        }
         staged.elapsed_seconds += std::chrono::duration<double>(Clock::now() - started).count();
         const double vision_seconds       = staged.vision ? staged.vision->elapsed_seconds() : 0.0;
         const std::uint32_t prompt_tokens = staged.prompt_tokens;
@@ -13081,7 +13527,7 @@ ProgramImplCore::decode_mtp_batch(std::span<const std::uint32_t> lanes,
         std::array<const MtpAdaptiveSignal*, kAdaptiveMtpMaximumBatch> signals{};
         std::array<std::uint32_t, kAdaptiveMtpMaximumBatch> available{};
         std::array<std::uint32_t, kAdaptiveMtpMaximumBatch> room{};
-        std::uint64_t cohort_key = 14695981039346656037ULL;
+        const std::uint64_t cohort_key = mtp_adaptive_cohort_key(lanes, lane_epochs);
         for (std::size_t row = 0; row < lanes.size(); ++row) {
             const SequenceState& sequence     = active_sequence(lanes[row]);
             const std::uint32_t rows_room     = std::min(
@@ -13090,7 +13536,6 @@ ProgramImplCore::decode_mtp_batch(std::span<const std::uint32_t> lanes,
             room[row]      = rows_room;
             available[row] = std::min(sequence.mtp_draft_count,
                                       rows_room > 0 ? rows_room - 1U : 0U);
-            cohort_key ^= static_cast<std::uint64_t>(lanes[row]);
         }
         const std::uint32_t selected = mtp_controller->select(
             std::span<const MtpAdaptiveSignal* const>(signals.data(), lanes.size()),

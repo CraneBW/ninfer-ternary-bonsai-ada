@@ -52,18 +52,6 @@ const std::vector<ContextCostMachinePreset>& compiled_context_cost_defaults() {
             .prefill =
                 {
                     ContextPrefillPreset{
-                        .model_id   = "qwen3.6-27b",
-                        .weights_id = "groupwise-int",
-                        .cost =
-                            {
-                                .chunk_ns              = 40'813'570,
-                                .token_ns_q32          = 1'012'273'154'411'951,
-                                .attention_pair_ns_q32 = 30'497'396'515,
-                                .vision_item_ns        = 5'986'585,
-                                .vision_patch_ns_q32   = 23'710'212'854'694,
-                            },
-                    },
-                    ContextPrefillPreset{
                         .model_id   = "qwen3.8-27b",
                         .weights_id = "nvfp4",
                         .cost =

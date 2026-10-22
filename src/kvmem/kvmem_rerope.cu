@@ -4,6 +4,7 @@
 #include "kvmem/kvmem_bridge.h"
 
 #include "core/paged_kv_cache.h"
+#include "core/device.h"
 #include "kvmem/kvmem_rerope.cuh"
 
 #include <cuda_bf16.h>
@@ -225,6 +226,58 @@ void kvmem_rebuild_source_k_batch(DeviceKVPagePool& pool,
     }
 }
 
+void kvmem_rebuild_source_k_batch_layer(DeviceKVPagePool& pool,
+                                        std::span<const SourcePageRestore> pages,
+                                        std::uint32_t layer, cudaStream_t stream) {
+#if defined(NINFER_SM89)
+    const auto& geometry = pool.geometry();
+    if (pages.empty() || pages.size() > 2 || layer >= 16 ||
+        geometry.page_tokens != kPagedKVPageSize ||
+        geometry.device_plane_order != PagedKVPlaneOrder::PageMajor ||
+        geometry.planes.size() != 16 * 4 || stream == nullptr ||
+        stream == cudaStreamLegacy) {
+        throw std::invalid_argument("source layer rebuild requires Main16 and one/two pages");
+    }
+    for (std::size_t plane = 0; plane < geometry.planes.size(); ++plane) {
+        const auto& entry = geometry.planes[plane];
+        const bool scale = plane % 4 >= 2;
+        if (entry.head_extent != 4 || entry.leading_extent != (scale ? 4 : 256) ||
+            entry.dtype != (scale ? DType::FP16 : DType::I8)) {
+            throw std::invalid_argument("source layer rebuild requires INT8-G64 geometry");
+        }
+    }
+    SourceRestoreBatch batch{};
+    batch.layers = 1; // grid.z names a page; each page uses this one layer plane
+    batch.planes.codes[0] = static_cast<std::int8_t*>(pool.plane(layer * 4).data);
+    batch.planes.scales[0] = static_cast<__half*>(pool.plane(layer * 4 + 2).data);
+    std::uint32_t max_columns = 0;
+    for (std::size_t i = 0; i < pages.size(); ++i) {
+        const auto& page = pages[i];
+        if (page.physical < 0 ||
+            static_cast<std::uint32_t>(page.physical) >= pool.capacity_pages() ||
+            page.columns == 0 || page.columns > kPagedKVPageSize || page.destination < 0 ||
+            page.destination > std::numeric_limits<std::int32_t>::max() -
+                static_cast<std::int32_t>(page.columns - 1) ||
+            (i != 0 && page.physical == pages[0].physical)) {
+            throw std::invalid_argument("source layer rebuild physical/columns invalid");
+        }
+        batch.pages[i].physical = page.physical;
+        batch.pages[i].destination = page.destination;
+        batch.pages[i].columns = static_cast<std::int32_t>(page.columns);
+        std::memcpy(batch.pages[i].positions.values, page.positions.data(),
+                    sizeof(batch.pages[i].positions.values));
+        max_columns = std::max(max_columns, page.columns);
+    }
+    rebuild_source_pages_layers_kernel<<<
+        dim3(max_columns, 4, static_cast<unsigned>(pages.size())), 32, 0, stream>>>(batch);
+    const auto error = cudaGetLastError();
+    if (error != cudaSuccess) { throw std::runtime_error(cudaGetErrorString(error)); }
+#else
+    (void)pool; (void)pages; (void)layer; (void)stream;
+    throw std::invalid_argument("source layer rebuild requires SM89");
+#endif
+}
+
 void kvmem_rerope_page(DeviceKVPagePool& pool, std::int32_t physical_page,
                        const std::int32_t* src_pos, const std::int32_t* dst_pos,
                        cudaStream_t stream) {
@@ -305,6 +358,74 @@ void kvmem_rerope_pages(DeviceKVPagePool& pool, const std::int32_t* physical_pag
         throw std::invalid_argument("kvmem rerope: unsupported KV head count");
     }
     KVMEM_CUDA_CHECK(cudaStreamSynchronize(stream));
+}
+
+void kvmem_rerope_pages_layer_ready(DeviceKVPagePool& pool,
+                                   const std::int32_t* physical_pages,
+                                   const std::int32_t* from_bases,
+                                   const std::int32_t* to_bases,
+                                   std::uint32_t n_blocks, KvmemReropeWorkspace workspace,
+                                   std::span<const cudaEvent_t> layer_ready,
+                                   cudaStream_t producer,
+                                   KvmemLayerEnqueue enqueue_source_layer,
+                                   void* source_owner) {
+    if ((n_blocks != 0 && (!physical_pages || !from_bases || !to_bases)) ||
+        (n_blocks == 0 && !enqueue_source_layer) ||
+        (enqueue_source_layer && !source_owner) ||
+        producer == nullptr || producer == cudaStreamLegacy || layer_ready.size() != 16) {
+        throw std::invalid_argument("layer-ready requires resident pages or a source producer");
+    }
+    const auto& geometry = pool.geometry();
+    if (geometry.page_tokens != kPagedKVPageSize || geometry.planes.size() != 16 * 4 ||
+        geometry.device_plane_order != PagedKVPlaneOrder::PageMajor) {
+        throw std::invalid_argument("layer-ready rephase requires Main16 PageMajor");
+    }
+    for (std::size_t i = 0; i < geometry.planes.size(); ++i) {
+        const auto& p = geometry.planes[i];
+        const bool scale = (i % 4) >= 2;
+        if (p.head_extent != 4 || p.leading_extent != (scale ? 4 : 256) ||
+            p.dtype != (scale ? DType::FP16 : DType::I8)) {
+            throw std::invalid_argument("layer-ready rephase requires INT8-G64 KV geometry");
+        }
+    }
+    const std::size_t count = static_cast<std::size_t>(n_blocks) * 3;
+    if (workspace.host_meta.size() < count || workspace.device_meta.size() < count) {
+        throw std::invalid_argument("layer-ready rephase metadata workspace too small");
+    }
+    for (const cudaEvent_t ready : layer_ready) {
+        if (!ready) { throw std::invalid_argument("layer-ready rephase missing event"); }
+    }
+    for (std::uint32_t i = 0; i < n_blocks; ++i) {
+        if (physical_pages[i] < 0 ||
+            static_cast<std::uint32_t>(physical_pages[i]) >= pool.capacity_pages()) {
+            throw std::invalid_argument("layer-ready rephase physical target out of range");
+        }
+    }
+    std::int32_t* d = workspace.device_meta.data();
+    if (n_blocks != 0) {
+        auto* h = workspace.host_meta.data();
+        std::memcpy(h, physical_pages, sizeof(std::int32_t) * n_blocks);
+        std::memcpy(h + n_blocks, from_bases, sizeof(std::int32_t) * n_blocks);
+        std::memcpy(h + static_cast<std::size_t>(n_blocks) * 2, to_bases,
+                    sizeof(std::int32_t) * n_blocks);
+        CUDA_CHECK(cudaMemcpyAsync(d, h, count * sizeof(std::int32_t), cudaMemcpyHostToDevice,
+                                   producer));
+    }
+    for (std::size_t layer = 0; layer < layer_ready.size(); ++layer) {
+        if (enqueue_source_layer) {
+            enqueue_source_layer(source_owner, static_cast<std::uint32_t>(layer), producer);
+        }
+        if (n_blocks != 0) {
+            const std::size_t plane = layer * 4;
+            kvmem_rerope_int8_g64_planes<4>(
+                static_cast<std::int8_t*>(pool.plane(plane).data),
+                static_cast<__half*>(pool.plane(plane + 2).data),
+                d, d + n_blocks, d + 2 * static_cast<std::size_t>(n_blocks),
+                n_blocks, producer);
+            CUDA_CHECK(cudaGetLastError());
+        }
+        CUDA_CHECK(cudaEventRecord(layer_ready[layer], producer));
+    }
 }
 
 } // namespace ninfer::kvmem

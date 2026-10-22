@@ -1,0 +1,50 @@
+{
+  "checkpoint": "OpenSpec 3.1 instrumentation, no layer-ready consumer implemented",
+  "input": "frozen 213K ABI1 raw q0, original six queries, Qwen3.8 GSQ v3",
+  "power_w": 200,
+  "variant": "sync; NINFER_KVMEM_STAGE_TRACE=1; source read-ahead=1, event pipeline=0",
+  "run_log": "tmp-nvcc/opsx-layer-stage-profile/quality-raw213k/213k-stage-profile.log",
+  "test": {
+    "passed": 6,
+    "total": 6,
+    "terminal_inflight_pages": 0.0,
+    "terminal_inflight_bytes": 0.0
+  },
+  "source": {
+    "stores_logged": 2,
+    "restored_pages": 522,
+    "moved_pages": 494,
+    "gpu_timed_pages": 522,
+    "host_blocking_read_ms": 0.0,
+    "host_exposed_read_ahead_wait_ms": 127.751,
+    "h2d_gpu_event_ms": 18.951,
+    "rebuild_gpu_event_ms": 8.564
+  },
+  "forward": {
+    "chunks": 63,
+    "replayed_tokens": 32228,
+    "submit_host_ms": 13341.757,
+    "device_wait_host_ms": 9825.205,
+    "post_host_ms": 0.0,
+    "total_host_observed_ms": 23167.0
+  },
+  "transfer": {
+    "kvmem_transfer_us_total": 57168.0,
+    "kvmem_stage_in_blocks": 474.0,
+    "cold_read_ahead_submitted": 0.0,
+    "cold_read_ahead_completed": 0.0,
+    "cold_read_wait_us": 0.0
+  },
+  "bound": {
+    "loose_sum_ms": 193.483,
+    "fraction_of_prior_raw_35_538335889s": 0.00544,
+    "meaning": "An optimistic, deliberately loose sum of host read-ahead waits + total recorded KVMem transfers + source GPU rebuild times; terms can overlap. It bounds only these measured stages in this observed session, NOT uninstrumented CPU work or every possible future layer pipeline."
+  },
+  "limitations": [
+    "CUDA timing events added to source restore and contribute measurement overhead",
+    "host source read wait measures future.get uncovered time, not total storage I/O",
+    "this archive has 0 Cold-tier page prefetches so Cold->H2D must be validated by a separate native Cold fixture",
+    "forward timings are Program phase wall on the host, not isolated GPU kernels",
+    "no P4 10 percent wall qualification and no 256K run in this stage profile"
+  ]
+}

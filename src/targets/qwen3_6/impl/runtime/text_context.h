@@ -173,6 +173,9 @@ public:
 
     void set_sampling(const ops::SamplingConfig* config) noexcept { sampling_config_ = config; }
     void set_original_kv_positions(bool enabled) noexcept { original_kv_positions_ = enabled; }
+    void set_text_layer_ready(ninfer::kvmem::LayerReadyConsumer* consumer) noexcept {
+        text_layer_ready_ = consumer;
+    }
 
     // YaRN stretches the rotary window past the native one and rescales the dot-product scalar by
     // the temperature multiplier that comes with it (see yarn.h).
@@ -345,6 +348,7 @@ private:
     Tensor* rewrite_checkpoint_hidden_output_ = nullptr;
     std::uint32_t mtp_proposal_extent_        = 0;
     const ninfer::kvmem::KvmemQueryCapture* kvmem_query_ = nullptr;
+    ninfer::kvmem::LayerReadyConsumer* text_layer_ready_ = nullptr;
     // Prompt position of the current prefill chunk's first column, so the query
     // accumulator can tell which columns fall inside the request's query span.
     std::uint32_t kvmem_query_chunk_begin_ = 0;

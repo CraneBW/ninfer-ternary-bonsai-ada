@@ -51,6 +51,8 @@ def inspect(path: Path) -> tuple[int, str, str]:
 
 def choose_backend(info: tuple[int, str, str], arguments: list[str]) -> str:
     version, model, model_type = info
+    if model == "qwen3.6-27b":
+        raise ValueError("Qwen3.6-27B support has been retired; use Qwen3.8-27B")
     if version == 2:
         return "native"
     if model in {"qwen3.8-27b-tp2-rank0", "qwen3.8-27b-tp2-rank1"}:
@@ -63,7 +65,7 @@ def choose_backend(info: tuple[int, str, str], arguments: list[str]) -> str:
     speculative = [arguments[i + 1] for i, value in enumerate(arguments[:-1])
                    if value == "--spec"]
     if (
-        model in {"qwen3.8-27b", "qwen3.6-27b"}
+        model == "qwen3.8-27b"
         and model_type == "qwen3_5_text"
         and "dflash" not in speculative
     ):
@@ -98,6 +100,8 @@ def main(argv: list[str] | None = None) -> int:
     if flags and flags[0] == "--":
         flags = flags[1:]
     info = inspect(args.model)
+    if info[1] == "qwen3.6-27b":
+        raise ValueError("Qwen3.6-27B support has been retired; use Qwen3.8-27B")
     backend = choose_backend(info, flags) if args.backend == "auto" else args.backend
     binary = default_binary(backend)
     command = [str(binary), str(args.model.resolve()), *flags]

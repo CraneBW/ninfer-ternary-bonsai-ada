@@ -25,6 +25,28 @@ namespace ninfer::targets::qwen3_6::detail {
 inline constexpr std::uint32_t kAdaptiveMtpMaximumDrafts = 15;
 inline constexpr std::uint32_t kAdaptiveMtpMaximumBatch  = 8;
 
+// The batch rows have already been validated as distinct lane indices in [0, 8).  XOR of lane
+// indices is not a cohort identity: {0,1} and {2,3}, for example, both XOR to one.  Include
+// the active lane epochs so reusing a lane for a different request also resets the controller.
+// Only the relative optimization decision depends on this hash; it is not a state/owner guard.
+[[nodiscard]] constexpr std::uint64_t
+mtp_adaptive_cohort_key(std::span<const std::uint32_t> lanes,
+                        std::span<const std::uint64_t> lane_epochs) noexcept {
+    std::uint64_t key = 0;
+    for (const std::uint32_t lane : lanes) {
+        key |= std::uint64_t{1} << lane;
+    }
+    for (const std::uint32_t lane : lanes) {
+        std::uint64_t value = lane_epochs[lane] ^ (0x9e3779b97f4a7c15ULL * (lane + 1U));
+        value ^= value >> 30;
+        value *= 0xbf58476d1ce4e5b9ULL;
+        value ^= value >> 27;
+        value *= 0x94d049bb133111ebULL;
+        key ^= value ^ (value >> 31);
+    }
+    return key;
+}
+
 // The narrowest width an adaptive round settles on while every row has that many drafts ready: 3,
 // because narrower rounds cost about as much as they save (the prior already expects most of the
 // first draft to survive) and a round below it is only chosen when the rows cannot fill three.
@@ -226,8 +248,6 @@ public:
             execution_round_            = 0;
             selection_cohort_key_       = cohort_key;
         }
-        const std::uint32_t round_window = selected_window_;
-
         const std::uint32_t minimum_window = minimum_selectable_window(available);
         if (selected_window_ < minimum_window) {
             selected_window_  = minimum_window;
@@ -235,6 +255,10 @@ public:
             rounds_at_window_ = 0;
             candidate_rounds_ = 0;
         }
+
+        // Changing cohorts is a new startup decision, not an adaptive transition belonging to
+        // the new requests.  Record transitions only after the new cohort has been established.
+        const std::uint32_t round_window = selected_window_;
 
         std::uint32_t best_window = selected_window_;
         float best_score          = score(selected_window_, signals, available, room);

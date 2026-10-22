@@ -68,6 +68,9 @@ struct PrefillContext {
     // KVMem original-timeline mode: KV slots use the offset; RoPE keeps prompt positions.
     // Adapted from kvmem/kvmem faf3c225, backends/patches/ninfer-kvmem.patch.
     bool original_kv_positions = false;
+    // Optional prefill-only Main16 producer dependency; never bound while
+    // recording/replaying a decode CUDA Graph.
+    ninfer::kvmem::LayerReadyConsumer* text_layer_ready = nullptr;
 };
 
 struct OrdinaryBatchContext {

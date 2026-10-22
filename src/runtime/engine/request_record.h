@@ -185,7 +185,9 @@ struct RequestRecord {
     std::uint64_t remaining_service_work = 0;
     std::uint64_t backfill_epoch         = 0;
     BackfillClass backfill_class         = BackfillClass::None;
+    // Accounted progress inside the admitted suffix; restored is its non-compute subset.
     std::uint32_t computed_prompt_tokens = 0;
+    std::uint32_t restored_prompt_tokens = 0;
     GenerationTimings generation_timings;
     RequestHostTiming host_timing;
     SpeculativeStats speculative_stats;

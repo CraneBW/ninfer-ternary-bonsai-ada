@@ -615,6 +615,7 @@ struct PrefillStepResult {
     BeginSummary summary;
     GeneratedRound round;
     std::uint32_t processed_prompt_tokens = 0;
+    std::uint32_t restored_prompt_tokens = 0;
     bool complete                         = false;
     ExecutionTiming timing;
 };

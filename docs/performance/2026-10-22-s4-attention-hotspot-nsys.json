@@ -1,0 +1,69 @@
+{
+  "method": "one Nsight Systems CUDA/NVTX trace; observational, not clean performance A/B",
+  "timestamp": "2026-10-22",
+  "trace": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-s4-20261022/trace.nsys-rep",
+  "sqlite": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-s4-20261022/trace.sqlite",
+  "binary_sha256": "53f0fc8642546971f23c1d739883810e9c4b1bedd66136b6e15f829444328a8a",
+  "context": {
+    "gpu": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "power_limit_w": 200,
+    "speculative": "MTP15",
+    "physical_int8_kv_tokens": 36864,
+    "kvmem_budget_tokens": 32768,
+    "prefill_chunk": 512,
+    "max_concurrency": 1,
+    "input_tokens": 31987,
+    "output_tokens": 128
+  },
+  "request": {
+    "http_status": 200,
+    "finish_reason": "length",
+    "server_exit_code": 0,
+    "client_wall_s": 32.891,
+    "stopped_logged": true
+  },
+  "all_gpu_kernels": {
+    "total_duration_ms": 22332.0196,
+    "kernel_names": 195
+  },
+  "kernel_groups": {
+    "gguf_quant_matrix": {
+      "total_gpu_kernel_time_ms": 17356.1914,
+      "instances": 33931,
+      "kernel_variants": 33,
+      "fraction_of_gpu_kernel_sum": 0.77718862
+    },
+    "causal_prefill": {
+      "total_gpu_kernel_time_ms": 2165.3023,
+      "instances": 1057,
+      "kernel_variants": 2,
+      "fraction_of_gpu_kernel_sum": 0.09695954
+    },
+    "small_t_tiled": {
+      "total_gpu_kernel_time_ms": 9.7714,
+      "instances": 95,
+      "kernel_variants": 7,
+      "fraction_of_gpu_kernel_sum": 0.00043755
+    },
+    "small_t_reducer": {
+      "total_gpu_kernel_time_ms": 0.4627,
+      "instances": 95,
+      "kernel_variants": 2,
+      "fraction_of_gpu_kernel_sum": 2.072e-05
+    },
+    "gdn_recurrent": {
+      "total_gpu_kernel_time_ms": 719.2725,
+      "instances": 9494,
+      "kernel_variants": 8,
+      "fraction_of_gpu_kernel_sum": 0.03220812
+    },
+    "gdn_l2norm": {
+      "total_gpu_kernel_time_ms": 19.0667,
+      "instances": 6048,
+      "kernel_variants": 1,
+      "fraction_of_gpu_kernel_sum": 0.00085378
+    }
+  },
+  "source_screen": "docs/maintainer/2026-10-22-sm89-attention-gdn-ceilings.md",
+  "interpretation": "No new small-T QK duplicate identified; reducer time is <0.5 ms for this entire measured request. Profiling cannot establish clean performance or justify new 8 KiB shared staging. 5.2 not implemented or checked."
+}

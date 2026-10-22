@@ -13,6 +13,7 @@ using ninfer::targets::qwen3_6::detail::kAdaptiveMtpMaximumBatch;
 using ninfer::targets::qwen3_6::detail::MtpAdaptiveBatchController;
 using ninfer::targets::qwen3_6::detail::MtpAdaptiveSignal;
 using ninfer::targets::qwen3_6::detail::minimum_adaptive_window;
+using ninfer::targets::qwen3_6::detail::mtp_adaptive_cohort_key;
 
 void require(bool condition, const char* message) {
     if (!condition) {
@@ -145,6 +146,43 @@ int main() {
         controller.reset(7);
         const std::uint32_t window = select_once(controller, signal, 0, 1, 7);
         require(window <= 3, "no room keeps the round narrow");
+    }
+
+    // A different live request set must not inherit a widened width or its transition counter.
+    // XOR of lane IDs used to collide for {0,1} and {2,3}; the lane epoch additionally distinguishes
+    // a new request occupying the same lane after a prior request has retired.
+    {
+        const std::array<std::uint32_t, 2> first_lanes{0, 1};
+        const std::array<std::uint32_t, 2> other_lanes{2, 3};
+        const std::array<std::uint32_t, 2> reversed_lanes{1, 0};
+        std::array<std::uint64_t, kAdaptiveMtpMaximumBatch> epochs{};
+        epochs.fill(1);
+        const auto first_key = mtp_adaptive_cohort_key(first_lanes, epochs);
+        const auto other_key = mtp_adaptive_cohort_key(other_lanes, epochs);
+        require(first_key != other_key, "different lane sets distinguish cohorts");
+        require(first_key == mtp_adaptive_cohort_key(reversed_lanes, epochs),
+                "cohort identity is independent of row ordering");
+        ++epochs[0];
+        require(first_key != mtp_adaptive_cohort_key(first_lanes, epochs),
+                "lane reuse with a new epoch distinguishes cohorts");
+
+        MtpAdaptiveSignal strong;
+        MtpAdaptiveSignal fresh;
+        for (int round = 0; round < 12; ++round) { strong.observe(7, 7); }
+        const std::array<const MtpAdaptiveSignal*, 2> strong_rows{&strong, &strong};
+        const std::array<const MtpAdaptiveSignal*, 2> fresh_rows{&fresh, &fresh};
+        const std::array<std::uint32_t, 2> available{7, 7};
+        const std::array<std::uint32_t, 2> room{4096, 4096};
+        MtpAdaptiveBatchController controller;
+        controller.reset(7);
+        for (int round = 0; round < 16; ++round) {
+            const auto width = controller.select(strong_rows, available, room, first_key);
+            controller.observe_execution(2, width, 0.010);
+        }
+        require(controller.selected_window() >= 6, "strong first cohort widened");
+        const auto second_width = controller.select(fresh_rows, available, room, other_key);
+        require(second_width == 3, "new cohort begins from narrow startup width");
+        require(!controller.transitioned(), "new cohort startup is not a width transition");
     }
 
     require(minimum_adaptive_window(2) == 2 && minimum_adaptive_window(5) == 3,

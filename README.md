@@ -5,6 +5,9 @@
 
 面向 NVIDIA Ada 单卡的 C++20/CUDA 推理项目。主要验证设备为 **RTX 4070 Ti SUPER，SM89 / 66 SM / 16 GiB**；当前主要模型是已有的 **Qwen3.8-27B GSQ-RCO-IQ3_S `.ninfer` v3**。项目提供命令行、HTTP 服务、MTP 投机解码，以及在有限 GPU KV 工作集上运行更长逻辑上下文的 KVMem 路径。
 
+维护范围（2026-10-21）：后续主线只维护 **Qwen3.8-27B**。Qwen3.6-27B Groupwise/NVFP4 已退役，不再注册运行入口，本地权重删除；旧报告保留历史结果。`qwen3_6` 源码目录仍包含 Qwen3.8 共用实现。
+
+
 本仓库也保留三元 Bonsai 和其它模型目标的实现。本页的质量、配置与性能结论以表中实际模型和工作负载为准。
 
 > 提供两种显式配置：**短档 K7，32K 长档 K15**。本次长档原 213K 六请求 **6/6 精确正确**；18 次整体 Graph 测量通过，每档九次运行的完整 129 个输出 token 一致。详见[发布报告](docs/releases/v1.0.0.md)。
@@ -43,6 +46,18 @@ flowchart LR
 权重独立准备，遵循模型和量化来源的许可证。程序按启用组件 materialize 权重；MTP、DFlash2、Vision 的显存需求不同，16 GiB 文本配置不能直接复用为任意多模态/高并发配置。历史长档服务记录约18–20G主存峰值，另有GPU显存、pinned buffer和文件缓存开销。
 
 模型组件、格式与已验收入口可查 [GSQ 原生验证](docs/maintainer/2026-10-20-v3-gsq-live-validation.md)。
+
+本机日常GPU功耗上限现为 **200W**，通过系统服务开机自动应用。32K/MTP15：decode **197.57 tok/s**、prefill **1431.27 tok/s**；4K/MTP7：decode **172.55 tok/s**、prefill **1554.61 tok/s**。旧v1.0.0表保留原测量功耗，不能混作200W结果。[功耗对照、方法和撤销方式](docs/performance/2026-10-21-power-cap.md)。
+
+固定213K长题从已保存的完整前缀恢复时，新增分块完整性索引：200W同binary三对的load用时中位24.32→10.77s、首TTFT47.42→34.16s，成对首TTFT减少27.6%、六题会话减少7.3%；213K36/36、256K6/6通过，已作为快照恢复默认。该范围是固定基准状态加载，cold-prefill和后续decode另计。[理论、完整对照与回退](docs/maintainer/2026-10-22-checkpoint-io-optimization.md)。
+
+续问复用进一步减少重复重建：200W同binary原213K三对，六题会话中位 **145.23→36.11s**，后续单题TTFT中位 **22.06→0.404s**，历史回放 **185836→32228 tokens**；36/36及256K6/6精确正确。固定快照工具默认启用，普通Serve显式设 `NINFER_KVMEM_CANONICAL_QUERY_REUSE=1`；状态/证据/容量不满足时沿用原重建。这组ABI1对照的首请求仍约33.5s，R21原位置模式仍关闭。[资格、整体对照与回退](docs/maintainer/2026-10-22-canonical-query-reuse.md)。
+
+完整canonical-ready快照继续省掉首次重建：200W同binary原213K三对，首TTFT中位 **32.99→10.35s**，六题会话 **35.54→13.11s**（成对减少68.62%/63.11%），history replay **32228→0**。36/36与256K重启6/6精确正确；后五题TTFT合计2.03→2.31s的小回退保留。固定快照工具现auto优先使用已有ABI2包；首次生成及索引创建另计，原ABI1包保留。[完整结果、生成与回退命令](docs/maintainer/2026-10-22-canonical-ready-checkpoint.md)。
+
+快照加载再做有界流水：双槽H2D、Host直接读取与私有COW首次K区间，200W同binary原213K三对，load中位 **10.886→10.380s**、六题会话 **13.881→13.436s**（成对减少4.64%/3.47%）。36/36及额外raw213K、256K各6/6精确；后续TTFT无改善。固定工具213K默认采用，256K仅显式 `--checkpoint-load-pipeline`；该项不是逐层forward/P4通过。[实现、原值与参考命令](docs/maintainer/2026-10-22-checkpoint-load-pipeline.md)。
+
+投机档位复核：MTP4在200W原213K/256K六题各自生成+独立恢复均6/6精确；额外256K六题会话同SSD三对中位快4.22%，但正式4K/32K tg128三对中，MTP4相对MTP15的decode分别慢14.00%/33.42%，因此维持默认MTP15。另修复显式adaptive MTP的cohort/lane epoch复位：200W新binary下4K/32K固定MTP4与adaptive MTP4各三对输出、usage均一致，session中位反而慢1.13%/0.29%，**仅保留opt-in**，DeepInfer host跨轮队列尚未采用。[S3正式对照](docs/maintainer/2026-10-22-s3-mtp4-long-quality.md) · [S5控制器与host/device实测](docs/maintainer/2026-10-22-s5-deepinfer-host-mtp.md)。
 
 ## 构建
 
@@ -157,6 +172,7 @@ Cold目录设在NVMe挂载点时使用该设备上的文件后备；目录和fil
 | 日期 | 模型与工作负载 | 已有结果 | 范围 |
 |---|---|---|---|
 | 2026-10-21 | Qwen3.8 GSQ、32K工作集、原213K六请求、MTP7/Graph/sync、近期三格式decode profile | **6/6精确正确**，HTTP/terminal/usage完整，server正常退出 | 原冻结事实题及该显式单卡配置；不是任意213K任务的准确率基准 |
+| 2026-10-22 | Qwen3.8 GSQ、32K工作集/36K物理KV、原213K和256K、**MTP4/Graph/sync**、200W | 两档分别首次保存与独立新进程恢复均**6/6精确正确**，原模型、原输入和对应ABI1包身份匹配 | [MTP4冻结长题收据](docs/maintainer/2026-10-22-s3-mtp4-long-quality.md)；尚不代表当前MTP15已重新验证256K，也不能跨draft-width使用snapshot |
 | 2026-10-20 | Qwen3.8 GSQ、32K工作集、原256K六请求；sync与async各一臂 | **12/12正确完整**，实际261,411–261,576 prompt tokens，两臂输出/usage一致、终态在飞0 | 较早功能版本，base/no-Graph，无MTP/DFlash2；没有在当前MTP7或MTP15配置重新认证256K |
 | 2026-10-20 | 小工作集超池、保留分支及短Graph/MTP/DFlash2语义 | 对应固定fixture通过 | 不合并成任意后端/上下文/并发组合通用保证 |
 | 2026-10-20 | 真实图像、双图、短MP4，及Vision+MTP / Vision+DFlash2部分组合 | 原生HTTP请求完成，部分受控图像描述与输入一致 | 小尺寸、短请求功能验收；未建立高分辨率、长视频或长上下文媒体准确率 |

@@ -729,7 +729,7 @@ private:
         }
         const PromptProgress progress{
             .total_prompt_tokens     = begin.prompt_tokens,
-            .reused_prompt_tokens    = begin.reused_prompt_tokens,
+            .reused_prompt_tokens    = begin.reused_prompt_tokens + request->restored_prompt_tokens,
             .processed_prompt_tokens = begin.reused_prompt_tokens + request->computed_prompt_tokens,
             .elapsed_ns              = elapsed_ns(*request->admitted_at, Clock::now()),
         };
@@ -856,7 +856,7 @@ private:
         result.matched_stop_string     = request->output.matched_stop_string();
         result.timings.prepare_seconds = request->prepare_seconds;
         if (request->begin) {
-            result.reused_prompt_tokens = request->begin->reused_prompt_tokens;
+            result.reused_prompt_tokens = request->begin->reused_prompt_tokens + request->restored_prompt_tokens;
             result.prefix_reuse_path    = request->begin->prefix_reuse_path;
         }
         result.timings                 = request->generation_timings;
@@ -1359,7 +1359,13 @@ private:
         EnginePhaseScope phase(*this, EngineHostPhase::CommitOutput);
         ++cumulative_stats_.host_work.prefill_units;
         ++request->host_timing.prefill_units;
-        cumulative_stats_.computed_prefill_tokens += progress.processed_prompt_tokens;
+        if (progress.restored_prompt_tokens > progress.processed_prompt_tokens) {
+            throw std::logic_error("restored prefix exceeds processed progress");
+        }
+        cumulative_stats_.computed_prefill_tokens += progress.processed_prompt_tokens - progress.restored_prompt_tokens;
+        cumulative_stats_.restored_prefill_tokens += progress.restored_prompt_tokens;
+        cumulative_stats_.reused_prompt_tokens += progress.restored_prompt_tokens;
+        request->restored_prompt_tokens += progress.restored_prompt_tokens;
         Scheduling::consume_service_work(*request, 1);
         if (!request->admitted_begin) {
             throw std::logic_error("prefill progress has no committed admission summary");

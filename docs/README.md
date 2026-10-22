@@ -46,6 +46,11 @@ describe the delivered implementation.
 
 Runtime and Op references:
 
+- [完整快照加载页流水：固定213K三对、私有首次K区间及使用边界](maintainer/2026-10-22-checkpoint-load-pipeline.md)
+- [Canonical-ready完整快照：首次重建归零、213K三对及256K重启](maintainer/2026-10-22-canonical-ready-checkpoint.md)
+- [Canonical续问复用：213K三对与256K原题资格、命令和边界](maintainer/2026-10-22-canonical-query-reuse.md)
+- [R21原位置恢复的固定q0因果对照](maintainer/2026-10-22-original-replay-causal-control.md)
+
 - [Engine architecture, execution ownership, scheduling, and request lifecycles](maintainer/engine-architecture.md)
 - [Resource scheduling, continuation/checkpoint, and Device/Host context-cache contracts](maintainer/resource-scheduling-and-context-cache.md)
 - [Paged KV context storage, ownership, and capacity model](maintainer/paged-kv-cache.md)
@@ -63,8 +68,8 @@ Artifact and model references:
 - [NInfer artifact container](maintainer/artifact-container.md)
 - [Persistent tensor numeric formats](maintainer/tensor-formats.md)
 - [Persistent storage layouts](maintainer/storage-layouts.md)
-- [Qwen3.6-27B model semantics](maintainer/qwen3.6-27b-model.md)
-- [Qwen3.6-27B artifact contracts, including NVFP4](maintainer/qwen3.6-27b-artifact.md)
+- Historical Qwen3.6-27B reference (retired; shared Qwen3.8 implementation): [model semantics](maintainer/qwen3.6-27b-model.md)
+- Historical Qwen3.6-27B reference (retired): [artifact contracts, including NVFP4](maintainer/qwen3.6-27b-artifact.md)
 - [Qwen3.8-27B DFlash2 mathematics and Engine state contract](maintainer/qwen3.8-27b-dflash2.md)
 - [Qwen3.8-27B artifact contracts, including the NVFP4 target](maintainer/qwen3.8-27b-artifact.md)
 - [Qwen3.6-35B-A3B model semantics](maintainer/qwen3.6-35b-a3b-model.md)

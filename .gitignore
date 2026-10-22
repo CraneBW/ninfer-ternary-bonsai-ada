@@ -28,3 +28,7 @@ tmp-nvcc/
 *.safetensors
 *.ncu-rep
 *.nsys-rep
+
+# OpenSpec plans, task trackers, and handoff notes stay local.
+openspec/
+docs/maintainer/*-openspec-*.md

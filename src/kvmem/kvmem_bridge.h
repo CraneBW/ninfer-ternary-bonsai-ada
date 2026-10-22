@@ -23,6 +23,18 @@ class DeviceKVPagePool;
 
 namespace ninfer::kvmem {
 
+// A prefill-only dependency contract between a KVMem producer and the exact
+// attention layer that consumes its restored physical KV planes. The producer
+// owns the events and their lifetime; no caller may treat a submitted H2D or
+// rephase operation as completed until wait_before_layer has been enqueued.
+// Graph decode must use its separate stream/graph retirement contract.
+class LayerReadyConsumer {
+public:
+    virtual ~LayerReadyConsumer() = default;
+    virtual void wait_before_layer(std::uint32_t layer, cudaStream_t stream) = 0;
+    virtual void release_after_layer(std::uint32_t layer, cudaStream_t stream) = 0;
+};
+
 // Lightweight CUDA error reporter for host-side executor code (the store).
 // kvmem stays self-contained: core/device.h carries the SM gate and must not
 // be pulled into every TU that includes this header.
@@ -77,6 +89,14 @@ void kvmem_rebuild_source_k_batch(ninfer::DeviceKVPagePool& pool,
                                   std::span<const SourcePageRestore> pages,
                                   cudaStream_t stream);
 
+// Exactly one Main16 attention-plane group, with one or two immutable K
+// sources (including partial 64-token tails). Uses the same un-RoPE/re-RoPE
+// math and by-value metadata as kvmem_rebuild_source_k_batch, but permits a
+// per-layer H2D -> rebuild -> consumer-ready event sequence.
+void kvmem_rebuild_source_k_batch_layer(ninfer::DeviceKVPagePool& pool,
+                                        std::span<const SourcePageRestore> pages,
+                                        std::uint32_t layer, cudaStream_t stream);
+
 // Batched variant: re-bakes `n_blocks` moved physical pages across all layer
 // planes of the pool using one H2D metadata upload and one kernel launch per
 // layer. `physical_pages`, `from_bases`, and `to_bases` are HOST arrays of
@@ -87,10 +107,27 @@ struct KvmemReropeWorkspace {
     std::span<std::int32_t> device_meta;
 };
 
+using KvmemLayerEnqueue = void (*)(void* owner, std::uint32_t layer, cudaStream_t stream);
+
 void kvmem_rerope_pages(ninfer::DeviceKVPagePool& pool, const std::int32_t* physical_pages,
                         const std::int32_t* from_bases, const std::int32_t* to_bases,
                         std::uint32_t n_blocks, KvmemReropeWorkspace workspace,
                         cudaStream_t stream);
+
+// SM89 Main16 PageMajor opt-in: identical K codec/rephase kernels, but the
+// independent producer stream publishes one completion event per full-attention
+// layer. Its pinned metadata and device workspace must remain owned until the
+// final event completes; the consumer stream waits before reading each layer.
+// Unlike kvmem_rerope_pages, this does not host-synchronize the producer.
+void kvmem_rerope_pages_layer_ready(ninfer::DeviceKVPagePool& pool,
+                                   const std::int32_t* physical_pages,
+                                   const std::int32_t* from_bases,
+                                   const std::int32_t* to_bases,
+                                   std::uint32_t n_blocks, KvmemReropeWorkspace workspace,
+                                   std::span<const cudaEvent_t> layer_ready,
+                                   cudaStream_t producer,
+                                   KvmemLayerEnqueue enqueue_source_layer = nullptr,
+                                   void* source_owner = nullptr);
 
 // ---- query-driven retention (K3): persistent retrieval evidence ----
 //

@@ -1,0 +1,282 @@
+{
+  "date": "2026-10-22",
+  "device": "RTX4070TiSUPER 16GiB SM89/66SM",
+  "model": "Qwen3.8 GSQ-RCO-IQ3_S v3 mixed GGUF blocks",
+  "model_sha256": "29e54467ca0ddae7e9aac04439f72ad20dbf6dc8fb5e84833b41ec7de9c46750",
+  "power_w": 200,
+  "measured_binary_sha256": "6f9c8a3e8a1c4c767146e473c1890ff7d4908afb26e2529f4cb1013b12297997",
+  "installed_binary_sha256": "069625cb28c451e0920e1ae1c3f613a89fd378cd570ed994360a77ac35368251",
+  "comparison": "same binary, legacy=0 versus indexed=1, canonical_prepare=0, original_positions=0, sync, MTP15, INT8 KV, chunk512, C1, Graph, greedy/no-thinking",
+  "workload": {
+    "logical_context": 212992,
+    "physical_kv": 36864,
+    "working_set": 32768,
+    "initial_input": 212276,
+    "restored_tokens": 212260,
+    "requests": 6
+  },
+  "performance": {
+    "load_s": {
+      "baseline_median": 24.318355,
+      "candidate_median": 10.774715,
+      "paired_reduction_pct": [
+        28.789651425655094,
+        58.730502124835326,
+        55.01773809177401
+      ],
+      "median_paired_reduction_pct": 55.01773809177401
+    },
+    "session_wall_s": {
+      "baseline_median": 160.599867369,
+      "candidate_median": 148.645553111,
+      "paired_reduction_pct": [
+        3.189779039623819,
+        8.467191307411415,
+        7.343258139047048
+      ],
+      "median_paired_reduction_pct": 7.343258139047048
+    },
+    "after_first_ttft_sum_s": {
+      "baseline_median": 112.802379857,
+      "candidate_median": 113.973980506,
+      "paired_reduction_pct": [
+        -1.7433364100517323,
+        -0.19425740087768428,
+        -1.0786379760271414
+      ],
+      "median_paired_reduction_pct": -1.0786379760271414
+    },
+    "first_ttft_s": {
+      "baseline_median": 47.421574553,
+      "candidate_median": 34.15982644,
+      "paired_reduction_pct": [
+        14.728593269844781,
+        29.335209644825987,
+        27.583680286550837
+      ],
+      "median_paired_reduction_pct": 27.583680286550837
+    },
+    "quality_exact": 36,
+    "complete_outputs_equal": true,
+    "work_identical": true,
+    "work": {
+      "ninfer:kvmem_source_k_rebuilds_total": 3398.0,
+      "ninfer:kvmem_history_replay_tokens_total": 185836.0,
+      "ninfer:kvmem_history_reused_tokens_total": 10240.0,
+      "ninfer:restored_prefill_tokens_total": 212260.0
+    }
+  },
+  "paired_runs": [
+    {
+      "pair": 0,
+      "arm": 1,
+      "ttft_s": [
+        41.036467067,
+        23.144265398,
+        26.088625542,
+        22.184825093,
+        20.544070302,
+        22.012194171
+      ],
+      "load_s": 17.74688,
+      "session_wall_s": 155.477086462,
+      "after_first_ttft_sum_s": 113.973980506
+    },
+    {
+      "pair": 0,
+      "arm": 0,
+      "ttft_s": [
+        48.124533933,
+        23.153145985,
+        24.18294772,
+        22.170385506,
+        20.57360448,
+        21.940992605
+      ],
+      "load_s": 24.921771,
+      "session_wall_s": 160.599867369,
+      "after_first_ttft_sum_s": 112.021076296
+    },
+    {
+      "pair": 1,
+      "arm": 0,
+      "ttft_s": [
+        47.421574553,
+        23.161570238,
+        25.387188844,
+        22.290157767,
+        20.821947426,
+        22.086754092
+      ],
+      "load_s": 24.318355,
+      "session_wall_s": 161.62608067,
+      "after_first_ttft_sum_s": 113.747618367
+    },
+    {
+      "pair": 1,
+      "arm": 1,
+      "ttft_s": [
+        33.510356241,
+        23.536446295,
+        25.435397313,
+        22.251677333,
+        20.725008809,
+        22.020051784
+      ],
+      "load_s": 10.036063,
+      "session_wall_s": 147.940891217,
+      "after_first_ttft_sum_s": 113.968581534
+    },
+    {
+      "pair": 2,
+      "arm": 1,
+      "ttft_s": [
+        34.15982644,
+        23.359917153,
+        25.715762593,
+        22.220048768,
+        20.725835097,
+        21.997545553
+      ],
+      "load_s": 10.774715,
+      "session_wall_s": 148.645553111,
+      "after_first_ttft_sum_s": 114.019109164
+    },
+    {
+      "pair": 2,
+      "arm": 0,
+      "ttft_s": [
+        47.171447783,
+        23.345433137,
+        24.373462556,
+        22.226820262,
+        20.762118633,
+        22.094545269
+      ],
+      "load_s": 23.953253,
+      "session_wall_s": 160.42605225,
+      "after_first_ttft_sum_s": 112.802379857
+    }
+  ],
+  "quality": {
+    "original213k": "36/36",
+    "original256k": "6/6",
+    "complete_outputs_equal": true,
+    "unchanged_work": true
+  },
+  "qualification256": {
+    "event": "KVMEM_BENCH_CHECKPOINT action=load prefix_tokens=261395 seconds=14.308032 complete=1",
+    "restored_tokens": 261395.0,
+    "metrics": {
+      "llamacpp:prompt_tokens_total": 216.0,
+      "llamacpp:prompt_seconds_total": 137.264,
+      "llamacpp:tokens_predicted_total": 42.0,
+      "llamacpp:tokens_predicted_seconds_total": 0.428511,
+      "llamacpp:requests_processing": 0.0,
+      "llamacpp:requests_deferred": 0.0,
+      "ninfer:requests_total": 6.0,
+      "ninfer:requests_completed_total": 6.0,
+      "ninfer:requests_active": 0.0,
+      "ninfer:ttft_seconds_total": 151.704,
+      "ninfer:prefix_cache_hit_tokens_total": 1568720.0,
+      "ninfer:draft_tokens_total": 90.0,
+      "ninfer:draft_accepted_tokens_total": 42.0,
+      "ninfer:computed_prefill_tokens_total": 229.0,
+      "ninfer:restored_prefill_tokens_total": 261395.0,
+      "ninfer:committed_decode_tokens_total": 39.0,
+      "ninfer:reused_prompt_tokens_total": 1568720.0,
+      "ninfer:decode_rounds_total": 8.0,
+      "ninfer:running_requests": 0.0,
+      "ninfer:prefilling_requests": 0.0,
+      "ninfer:waiting_requests": 0.0,
+      "ninfer:materializing_requests": 0.0,
+      "ninfer:capture_pending_requests": 0.0,
+      "ninfer:device_state_occupied_slots": 2.0,
+      "ninfer:host_state_occupied_slots": 0.0,
+      "ninfer:device_main_kv_occupied_pages": 512.0,
+      "ninfer:device_backend_kv_occupied_pages": 512.0,
+      "ninfer:host_kv_occupied_bytes": 0.0,
+      "ninfer:kvmem_enabled": 1.0,
+      "ninfer:kvmem_budget_tokens": 32768.0,
+      "ninfer:kvmem_gen_reserve_tokens": 512.0,
+      "ninfer:kvmem_plans_total": 855.0,
+      "ninfer:kvmem_compactions_total": 16.0,
+      "ninfer:kvmem_compact_skips_total": 0.0,
+      "ninfer:kvmem_stage_in_blocks_total": 3000.0,
+      "ninfer:kvmem_stage_out_blocks_total": 3006.0,
+      "ninfer:kvmem_transfer_runs_total": 2163.0,
+      "ninfer:kvmem_transfer_us_total": 2931930.0,
+      "ninfer:kvmem_async_enabled": 0.0,
+      "ninfer:kvmem_async_submitted_total": 0.0,
+      "ninfer:kvmem_async_completed_total": 0.0,
+      "ninfer:kvmem_async_discarded_total": 0.0,
+      "ninfer:kvmem_async_submit_us_total": 0.0,
+      "ninfer:kvmem_async_wait_us_total": 0.0,
+      "ninfer:kvmem_async_bytes_total": 0.0,
+      "ninfer:kvmem_async_fallbacks_total": 0.0,
+      "ninfer:kvmem_async_restore_submitted_total": 0.0,
+      "ninfer:kvmem_async_restore_us_total": 0.0,
+      "ninfer:kvmem_inflight_pages": 0.0,
+      "ninfer:kvmem_inflight_bytes": 0.0,
+      "ninfer:kvmem_scoreable_blocks_total": 57205.0,
+      "ninfer:kvmem_zero_score_blocks_total": 8171.0,
+      "ninfer:kvmem_window_tokens": 32680.0,
+      "ninfer:kvmem_host_bytes": 1228677120.0,
+      "ninfer:kvmem_host_capacity_bytes": 9414115328.0,
+      "ninfer:kvmem_cold_bytes": 6988455936.0,
+      "ninfer:kvmem_host_to_cold_spills_total": 3802.0,
+      "ninfer:kvmem_source_k_bytes": 4145332224.0,
+      "ninfer:kvmem_source_k_file_capacity_bytes": 4695668736.0,
+      "ninfer:kvmem_source_k_staging_bytes": 2297856.0,
+      "ninfer:kvmem_source_k_captures_total": 4936.0,
+      "ninfer:kvmem_source_k_rebuilds_total": 3374.0,
+      "ninfer:kvmem_history_replay_tokens_total": 187782.0,
+      "ninfer:kvmem_query_replay_tokens_total": 162.0,
+      "ninfer:kvmem_history_replay_rounds_total": 6.0,
+      "ninfer:kvmem_history_reused_tokens_total": 8192.0,
+      "ninfer:kvmem_replay_checkpoint_capacity_bytes": 615817216.0,
+      "ninfer:kvmem_async_split_batches_total": 0.0,
+      "ninfer:kvmem_nvme_prefetch_submitted_total": 0.0,
+      "ninfer:kvmem_nvme_prefetch_completed_total": 0.0,
+      "ninfer:kvmem_nvme_prefetch_wait_us_total": 0.0,
+      "ninfer:physical_prefill_tokens_total": 188173.0,
+      "ninfer:host_kv_capacity_bytes": 0.0,
+      "ninfer:managed_runtime_budget_limit_bytes": 0.0,
+      "ninfer:capture_skips_total": 6.0,
+      "ninfer:capture_skips{reason=\"cancelled\"}": 0.0,
+      "ninfer:capture_skips{reason=\"nothing_to_publish\"}": 0.0,
+      "ninfer:capture_skips{reason=\"invalid_pressure\"}": 0.0,
+      "ninfer:capture_skips{reason=\"physical_peak\"}": 0.0,
+      "ninfer:capture_skips{reason=\"transaction_busy\"}": 0.0,
+      "ninfer:capture_skips{reason=\"private_baseline_unavailable\"}": 0.0,
+      "ninfer:capture_skips{reason=\"no_admissible_plan\"}": 6.0,
+      "ninfer:capture_skips{reason=\"terminal\"}": 0.0,
+      "ninfer:capture_skips{reason=\"unspecified\"}": 0.0
+    }
+  },
+  "default": "indexed",
+  "fallback": "--checkpoint-io legacy / NINFER_BENCH_CHECKPOINT_FAST_VERIFY=0",
+  "indexes": {
+    "213k": {
+      "bytes": 190080
+    },
+    "256k": {
+      "bytes": 233552
+    }
+  },
+  "resource": {
+    "native_cap_ram_gib": 20,
+    "native_cap_swap_gib": 2,
+    "campaign_peak_gib": 20,
+    "campaign_swap_peak_mib": 407.2,
+    "quality256_peak_gib": 20,
+    "quality256_swap": 0
+  },
+  "limitations": [
+    "fixed benchmark prefix restore, not cold-prefill throughput",
+    "OS page cache not flushed; no physical cold NVMe throughput claim",
+    "no resident prefill/decode gain claimed",
+    "R21 and layer-forward-ready unfinished"
+  ],
+  "raw_receipts": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-checkpoint-io"
+}
