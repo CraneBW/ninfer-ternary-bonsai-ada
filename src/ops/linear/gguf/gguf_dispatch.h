@@ -37,9 +37,12 @@ void gguf_linear_gdn_rows_bf16_dispatch(
     const Tensor& x, const Weight& weight, Tensor& packed, std::int32_t row_begin,
     WorkspaceArena& workspace, cudaStream_t stream);
 
-// Main Individual MLP only: gate/up are already BF16 [17408,512].
+// Main Individual MLP only: gate/up are already BF16 [17408,T], T=512/1024.
 // The activation is explicitly BF16-RN before the unchanged GGML quantizer.
-// This writes the original projected BF16 [5120,512]; residual remains separate.
+// This writes the original projected BF16 [5120,T]; residual remains separate.
+// Eligibility includes the startup-fixed MMQ cap, so a wide request can fall
+// back before enqueue when large-prefill was not enabled.
+[[nodiscard]] bool gguf_silu_mul_down_supported(const Weight& weight, std::int32_t tokens);
 void gguf_linear_silu_mul_down_dispatch(
     const Tensor& gate, const Tensor& up, const Weight& weight, Tensor& projected,
     WorkspaceArena& workspace, cudaStream_t stream);

@@ -119,6 +119,15 @@ std::size_t workspace_bytes(QType format, std::int32_t rows, std::int32_t k,
 
 } // namespace
 
+bool gguf_silu_mul_down_supported(const Weight& w, std::int32_t tokens) {
+    if ((tokens != 512 && tokens != 1024) || w.k != 17408 || w.n != 5120 ||
+        w.input_columns != nullptr || matrix_batch_columns() < tokens) { return false; }
+    return w.qtype == QType::GGUF_IQ3_S || w.qtype == QType::GGUF_IQ3_XXS ||
+           w.qtype == QType::GGUF_IQ4_XS || w.qtype == QType::GGUF_IQ2_XS ||
+           w.qtype == QType::GGUF_IQ2_S || w.qtype == QType::GGUF_Q2_K ||
+           w.qtype == QType::GGUF_Q4_K;
+}
+
 std::size_t gguf_linear_workspace_capacity_bytes(
     QType qtype, std::int32_t rows, std::int32_t k,
     std::int32_t min_tokens, std::int32_t max_tokens) {
@@ -149,12 +158,10 @@ void gguf_linear_dispatch_impl(const Tensor& x, const Weight& w, Tensor& out,
     const std::int32_t output_stride = gdn_rows ? 10240 : w.n;
     const auto type = gguf_type(w.qtype);
     if (silu_up != nullptr &&
-        (fp32_out || gdn_rows || w.k != 17408 || w.n != 5120 || x.ne[1] != 512 ||
-         w.input_columns != nullptr || !silu_up->data || silu_up->dtype != DType::BF16 ||
-         !silu_up->is_contiguous() || silu_up->ne[0] != w.k || silu_up->ne[1] != 512 ||
-         !gguf::has_matrix_kernel(type) ||
-         std::min(matrix_batch_columns(), static_cast<std::int32_t>(x.ne[1])) != 512)) {
-        throw std::invalid_argument("R29 SiLU/down: expected contiguous main GGUF K17408 N5120 T512 without gather");
+        (fp32_out || gdn_rows || !gguf_silu_mul_down_supported(w, x.ne[1]) ||
+         !silu_up->data || silu_up->dtype != DType::BF16 ||
+         !silu_up->is_contiguous() || silu_up->ne[0] != w.k || silu_up->ne[1] != x.ne[1])) {
+        throw std::invalid_argument("SiLU/down: expected supported main GGUF K17408 N5120 T512/1024 within MMQ cap");
     }
     const auto block = gguf_block_shape(w.qtype);
     const std::int64_t row_bytes =

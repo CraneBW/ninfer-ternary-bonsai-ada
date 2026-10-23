@@ -266,6 +266,9 @@ ninfer_add_test(ninfer_kvmem_retrieval_test
 ninfer_add_op_test(ninfer_gguf_linear_test
   SOURCES ops/test_gguf_linear.cu
   LIBRARIES ninfer_ops ninfer_core)
+ninfer_add_op_test(ninfer_gguf_silu_down_test
+  SOURCES ops/test_gguf_silu_down.cu
+  LIBRARIES ninfer_ops ninfer_core)
 ninfer_add_op_test(ninfer_gguf_topk_test
   SOURCES ops/test_gguf_topk.cu
   LIBRARIES ninfer_ops ninfer_core)

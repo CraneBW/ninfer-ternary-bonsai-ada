@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdlib>
+#include <cstring>
 #include <stdexcept>
 
 #define NINFER_QWEN36_VARIANT    ::ninfer::targets::qwen3_6_27b::detail::Variant
@@ -606,16 +607,14 @@ void Variant::post_mixer(const Tensor& hidden, const PostMixerWeights& weights, 
             const char* value = std::getenv("NINFER_R29_BUNDLE");
             return value && value[0] == '1' && value[1] == '\0';
         }();
-        if (fuse_down_quant && hidden.ne[1] == 512 &&
-            is_gguf(weights.down.qtype) && weights.down.k == 17408 &&
-            weights.down.n == 5120 && weights.down.input_columns == nullptr &&
-            (weights.down.qtype == QType::GGUF_IQ3_S ||
-             weights.down.qtype == QType::GGUF_IQ3_XXS ||
-             weights.down.qtype == QType::GGUF_IQ4_XS ||
-             weights.down.qtype == QType::GGUF_IQ2_XS ||
-             weights.down.qtype == QType::GGUF_IQ2_S ||
-             weights.down.qtype == QType::GGUF_Q2_K ||
-             weights.down.qtype == QType::GGUF_Q4_K)) {
+        static const bool fuse_wide_down_quant = [] {
+            const char* value = std::getenv("NINFER_GGUF_SILU_MMQ");
+            if (!value || std::strcmp(value, "0") == 0) { return false; }
+            if (std::strcmp(value, "1") == 0) { return true; }
+            throw std::invalid_argument("NINFER_GGUF_SILU_MMQ must be 0 or 1");
+        }();
+        if (((fuse_down_quant && hidden.ne[1] == 512) || fuse_wide_down_quant) &&
+            ops::detail::gguf_silu_mul_down_supported(weights.down, hidden.ne[1])) {
             // Reserve the original activation range above to keep workspace
             // addresses stable. Its BF16 values are now rounded in the quantizer.
             auto projected_scope = workspace.scope();

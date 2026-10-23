@@ -929,9 +929,9 @@ void quantize_matrix_activation(GgmlType type, const __nv_bfloat16* x, int k, in
 void quantize_matrix_silu_mul_activation(
     GgmlType type, const __nv_bfloat16* gate, const __nv_bfloat16* up,
     int k, int columns, void* out, cudaStream_t stream) {
-    if (k != 17408 || columns != 512 || gate == nullptr || up == nullptr || out == nullptr ||
+    if (k != 17408 || (columns != 512 && columns != 1024) || gate == nullptr || up == nullptr || out == nullptr ||
         detail::device_facts().cc != GGML_CUDA_CC_ADA_LOVELACE) {
-        throw std::invalid_argument("R29 SiLU/down quant: expected SM89 K17408 T512");
+        throw std::invalid_argument("SiLU/down quant: expected SM89 K17408 T512/1024");
     }
     const dim3 blocks(columns, k / (4 * detail::kMatrixQuantizeThreads), 1);
     auto* y = static_cast<block_q8_1_mmq*>(out);
@@ -953,14 +953,16 @@ void quantize_matrix_silu_mul_activation(
     detail::check(cudaGetLastError(), "R29 SiLU/down quant launch");
     static const bool trace = [] {
         const char* value = std::getenv("NINFER_R29_BUNDLE_TRACE");
-        return value && value[0] == '1' && value[1] == '\0';
+        const char* wide = std::getenv("NINFER_GGUF_SILU_MMQ_TRACE");
+        return (value && value[0] == '1' && value[1] == '\0') ||
+               (wide && wide[0] == '1' && wide[1] == '\0');
     }();
     if (trace) {
-        static std::atomic<std::uint64_t> seen{0};
+        static std::atomic<std::uint64_t> seen[2]{};
         const auto bit = std::uint64_t(1) << static_cast<unsigned>(type);
-        if ((seen.fetch_or(bit, std::memory_order_relaxed) & bit) == 0) {
-            std::fprintf(stderr, "[r29-silu-down-quant] type=%d K=17408 T=512 layout=%d bf16_rn=1 kernel=quantize_matrix_silu_mul_kernel\n",
-                         int(type), int(layout));
+        if ((seen[columns == 1024].fetch_or(bit, std::memory_order_relaxed) & bit) == 0) {
+            std::fprintf(stderr, "[r29-silu-down-quant] type=%d K=17408 T=%d layout=%d bf16_rn=1 kernel=quantize_matrix_silu_mul_kernel\n",
+                         int(type), columns, int(layout));
         }
     }
 }

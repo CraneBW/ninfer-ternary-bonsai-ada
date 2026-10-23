@@ -7,6 +7,9 @@ raw reports retain the actual speculative work. The final profile compares
 chunk512 against qualified chunk1024 with both S4 experiments disabled.
 Routine runs require 200W; --release-acceptance requires an externally set 300W
 and runs one final acceptance pair. This tool never changes power itself.
+The chunk2048 candidate keeps the qualified internal MMQ cap at 1024 and
+changes only the outer prefill batch. --screen runs one pair before deciding
+whether to complete the remaining pairs; it is not a stable speed claim.
 """
 from __future__ import annotations
 
@@ -33,7 +36,9 @@ def require(condition, message: str):
 
 
 def source_signatures():
-    files = [Path(__file__).resolve()]
+    files = [Path(__file__).resolve(), ROOT / "src/ops/linear/gguf/gguf_dispatch.cpp",
+             ROOT / "src/ops/linear/gguf/ggml_bridge.cu",
+             ROOT / "src/targets/qwen3_6_27b/impl/variant.cpp"]
     for directory in (
         ROOT / "src/ops/softmax_attention/dense/causal_cache",
         ROOT / "src/ops/linear_attention/gated_delta_net",
@@ -118,19 +123,23 @@ def compare(reference, candidate):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--candidate", choices=("both", "attention", "gdn", "final"), default="both")
+    parser.add_argument("--candidate", choices=("both", "attention", "gdn", "final", "chunk2048", "silu"), default="both")
+    parser.add_argument("--screen", action="store_true", help="one preliminary 200W pair only")
     parser.add_argument("--release-acceptance", action="store_true",
                         help="final profile only: one acceptance pair at externally set 300W")
     parser.add_argument("--output", type=Path, required=True, help="fresh receipt directory")
     args = parser.parse_args()
     if args.release_acceptance and args.candidate != "final":
         parser.error("--release-acceptance is only valid for --candidate final")
+    if args.screen and args.release_acceptance:
+        parser.error("--screen and --release-acceptance are separate scopes")
     expected_power = 300 if args.release_acceptance else 200
     out = args.output.resolve()
     out.mkdir(parents=True, exist_ok=False)
     result = dict(state="RUNNING", candidate=args.candidate, power_w=expected_power, adopted=False,
                   release_acceptance=args.release_acceptance,
-                  schedule=[0, 1] if args.release_acceptance else [0, 1, 1, 0, 0, 1],
+                  screening=args.screen,
+                  schedule=[0, 1] if args.release_acceptance or args.screen else [0, 1, 1, 0, 0, 1],
                   arms=[], pairs=[])
     receipt = out / "comparison.json"
     dump(receipt, result)
@@ -153,6 +162,8 @@ def main():
             require(source_signatures() == sources, "production/tool source changed during pairs")
             power_before = power_limit(expected_power)
             chunk = 512 if args.candidate == "final" and not mode else 1024
+            if args.candidate == "chunk2048" and mode:
+                chunk = 2048
             wide = int(args.candidate != "final" or bool(mode))
             report = out / f"{label}.json"
             capture = out / f"{label}.ids.tsv"
@@ -167,6 +178,7 @@ def main():
                     del env[key]
             env.update(NINFER_R29_BUNDLE="0", NINFER_GGUF_LARGE_PREFILL=str(wide),
                        NINFER_SM89_SHARED_VECTOR="0",
+                       NINFER_GGUF_SILU_MMQ=str(int(bool(mode) and args.candidate == "silu")),
                        NINFER_SM89_ATTN_SPLIT_VECTOR=str(int(bool(mode)
                                                           and args.candidate in ("both", "attention"))),
                        NINFER_SM89_GDN_PRENORM=str(int(bool(mode)

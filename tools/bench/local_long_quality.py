@@ -32,6 +32,7 @@ def main():
     parser.add_argument("--draft-tokens", type=int, default=7)
     parser.add_argument("--prefill-chunk", type=int, choices=(512,1024), default=512)
     parser.add_argument("--large-prefill", type=int, choices=(0,1), default=0)
+    parser.add_argument("--silu-mmq", type=int, choices=(0,1), default=0)
     parser.add_argument("--request-index", type=int,
                         help="Run one unchanged frozen request in a fresh process; diagnostic only")
     parser.add_argument("--request-count", type=int, choices=range(1,7), default=6,
@@ -68,6 +69,7 @@ def main():
         assert prior.get("draft_tokens",7) == args.draft_tokens
         assert prior.get("prefill_chunk",512) == args.prefill_chunk
         assert prior.get("large_prefill",0) == args.large_prefill
+        assert prior.get("silu_mmq",0) == args.silu_mmq
         assert prior.get("layer_ready",0) == args.layer_ready
         assert prior.get("canonical_query_reuse",args.backend=="ar") == bool(args.canonical_query_reuse or args.backend=="ar")
         assert prior.get("transfer_mode","sync") == args.transfer_mode
@@ -99,6 +101,7 @@ def main():
                       NINFER_KVMEM_COLD_COPY_PIPELINE=str(args.cold_copy_pipeline),
                       NINFER_KVMEM_IO_WORKER_SUMMARY="1",
                       NINFER_GGUF_LARGE_PREFILL=str(args.large_prefill),
+                      NINFER_GGUF_SILU_MMQ=str(args.silu_mmq),
                       NINFER_KVMEM_LAYER_READY_SUMMARY="1",
                       NINFER_KVMEM_LAYER_READY_TRACE="0")
     if args.transfer_mode=="async":
@@ -130,6 +133,7 @@ def main():
                   original_content_anchors=args.original_content_anchors,
                   draft_tokens=args.draft_tokens,diagnostic_request_index=args.request_index,
                   prefill_chunk=args.prefill_chunk,large_prefill=args.large_prefill,
+                  silu_mmq=args.silu_mmq,
                   diagnostic_request_count=args.request_count,
                   layer_ready=args.layer_ready,
                   canonical_query_reuse=bool(args.canonical_query_reuse or args.backend=="ar"),
