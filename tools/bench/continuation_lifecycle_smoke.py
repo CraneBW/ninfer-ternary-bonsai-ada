@@ -12,7 +12,7 @@ from tools.bench.prefix_checkpoint import ROOT, PROFILE
 from tools.bench.sm89_profiles import LocalServer, dump
 
 
-def post(port,payload,cancel=False):
+def post(port,payload,cancel=False,cancel_after=1):
     payload=dict(payload,stream=True,stream_options={'include_usage':True})
     request=urllib.request.Request(f'http://127.0.0.1:{port}/v1/chat/completions',
         data=json.dumps(payload).encode(),headers={'Content-Type':'application/json'})
@@ -30,7 +30,7 @@ def post(port,payload,cancel=False):
                 for choice in frame.get('choices',[]):
                     result['text']+=choice.get('delta',{}).get('content') or ''
                     if choice.get('finish_reason'):result['finish'].append(choice['finish_reason'])
-                if cancel and result['text']:
+                if cancel and len(result['text'])>=cancel_after:
                     result['cancelled']=True
                     break
     except urllib.error.HTTPError as error:

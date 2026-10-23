@@ -911,7 +911,8 @@ public:
         CapturePressurePlan<Variant>&& pressure, runtime::CancellationFlagView cancellation);
     [[nodiscard]] PendingBatch<Variant> decode(std::span<const SequenceHandle<Variant>> sequences,
                                                std::span<const runtime::RoundBudget> budgets,
-                                               runtime::ExecutionTiming* failed_timing = nullptr);
+                                               runtime::ExecutionTiming* failed_timing = nullptr,
+                                               runtime::DecodeHostWork host_work = {});
     // Advance each live sequence with its exact target-owned token row. This does not sample or
     // advance sampler RNG/occurrence state; callers own output publication and budget accounting.
     // Each optional execution split is relative to its row's forced-token span.

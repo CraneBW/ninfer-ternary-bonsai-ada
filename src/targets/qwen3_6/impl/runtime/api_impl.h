@@ -505,8 +505,9 @@ runtime::ContextTransactionReserveStatus Program<Variant>::reserve_active_captur
 template <>
 PendingBatch<Variant> Program<Variant>::decode(std::span<const SequenceHandle<Variant>> sequences,
                                                std::span<const runtime::RoundBudget> budgets,
-                                               runtime::ExecutionTiming* failed_timing) {
-    return impl_->decode(sequences, budgets, failed_timing);
+                                               runtime::ExecutionTiming* failed_timing,
+                                               runtime::DecodeHostWork host_work) {
+    return impl_->decode(sequences, budgets, failed_timing, host_work);
 }
 
 template <>

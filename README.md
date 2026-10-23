@@ -45,6 +45,10 @@ flowchart LR
 
 同日晚间续作：Pi质量harness默认恢复Qwen3.8官方thinking采样（temperature1.0/top_p0.95/top_k20），AR秦始皇补充样本自然完成；旧greedy失败保留，不能将不同采样/cwd当成严格质量对照。修复生成回收后旧检查点连带丢弃有效endpoint的问题：原Pi MTP4工具续轮TTFT **29.383→0.246s**、常规prefill **42099→21 token**，首轮作品相同，200W。详见[采样诊断与历史复用收据](docs/maintainer/2026-10-23-generation-continuation.md)。
 
+最新同条件 Pi 对照已完成：官方采样、相同 cwd/xhigh/262K逻辑/128K输出预算下，AR/MTP4/MTP7共六次自然结束；实际渲染核心场景 **5/6通过**，AR秦始皇的骑手与熊因SVG坐标错误不可见，MTP7另有标题裁切。greedy同条件诊断复现旧循环且发生在32K回收之前，不能据此断言量化无关或所有seed均能收束。现有混合GSQ样本未确认额外MTP降质；DFlash2共同长档仍因容量拒绝。完整作品、速度与精确历史失配边界见[本轮收口报告](docs/maintainer/2026-10-23-non-nvfp4-closeout.md)。
+
+同轮补齐S4原213K **6/6** 长状态资格，并适配DeepInfer的有界C1上一轮CPU输出处理与下一轮GPU提交重叠。AR/MTP4/短容量DFlash2生命周期验证通过；200W三对decode中位−0.33%/−0.71%（4K/32K），未获稳定收益，`NINFER_HOST_DECODE_OVERLAP`与S4两开关均保持默认0。实现完成与性能采用分开记录，未新增该组合256K资格。
+
 ## 运行环境与模型
 
 | 项目 | 本项目当前明确范围 |

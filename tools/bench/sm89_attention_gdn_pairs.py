@@ -19,6 +19,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import statistics
 import subprocess
 
@@ -39,7 +40,10 @@ def require(condition, message: str):
 def source_signatures():
     files = [Path(__file__).resolve(), ROOT / "src/ops/linear/gguf/gguf_dispatch.cpp",
              ROOT / "src/ops/linear/gguf/ggml_bridge.cu",
-             ROOT / "src/targets/qwen3_6_27b/impl/variant.cpp"]
+             ROOT / "src/targets/qwen3_6_27b/impl/variant.cpp",
+             ROOT / "src/runtime/engine/engine_core.h",
+             ROOT / "src/runtime/contract/types.h",
+             ROOT / "src/targets/qwen3_6/impl/runtime/program_impl.h"]
     for directory in (
         ROOT / "src/ops/softmax_attention/dense/causal_cache",
         ROOT / "src/ops/linear_attention/gated_delta_net",
@@ -124,7 +128,7 @@ def compare(reference, candidate):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--candidate", choices=("both", "attention", "gdn", "final", "chunk2048", "silu", "silu256"), default="both")
+    parser.add_argument("--candidate", choices=("both", "attention", "gdn", "final", "chunk2048", "silu", "silu256", "host"), default="both")
     parser.add_argument("--screen", action="store_true", help="one preliminary 200W pair only")
     parser.add_argument("--release-acceptance", action="store_true",
                         help="final profile only: one acceptance pair at externally set 300W")
@@ -180,7 +184,8 @@ def main():
                     del env[key]
             env.update(NINFER_R29_BUNDLE="0", NINFER_GGUF_LARGE_PREFILL=str(wide),
                        NINFER_SM89_SHARED_VECTOR="0",
-                       NINFER_GGUF_SILU_MMQ=str(int(args.candidate == "silu256" or (bool(mode) and args.candidate == "silu"))),
+                       NINFER_GGUF_SILU_MMQ=str(int(args.candidate in ("silu256", "host") or (bool(mode) and args.candidate == "silu"))),
+                       NINFER_HOST_DECODE_OVERLAP=str(int(bool(mode) and args.candidate == "host")),
                        NINFER_GGUF_SILU_MMQ_T256=str(int(bool(mode) and args.candidate == "silu256")),
                        NINFER_SM89_ATTN_SPLIT_VECTOR=str(int(bool(mode)
                                                           and args.candidate in ("both", "attention"))),
@@ -206,6 +211,17 @@ def main():
             row["power_after_w"] = power_limit(expected_power)
             qualify_report(row["report"], chunk, contexts)
             row["output_ids"] = capture_ids(capture, row["report"])
+            if args.candidate == "host" and mode:
+                matches = re.findall(r"HOST_DECODE_OVERLAP (.+)",
+                                     (out / f"{label}.runner.log").read_text())
+                require(bool(matches), "missing host-overlap lifetime receipt")
+                row["host_overlap"] = [dict((k, int(v)) for k, v in
+                    re.findall(r"(\w+)=(\d+)", line)) for line in matches]
+                for counters in row["host_overlap"]:
+                    require(counters["scheduled"] == counters["processed"] and
+                            counters["pending"] == counters["failures"] == 0 and
+                            counters["overlapped"] > 0,
+                            "host-overlap did not execute and drain")
             if index % 2 == 1:
                 arms = {arm["mode"]: arm for arm in result["arms"] if arm["pair"] == pair}
                 result["pairs"].append(compare(arms[0], arms[1]))

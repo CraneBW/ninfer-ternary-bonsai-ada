@@ -2,6 +2,8 @@
 
 本轮只处理 Pi xhigh 的 AR 收束诊断和生成回收后的历史复用。设备为 RTX 4070 Ti SUPER（SM89、66 SM、16 GiB），全部运行在 200W；使用已有 GSQ mixed-IQ v3，未下载权重、未修改量化或 CUDA 数学。
 
+后续已完成相同cwd/Host条件的官方采样与greedy诊断，具体因果证据及仍需重建的真实token失配边界见[非NVFP4收口报告](2026-10-23-non-nvfp4-closeout.md)。本页保留当时不同cwd补充样本和原续轮前后对照的原始条件。
+
 ## AR：先纠正测试采样，再解释失败
 
 [Qwen3.8 官方模型卡](https://huggingface.co/Qwen/Qwen3.8-27B#best-practices)的 thinking 推荐为 temperature=1.0、top_p=0.95、top_k=20、min_p=0、presence_penalty=0、repetition_penalty=1；xhigh 和 preserve_thinking 均是官方默认。本仓 `Package::sampling_defaults` 已正确注册这些可用参数，乘法重复惩罚保持恒等；上轮 Pi harness 的 `--greedy` 将 temperature 强制成了 0。

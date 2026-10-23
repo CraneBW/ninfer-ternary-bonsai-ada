@@ -647,7 +647,8 @@ public:
         CapturePressureCandidate&& pressure, runtime::CancellationFlagView cancellation);
     [[nodiscard]] PendingBatch decode(std::span<const SequenceHandle> sequences,
                                       std::span<const runtime::RoundBudget> budgets,
-                                      runtime::ExecutionTiming* failed_timing);
+                                      runtime::ExecutionTiming* failed_timing,
+                                      runtime::DecodeHostWork host_work);
     [[nodiscard]] runtime::ExecutionTiming
     append_forced_tokens(std::span<const SequenceHandle> sequences,
                          std::span<const TokenId> row_major_tokens, std::uint32_t row_stride,
@@ -1102,7 +1103,8 @@ private:
     advance_prefill_raw(std::uint32_t lane, runtime::ExecutionTiming* failed_timing);
     [[nodiscard]] runtime::BatchedGeneratedRound
     decode_raw(std::span<const std::uint32_t> lanes, std::span<const runtime::RoundBudget> budgets,
-               runtime::ExecutionTiming* failed_timing);
+               runtime::ExecutionTiming* failed_timing,
+               runtime::DecodeHostWork host_work);
     [[nodiscard]] runtime::ExecutionTiming
     resolve_prefill_raw(std::uint32_t lane, bool terminal, runtime::ExecutionTiming* failed_timing);
     [[nodiscard]] runtime::ExecutionTiming resolve_pending_raw(
@@ -1347,15 +1349,18 @@ private:
     [[nodiscard]] runtime::BatchedGeneratedRound
     decode_ordinary_batch(std::span<const std::uint32_t> lanes,
                           std::span<const runtime::RoundBudget> budgets,
-                          runtime::ExecutionTiming* failed_timing);
+                          runtime::ExecutionTiming* failed_timing,
+                          runtime::DecodeHostWork host_work);
     [[nodiscard]] runtime::BatchedGeneratedRound
     decode_mtp_batch(std::span<const std::uint32_t> lanes,
                      std::span<const runtime::RoundBudget> budgets,
-                     runtime::ExecutionTiming* failed_timing);
+                     runtime::ExecutionTiming* failed_timing,
+                     runtime::DecodeHostWork host_work);
     [[nodiscard]] runtime::BatchedGeneratedRound
     decode_dflash_batch(std::span<const std::uint32_t> lanes,
                         std::span<const runtime::RoundBudget> budgets,
-                        runtime::ExecutionTiming* failed_timing);
+                        runtime::ExecutionTiming* failed_timing,
+                        runtime::DecodeHostWork host_work);
     void resize_sequence_kv_entitlement(SequenceState& sequence, std::uint32_t text_pages,
                                         std::uint32_t backend_pages);
     void bind_sequence_kv(SequenceState& sequence);

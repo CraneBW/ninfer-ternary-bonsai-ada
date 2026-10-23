@@ -1,0 +1,2516 @@
+{
+  "state": "NON_NVFP4_SCOPE_COMPLETED_WITH_RECORDED_NEGATIVE_RESULTS",
+  "quality": {
+    "state": "SIX_COMPLETED_AND_VISUALLY_REVIEWED",
+    "source": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-pi-model-matrix-20261023/results.json",
+    "configuration": {
+      "pi_version": "0.99.2",
+      "power_w": 200,
+      "context": 262144,
+      "max_tokens": 131072,
+      "thinking": "xhigh",
+      "sampling": "model",
+      "kv_working_set": 32768,
+      "physical_kv": 36864,
+      "kvmem_host_pages": 128,
+      "context_cache_host_mib": 128,
+      "tools": [
+        "read",
+        "write",
+        "edit",
+        "ls"
+      ]
+    },
+    "rows": [
+      {
+        "backend": "mtp4",
+        "case": "pelican",
+        "pi_wall_seconds": 360.6630538330064,
+        "pi_exit": 0,
+        "server_exit": 0,
+        "first_usage": {
+          "input": 1674,
+          "output": 33985,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "reasoning": 30540,
+          "totalTokens": 35659,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "total": 0
+          }
+        },
+        "first_decode_seconds": 356.8567254410013,
+        "first_output_per_decode_second": 95.2342987455303,
+        "first_sampling": {
+          "frequency_penalty": 0.0,
+          "min_p": 0.0,
+          "presence_penalty": 0.0,
+          "seed": 42,
+          "temperature": 1.0,
+          "top_k": 20,
+          "top_p": 0.949999988079071
+        },
+        "first_speculative": {
+          "accepted_per_position": [
+            8082,
+            6415,
+            5119,
+            4052
+          ],
+          "accepted_tokens": 23668,
+          "backend": "mtp",
+          "draft_window": 4,
+          "drafted_tokens": 41260,
+          "fallback_steps": 4,
+          "rounds": 10315
+        },
+        "first_prompt_tokens": 1674,
+        "first_cache_hit_tokens": 0,
+        "reasoning_effort": "xhigh",
+        "requested_output_tokens": 131072,
+        "artifact": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-pi-model-matrix-20261023/mtp4/pelican/result.svg",
+        "artifact_sha256": "589d9ee02a53c44b973b91f561cbf25c437d08c8a781459f1be3f0400a182b9b",
+        "followups": [
+          {
+            "output_tokens": 183,
+            "computed_prefill_tokens": 21,
+            "cache_hit_tokens": 35658,
+            "reuse_path": "private_endpoint",
+            "ttft_seconds": 0.15950130599999998
+          }
+        ],
+        "visual": {
+          "backend": "mtp4",
+          "case": "pelican",
+          "artifact": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-pi-model-matrix-20261023/mtp4/pelican/result.svg",
+          "sha256": "589d9ee02a53c44b973b91f561cbf25c437d08c8a781459f1be3f0400a182b9b",
+          "core_scene": "PASS_OBSERVED",
+          "review_method": "Viewed actual Chrome headless renders, no edits to model artifacts",
+          "screenshots": [
+            "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-pi-model-matrix-20261023/visuals/mtp4-pelican-0.png"
+          ],
+          "animation": "NOT_REQUIRED",
+          "notes": "Long beak and pouch, two wheels, bicycle frame and feet at pedals are recognizable."
+        }
+      },
+      {
+        "backend": "mtp4",
+        "case": "emperor",
+        "pi_wall_seconds": 380.6508071690041,
+        "pi_exit": 0,
+        "server_exit": 0,
+        "first_usage": {
+          "input": 1678,
+          "output": 32211,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "reasoning": 23192,
+          "totalTokens": 33889,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "total": 0
+          }
+        },
+        "first_decode_seconds": 354.03985083300273,
+        "first_output_per_decode_second": 90.98128339002614,
+        "first_sampling": {
+          "frequency_penalty": 0.0,
+          "min_p": 0.0,
+          "presence_penalty": 0.0,
+          "seed": 42,
+          "temperature": 1.0,
+          "top_k": 20,
+          "top_p": 0.949999988079071
+        },
+        "first_speculative": {
+          "accepted_per_position": [
+            7681,
+            5930,
+            4685,
+            3717
+          ],
+          "accepted_tokens": 22013,
+          "backend": "mtp",
+          "draft_window": 4,
+          "drafted_tokens": 40796,
+          "fallback_steps": 1,
+          "rounds": 10199
+        },
+        "first_prompt_tokens": 1678,
+        "first_cache_hit_tokens": 0,
+        "reasoning_effort": "xhigh",
+        "requested_output_tokens": 131072,
+        "artifact": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-pi-model-matrix-20261023/mtp4/emperor/index.html",
+        "artifact_sha256": "ecdb9f00968443335766fa374d9558658cc6a7f9701b097a8ded23fee554aae6",
+        "followups": [
+          {
+            "output_tokens": 222,
+            "computed_prefill_tokens": 32279,
+            "cache_hit_tokens": 1671,
+            "reuse_path": "shared_stable_prefix",
+            "ttft_seconds": 22.051981256
+          }
+        ],
+        "visual": {
+          "backend": "mtp4",
+          "case": "emperor",
+          "artifact": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-pi-model-matrix-20261023/mtp4/emperor/index.html",
+          "sha256": "ecdb9f00968443335766fa374d9558658cc6a7f9701b097a8ded23fee554aae6",
+          "core_scene": "PASS_OBSERVED",
+          "review_method": "Viewed actual Chrome headless renders, no edits to model artifacts",
+          "screenshots": [
+            "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-pi-model-matrix-20261023/visuals/mtp4-emperor-0.png",
+            "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-pi-model-matrix-20261023/visuals/mtp4-emperor-1500.png"
+          ],
+          "animation": "OBSERVED_TWO_TIMES",
+          "notes": "Crowned/robed rider is on a white bear; leg/body positions change between captured times. Stylized, not historical likeness qualification."
+        }
+      },
+      {
+        "backend": "mtp7",
+        "case": "pelican",
+        "pi_wall_seconds": 319.44171146400913,
+        "pi_exit": 0,
+        "server_exit": 0,
+        "first_usage": {
+          "input": 1674,
+          "output": 28308,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "reasoning": 24100,
+          "totalTokens": 29982,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "total": 0
+          }
+        },
+        "first_decode_seconds": 313.47921699799997,
+        "first_output_per_decode_second": 90.3026371926296,
+        "first_sampling": {
+          "frequency_penalty": 0.0,
+          "min_p": 0.0,
+          "presence_penalty": 0.0,
+          "seed": 42,
+          "temperature": 1.0,
+          "top_k": 20,
+          "top_p": 0.949999988079071
+        },
+        "first_speculative": {
+          "accepted_per_position": [
+            5438,
+            4281,
+            3394,
+            2677,
+            2137,
+            1795,
+            1546
+          ],
+          "accepted_tokens": 21268,
+          "backend": "mtp",
+          "draft_window": 7,
+          "drafted_tokens": 49294,
+          "fallback_steps": 0,
+          "rounds": 7042
+        },
+        "first_prompt_tokens": 1674,
+        "first_cache_hit_tokens": 0,
+        "reasoning_effort": "xhigh",
+        "requested_output_tokens": 131072,
+        "artifact": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-pi-model-matrix-20261023/mtp7/pelican/result.svg",
+        "artifact_sha256": "50429b8004d3b0db006f1a5a2165c84afadde24d6242dd7283632be8d48bba66",
+        "followups": [
+          {
+            "output_tokens": 280,
+            "computed_prefill_tokens": 21,
+            "cache_hit_tokens": 29981,
+            "reuse_path": "private_endpoint",
+            "ttft_seconds": 0.202195294
+          }
+        ],
+        "visual": {
+          "backend": "mtp7",
+          "case": "pelican",
+          "artifact": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-pi-model-matrix-20261023/mtp7/pelican/result.svg",
+          "sha256": "50429b8004d3b0db006f1a5a2165c84afadde24d6242dd7283632be8d48bba66",
+          "core_scene": "PASS_OBSERVED",
+          "review_method": "Viewed actual Chrome headless renders, no edits to model artifacts",
+          "screenshots": [
+            "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-pi-model-matrix-20261023/visuals/mtp7-pelican-0.png"
+          ],
+          "animation": "NOT_REQUIRED",
+          "notes": "Long beak and pouch, two wheels, bicycle frame and feet at pedals are recognizable."
+        }
+      },
+      {
+        "backend": "mtp7",
+        "case": "emperor",
+        "pi_wall_seconds": 308.75082631999976,
+        "pi_exit": 0,
+        "server_exit": 0,
+        "first_usage": {
+          "input": 1678,
+          "output": 24271,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "reasoning": 16233,
+          "totalTokens": 25949,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "total": 0
+          }
+        },
+        "first_decode_seconds": 302.9539569600016,
+        "first_output_per_decode_second": 80.11448420594304,
+        "first_sampling": {
+          "frequency_penalty": 0.0,
+          "min_p": 0.0,
+          "presence_penalty": 0.0,
+          "seed": 42,
+          "temperature": 1.0,
+          "top_k": 20,
+          "top_p": 0.949999988079071
+        },
+        "first_speculative": {
+          "accepted_per_position": [
+            4974,
+            3716,
+            2751,
+            2060,
+            1580,
+            1274,
+            1081
+          ],
+          "accepted_tokens": 17436,
+          "backend": "mtp",
+          "draft_window": 7,
+          "drafted_tokens": 47859,
+          "fallback_steps": 0,
+          "rounds": 6837
+        },
+        "first_prompt_tokens": 1678,
+        "first_cache_hit_tokens": 0,
+        "reasoning_effort": "xhigh",
+        "requested_output_tokens": 131072,
+        "artifact": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-pi-model-matrix-20261023/mtp7/emperor/index.html",
+        "artifact_sha256": "be741cab0df59f96600a72e558fe82f83b40be90b5825312582deac5b3709fe2",
+        "followups": [
+          {
+            "output_tokens": 254,
+            "computed_prefill_tokens": 21,
+            "cache_hit_tokens": 25948,
+            "reuse_path": "private_endpoint",
+            "ttft_seconds": 0.196271416
+          }
+        ],
+        "visual": {
+          "backend": "mtp7",
+          "case": "emperor",
+          "artifact": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-pi-model-matrix-20261023/mtp7/emperor/index.html",
+          "sha256": "be741cab0df59f96600a72e558fe82f83b40be90b5825312582deac5b3709fe2",
+          "core_scene": "PASS_OBSERVED",
+          "review_method": "Viewed actual Chrome headless renders, no edits to model artifacts",
+          "screenshots": [
+            "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-pi-model-matrix-20261023/visuals/mtp7-emperor-1500.png",
+            "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-pi-model-matrix-20261023/visuals/mtp7-emperor-500.png"
+          ],
+          "animation": "OBSERVED_TWO_TIMES",
+          "notes": "Crowned/robed rider is on a white bear; leg/body positions change between captured times. Stylized, not historical likeness qualification.",
+          "layout_issue": "At 1200x900, title at left and footer at right are partly cropped. Core rider/bear remains visible; preserve this blemish."
+        }
+      },
+      {
+        "backend": "ar",
+        "case": "pelican",
+        "pi_wall_seconds": 451.3962117379997,
+        "pi_exit": 0,
+        "server_exit": 0,
+        "first_usage": {
+          "input": 1674,
+          "output": 19375,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "reasoning": 15104,
+          "totalTokens": 21049,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "total": 0
+          }
+        },
+        "first_decode_seconds": 443.73636108199946,
+        "first_output_per_decode_second": 43.66331384869231,
+        "first_sampling": {
+          "frequency_penalty": 0.0,
+          "min_p": 0.0,
+          "presence_penalty": 0.0,
+          "seed": 42,
+          "temperature": 1.0,
+          "top_k": 20,
+          "top_p": 0.949999988079071
+        },
+        "first_speculative": {
+          "accepted_per_position": [],
+          "accepted_tokens": 0,
+          "backend": "none",
+          "draft_window": 0,
+          "drafted_tokens": 0,
+          "fallback_steps": 0,
+          "rounds": 0
+        },
+        "first_prompt_tokens": 1674,
+        "first_cache_hit_tokens": 0,
+        "reasoning_effort": "xhigh",
+        "requested_output_tokens": 131072,
+        "artifact": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-pi-model-matrix-20261023/ar/pelican/result.svg",
+        "artifact_sha256": "68d679278a6385788187e0f158f98c6bba009763b33167e0083d382bed982f73",
+        "followups": [
+          {
+            "output_tokens": 259,
+            "computed_prefill_tokens": 21,
+            "cache_hit_tokens": 21048,
+            "reuse_path": "private_endpoint",
+            "ttft_seconds": 0.208874957
+          }
+        ],
+        "visual": {
+          "backend": "ar",
+          "case": "pelican",
+          "artifact": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-pi-model-matrix-20261023/ar/pelican/result.svg",
+          "sha256": "68d679278a6385788187e0f158f98c6bba009763b33167e0083d382bed982f73",
+          "core_scene": "PASS_OBSERVED",
+          "review_method": "Viewed actual Chrome headless render, no edits to model artifacts",
+          "screenshots": [
+            "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-pi-model-matrix-20261023/visuals/ar-pelican-500.png"
+          ],
+          "animation": "NOT_REQUIRED",
+          "notes": "Recognizable pelican with long beak/pouch, bicycle frame/two wheels, feet at pedals. Fixed 900x600 SVG leaves white area in 1200x900 viewport."
+        }
+      },
+      {
+        "backend": "ar",
+        "case": "emperor",
+        "pi_wall_seconds": 1267.3860768450104,
+        "pi_exit": 0,
+        "server_exit": 0,
+        "first_usage": {
+          "input": 1678,
+          "output": 51440,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "reasoning": 42630,
+          "totalTokens": 53118,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "total": 0
+          }
+        },
+        "first_decode_seconds": 1220.7012463429846,
+        "first_output_per_decode_second": 42.13971285284223,
+        "first_sampling": {
+          "frequency_penalty": 0.0,
+          "min_p": 0.0,
+          "presence_penalty": 0.0,
+          "seed": 42,
+          "temperature": 1.0,
+          "top_k": 20,
+          "top_p": 0.949999988079071
+        },
+        "first_speculative": {
+          "accepted_per_position": [],
+          "accepted_tokens": 0,
+          "backend": "none",
+          "draft_window": 0,
+          "drafted_tokens": 0,
+          "fallback_steps": 0,
+          "rounds": 0
+        },
+        "first_prompt_tokens": 1678,
+        "first_cache_hit_tokens": 0,
+        "reasoning_effort": "xhigh",
+        "requested_output_tokens": 131072,
+        "artifact": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-pi-model-matrix-20261023/ar/emperor/index.html",
+        "artifact_sha256": "fafc2ef07462d810d2498efa80c8cd9e6249366da7dc2b5e20ff5b122ef1ad60",
+        "followups": [
+          {
+            "output_tokens": 104,
+            "computed_prefill_tokens": 51509,
+            "cache_hit_tokens": 1671,
+            "reuse_path": "shared_stable_prefix",
+            "ttft_seconds": 36.450823031
+          },
+          {
+            "output_tokens": 218,
+            "computed_prefill_tokens": 605,
+            "cache_hit_tokens": 53283,
+            "reuse_path": "private_endpoint",
+            "ttft_seconds": 0.6350533309999999
+          }
+        ],
+        "visual": {
+          "backend": "ar",
+          "case": "emperor",
+          "artifact": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-pi-model-matrix-20261023/ar/emperor/index.html",
+          "sha256": "fafc2ef07462d810d2498efa80c8cd9e6249366da7dc2b5e20ff5b122ef1ad60",
+          "core_scene": "FAIL_SUBJECT_NOT_VISIBLE",
+          "review_method": "Viewed actual Chrome headless renders at three times and inspected unchanged artifact coordinates",
+          "screenshots": [
+            "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-pi-model-matrix-20261023/visuals/ar-emperor-500.png",
+            "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-pi-model-matrix-20261023/visuals/ar-emperor-1500.png",
+            "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-pi-model-matrix-20261023/visuals/ar-emperor-8000.png"
+          ],
+          "animation": "BACKGROUND_ANIMATED_SUBJECT_NOT_VISIBLE",
+          "notes": "Sky, snow and title visible; emperor and bear not visible. Main group has only translateX animation, while body/head/rider coordinates are negative Y and missing the ground-level vertical translation. Retain original artifact; generation terminated normally but scene requirement failed."
+        }
+      }
+    ],
+    "differences": [
+      {
+        "reference": "ar",
+        "candidate": "mtp4",
+        "case": "pelican",
+        "common_reasoning_chars": 19,
+        "reasoning_identical": false,
+        "interpretation": "Different sampling purposes and output lengths; textual difference is not a quality verdict."
+      },
+      {
+        "reference": "ar",
+        "candidate": "mtp7",
+        "case": "pelican",
+        "common_reasoning_chars": 19,
+        "reasoning_identical": false,
+        "interpretation": "Different sampling purposes and output lengths; textual difference is not a quality verdict."
+      },
+      {
+        "reference": "ar",
+        "candidate": "mtp4",
+        "case": "emperor",
+        "common_reasoning_chars": 19,
+        "reasoning_identical": false,
+        "interpretation": "Different sampling purposes and output lengths; textual difference is not a quality verdict."
+      },
+      {
+        "reference": "ar",
+        "candidate": "mtp7",
+        "case": "emperor",
+        "common_reasoning_chars": 19,
+        "reasoning_identical": false,
+        "interpretation": "Different sampling purposes and output lengths; textual difference is not a quality verdict."
+      }
+    ],
+    "dflash2": "CAPACITY_REJECTED_STATIC_AT_COMMON_32K_WORKING_36K_PHYSICAL",
+    "quality_scope": "Two creative tasks, one mixed GSQ artifact, one seed; not all quantizations or distributional equivalence."
+  },
+  "ar_cycle": {
+    "state": "DIAGNOSTIC_CONFIRMED",
+    "cycle": {
+      "starts": [
+        22292,
+        26762,
+        31232
+      ],
+      "period_chars": [
+        4470,
+        4470
+      ],
+      "window_chars": 512,
+      "window_sha256": "64526b3b406e1992dc329cf0501d165a6e383cc7a6928cf5d3ad14f4d737bdac",
+      "observed_reasoning_chars": 31762
+    },
+    "wall_seconds": 281.12200171400036,
+    "server_exit": 0,
+    "old_prefix_identical": true,
+    "full_two_periods_identical": true,
+    "native_raw_reasoning_token_counts": {
+      "greedy-first-reasoning": 7423,
+      "greedy-second-reasoning": 9760,
+      "greedy-third-reasoning": 12097,
+      "greedy-observed-reasoning": 12357
+    },
+    "prompt_tokens": 1678,
+    "reclaim_occurred": false,
+    "source": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-pi-ar-cycle-20261023/ar/emperor/pi.jsonl",
+    "requests": [
+      {
+        "artifact_type": "ninfer_serve_request_log",
+        "event": "request_start",
+        "preparation_seconds": {
+          "acquisition": 3.2889e-05,
+          "built_patch_bytes": 0,
+          "cache_hits": 0,
+          "cache_misses": 0,
+          "media_bytes": 0,
+          "media_items": 0,
+          "media_preprocess": 0.0,
+          "media_preprocess_work": 0.0,
+          "patch_bytes": 0,
+          "raw_patches": 0,
+          "reused_patch_bytes": 0,
+          "singleflight_waits": 0,
+          "tokenize": 0.000576608,
+          "total": 0.000623755,
+          "vision_tokens": 0
+        },
+        "request": {
+          "enable_thinking": true,
+          "has_tool_history": false,
+          "media_item_count": 0,
+          "message_count": 2,
+          "model": "qualification",
+          "preserve_thinking": true,
+          "preserve_thinking_semantic_change": false,
+          "protocol": "openai_chat_completions",
+          "request_id": 1,
+          "requested_output_tokens": 131072,
+          "requested_output_tokens_source": "client",
+          "requested_reasoning_effort": "xhigh",
+          "resolved_reasoning_effort": "xhigh",
+          "sampling": {
+            "frequency_penalty": 0.0,
+            "min_p": 0.0,
+            "presence_penalty": 0.0,
+            "seed": 42,
+            "temperature": 0.0,
+            "top_k": 20,
+            "top_p": 0.949999988079071
+          },
+          "stream": true,
+          "thinking_budget": null,
+          "tool_choice": "auto",
+          "tool_count": 4
+        },
+        "schema_version": 20,
+        "server_instance_id": "serve-779610-1792765056533304",
+        "timestamp_unix_ms": 1792765063043
+      },
+      {
+        "artifact_type": "ninfer_serve_request_log",
+        "error": {
+          "message": "client disconnected"
+        },
+        "event": "request_error",
+        "request": {
+          "enable_thinking": true,
+          "has_tool_history": false,
+          "media_item_count": 0,
+          "message_count": 2,
+          "model": "qualification",
+          "preserve_thinking": true,
+          "preserve_thinking_semantic_change": false,
+          "protocol": "openai_chat_completions",
+          "request_id": 1,
+          "requested_output_tokens": 131072,
+          "requested_output_tokens_source": "client",
+          "requested_reasoning_effort": "xhigh",
+          "resolved_reasoning_effort": "xhigh",
+          "sampling": {
+            "frequency_penalty": 0.0,
+            "min_p": 0.0,
+            "presence_penalty": 0.0,
+            "seed": 42,
+            "temperature": 0.0,
+            "top_k": 20,
+            "top_p": 0.949999988079071
+          },
+          "stream": true,
+          "thinking_budget": null,
+          "tool_choice": "auto",
+          "tool_count": 4
+        },
+        "schema_version": 20,
+        "server_instance_id": "serve-779610-1792765056533304",
+        "timestamp_unix_ms": 1792765344022
+      }
+    ],
+    "reclaim_log_lines": []
+  },
+  "speculative_oracle": {
+    "state": "PASS",
+    "command": "build/tests/ninfer_speculative_round_test",
+    "scope": "Native GPU with CPU FP64 full-domain reference, K1..15, batch1..8, accept/reject/residual/bonus/penalties/transforms/guards; not full-model BF16 equivalence",
+    "log": "tmp-nvcc/opsx-non-nvfp4-closeout-20261023/speculative-oracle.log"
+  },
+  "host_lifecycle": {
+    "state": "PASS",
+    "source": "tmp-nvcc/opsx-non-nvfp4-closeout-20261023/host-lifecycle/comparison.json",
+    "pairs": [
+      {
+        "backend": "mtp4",
+        "same_output_and_usage": true,
+        "arms": [
+          {
+            "mode": 0,
+            "state": "PASS",
+            "server_exit": 0,
+            "overlap": [],
+            "tool_arguments": {
+              "value": 42,
+              "label": "publication"
+            },
+            "cancelled": true,
+            "fresh_after_cancel": "DELTA"
+          },
+          {
+            "mode": 1,
+            "state": "PASS",
+            "server_exit": 0,
+            "overlap": [
+              {
+                "scheduled": 160,
+                "processed": 160,
+                "overlapped": 159,
+                "barrier": 1,
+                "failures": 0,
+                "pending": 0
+              }
+            ],
+            "tool_arguments": {
+              "value": 42,
+              "label": "publication"
+            },
+            "cancelled": true,
+            "fresh_after_cancel": "DELTA"
+          }
+        ]
+      },
+      {
+        "backend": "ar",
+        "same_output_and_usage": true,
+        "arms": [
+          {
+            "mode": 0,
+            "state": "PASS",
+            "server_exit": 0,
+            "overlap": [],
+            "tool_arguments": {
+              "value": 42,
+              "label": "publication"
+            },
+            "cancelled": true,
+            "fresh_after_cancel": "DELTA"
+          },
+          {
+            "mode": 1,
+            "state": "PASS",
+            "server_exit": 0,
+            "overlap": [
+              {
+                "scheduled": 435,
+                "processed": 435,
+                "overlapped": 434,
+                "barrier": 1,
+                "failures": 0,
+                "pending": 0
+              }
+            ],
+            "tool_arguments": {
+              "value": 42,
+              "label": "publication"
+            },
+            "cancelled": true,
+            "fresh_after_cancel": "DELTA"
+          }
+        ]
+      },
+      {
+        "backend": "dflash2",
+        "same_output_and_usage": true,
+        "arms": [
+          {
+            "mode": 0,
+            "state": "PASS",
+            "server_exit": 0,
+            "overlap": [],
+            "tool_arguments": {
+              "value": 42,
+              "label": "publication"
+            },
+            "cancelled": true,
+            "fresh_after_cancel": "DELTA"
+          },
+          {
+            "mode": 1,
+            "state": "PASS",
+            "server_exit": 0,
+            "overlap": [
+              {
+                "scheduled": 160,
+                "processed": 160,
+                "overlapped": 159,
+                "barrier": 1,
+                "failures": 0,
+                "pending": 0
+              }
+            ],
+            "tool_arguments": {
+              "value": 42,
+              "label": "publication"
+            },
+            "cancelled": true,
+            "fresh_after_cancel": "DELTA"
+          }
+        ]
+      }
+    ]
+  },
+  "host_performance": {
+    "state": "PASS",
+    "candidate": "host",
+    "power_w": 200,
+    "adopted": false,
+    "contexts": [
+      4096,
+      32768
+    ],
+    "binary": {
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/bench/ninfer_bench",
+      "size": 400206536,
+      "mtime_ns": 1792765426499031593
+    },
+    "model": {
+      "path": "/home/ran/ninfer-work/real-models/qwen3_8_gsq_rco_iq3_s_v3.ninfer",
+      "size": 15017456896,
+      "mtime_ns": 1792427370146524551
+    },
+    "schedule": [
+      0,
+      1,
+      1,
+      0,
+      0,
+      1
+    ],
+    "pairs": [
+      {
+        "pair": 1,
+        "output_ids_equal": true,
+        "contexts": [
+          {
+            "tokens": 4096,
+            "prefill_speedup_pct": -2.0894273750086567,
+            "decode_speedup_pct": -1.5100748420513455,
+            "total_reduction_pct": -1.9958303449890247,
+            "reference_speculative": {
+              "backend": "mtp",
+              "enabled": true,
+              "draft_window": 7,
+              "rounds": 17,
+              "drafted_tokens": 117,
+              "accepted_tokens": 111,
+              "fallback_steps": 0,
+              "acceptance_rate": 0.9487179487,
+              "acceptance_length": 7.529411765,
+              "accepted_per_position": [
+                17,
+                17,
+                17,
+                17,
+                16,
+                14,
+                13
+              ]
+            },
+            "candidate_speculative": {
+              "backend": "mtp",
+              "enabled": true,
+              "draft_window": 7,
+              "rounds": 17,
+              "drafted_tokens": 117,
+              "accepted_tokens": 111,
+              "fallback_steps": 0,
+              "acceptance_rate": 0.9487179487,
+              "acceptance_length": 7.529411765,
+              "accepted_per_position": [
+                17,
+                17,
+                17,
+                17,
+                16,
+                14,
+                13
+              ]
+            },
+            "speculative_work_equal": true
+          },
+          {
+            "tokens": 32768,
+            "prefill_speedup_pct": -0.5066802895536182,
+            "decode_speedup_pct": -0.7102128973009103,
+            "total_reduction_pct": -0.5165474047105878,
+            "reference_speculative": {
+              "backend": "mtp",
+              "enabled": true,
+              "draft_window": 7,
+              "rounds": 17,
+              "drafted_tokens": 113,
+              "accepted_tokens": 111,
+              "fallback_steps": 0,
+              "acceptance_rate": 0.982300885,
+              "acceptance_length": 7.529411765,
+              "accepted_per_position": [
+                17,
+                16,
+                16,
+                16,
+                16,
+                15,
+                15
+              ]
+            },
+            "candidate_speculative": {
+              "backend": "mtp",
+              "enabled": true,
+              "draft_window": 7,
+              "rounds": 17,
+              "drafted_tokens": 113,
+              "accepted_tokens": 111,
+              "fallback_steps": 0,
+              "acceptance_rate": 0.982300885,
+              "acceptance_length": 7.529411765,
+              "accepted_per_position": [
+                17,
+                16,
+                16,
+                16,
+                16,
+                15,
+                15
+              ]
+            },
+            "speculative_work_equal": true
+          }
+        ]
+      },
+      {
+        "pair": 2,
+        "output_ids_equal": true,
+        "contexts": [
+          {
+            "tokens": 4096,
+            "prefill_speedup_pct": 0.7841925763236279,
+            "decode_speedup_pct": 0.4211189640658919,
+            "total_reduction_pct": 0.691845721872264,
+            "reference_speculative": {
+              "backend": "mtp",
+              "enabled": true,
+              "draft_window": 7,
+              "rounds": 17,
+              "drafted_tokens": 117,
+              "accepted_tokens": 111,
+              "fallback_steps": 0,
+              "acceptance_rate": 0.9487179487,
+              "acceptance_length": 7.529411765,
+              "accepted_per_position": [
+                17,
+                17,
+                17,
+                17,
+                16,
+                14,
+                13
+              ]
+            },
+            "candidate_speculative": {
+              "backend": "mtp",
+              "enabled": true,
+              "draft_window": 7,
+              "rounds": 17,
+              "drafted_tokens": 117,
+              "accepted_tokens": 111,
+              "fallback_steps": 0,
+              "acceptance_rate": 0.9487179487,
+              "acceptance_length": 7.529411765,
+              "accepted_per_position": [
+                17,
+                17,
+                17,
+                17,
+                16,
+                14,
+                13
+              ]
+            },
+            "speculative_work_equal": true
+          },
+          {
+            "tokens": 32768,
+            "prefill_speedup_pct": -0.06477443302863595,
+            "decode_speedup_pct": 0.012338439022574477,
+            "total_reduction_pct": -0.06199984011725501,
+            "reference_speculative": {
+              "backend": "mtp",
+              "enabled": true,
+              "draft_window": 7,
+              "rounds": 17,
+              "drafted_tokens": 113,
+              "accepted_tokens": 111,
+              "fallback_steps": 0,
+              "acceptance_rate": 0.982300885,
+              "acceptance_length": 7.529411765,
+              "accepted_per_position": [
+                17,
+                16,
+                16,
+                16,
+                16,
+                15,
+                15
+              ]
+            },
+            "candidate_speculative": {
+              "backend": "mtp",
+              "enabled": true,
+              "draft_window": 7,
+              "rounds": 17,
+              "drafted_tokens": 113,
+              "accepted_tokens": 111,
+              "fallback_steps": 0,
+              "acceptance_rate": 0.982300885,
+              "acceptance_length": 7.529411765,
+              "accepted_per_position": [
+                17,
+                16,
+                16,
+                16,
+                16,
+                15,
+                15
+              ]
+            },
+            "speculative_work_equal": true
+          }
+        ]
+      },
+      {
+        "pair": 3,
+        "output_ids_equal": true,
+        "contexts": [
+          {
+            "tokens": 4096,
+            "prefill_speedup_pct": 0.3833510371304305,
+            "decode_speedup_pct": -0.3347924409941805,
+            "total_reduction_pct": 0.21973476657052293,
+            "reference_speculative": {
+              "backend": "mtp",
+              "enabled": true,
+              "draft_window": 7,
+              "rounds": 17,
+              "drafted_tokens": 117,
+              "accepted_tokens": 111,
+              "fallback_steps": 0,
+              "acceptance_rate": 0.9487179487,
+              "acceptance_length": 7.529411765,
+              "accepted_per_position": [
+                17,
+                17,
+                17,
+                17,
+                16,
+                14,
+                13
+              ]
+            },
+            "candidate_speculative": {
+              "backend": "mtp",
+              "enabled": true,
+              "draft_window": 7,
+              "rounds": 17,
+              "drafted_tokens": 117,
+              "accepted_tokens": 111,
+              "fallback_steps": 0,
+              "acceptance_rate": 0.9487179487,
+              "acceptance_length": 7.529411765,
+              "accepted_per_position": [
+                17,
+                17,
+                17,
+                17,
+                16,
+                14,
+                13
+              ]
+            },
+            "speculative_work_equal": true
+          },
+          {
+            "tokens": 32768,
+            "prefill_speedup_pct": -0.019938159673893452,
+            "decode_speedup_pct": -0.7549823071060335,
+            "total_reduction_pct": -0.045712333125469407,
+            "reference_speculative": {
+              "backend": "mtp",
+              "enabled": true,
+              "draft_window": 7,
+              "rounds": 17,
+              "drafted_tokens": 113,
+              "accepted_tokens": 111,
+              "fallback_steps": 0,
+              "acceptance_rate": 0.982300885,
+              "acceptance_length": 7.529411765,
+              "accepted_per_position": [
+                17,
+                16,
+                16,
+                16,
+                16,
+                15,
+                15
+              ]
+            },
+            "candidate_speculative": {
+              "backend": "mtp",
+              "enabled": true,
+              "draft_window": 7,
+              "rounds": 17,
+              "drafted_tokens": 113,
+              "accepted_tokens": 111,
+              "fallback_steps": 0,
+              "acceptance_rate": 0.982300885,
+              "acceptance_length": 7.529411765,
+              "accepted_per_position": [
+                17,
+                16,
+                16,
+                16,
+                16,
+                15,
+                15
+              ]
+            },
+            "speculative_work_equal": true
+          }
+        ]
+      }
+    ],
+    "medians": [
+      {
+        "tokens": 4096,
+        "prefill_speedup_pct": 0.3833510371304305,
+        "decode_speedup_pct": -0.3347924409941805,
+        "total_reduction_pct": 0.21973476657052293
+      },
+      {
+        "tokens": 32768,
+        "prefill_speedup_pct": -0.06477443302863595,
+        "decode_speedup_pct": -0.7102128973009103,
+        "total_reduction_pct": -0.06199984011725501
+      }
+    ],
+    "source": "tmp-nvcc/opsx-non-nvfp4-closeout-20261023/host-pairs/comparison.json",
+    "decision": "No stable speedup; keep NINFER_HOST_DECODE_OVERLAP default 0."
+  },
+  "s4_long213": {
+    "state": "PASS",
+    "backend": "mtp",
+    "case": "213k",
+    "model": {
+      "path": "/home/ran/ninfer-work/real-models/qwen3_8_gsq_rco_iq3_s_v3.ninfer",
+      "size": 15017456896,
+      "mtime_ns": 1792427370146524551
+    },
+    "binary": {
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/apps/ninfer-serve",
+      "size": 403131704,
+      "mtime_ns": 1792765426001984815
+    },
+    "power_w": 200,
+    "command": [
+      "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/apps/ninfer-serve",
+      "/home/ran/ninfer-work/real-models/qwen3_8_gsq_rco_iq3_s_v3.ninfer",
+      "--model-id",
+      "qualification",
+      "--host",
+      "127.0.0.1",
+      "--port",
+      "18118",
+      "--max-context",
+      "212992",
+      "--kv-device-tokens",
+      "36864",
+      "--prefill-chunk",
+      "1024",
+      "--host-kv-mib",
+      "0",
+      "--max-concurrency",
+      "1",
+      "--kv-dtype",
+      "int8",
+      "--greedy",
+      "--no-thinking",
+      "--kvmem",
+      "--kvmem-budget",
+      "32768",
+      "--kvmem-gen-reserve",
+      "512",
+      "--kvmem-action-lrfu",
+      "--kvmem-lrfu-lambda",
+      "0.5",
+      "--kvmem-lrfu-top-frac",
+      "0.3",
+      "--kvmem-transfer-mode",
+      "sync",
+      "--request-log-jsonl",
+      "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-non-nvfp4-closeout-20261023/s4-long213/requests.jsonl",
+      "--spec",
+      "mtp",
+      "--draft-tokens",
+      "7",
+      "--lm-head-draft"
+    ],
+    "requests": [
+      {
+        "file": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round24/long-213k-source-readahead/212992-0.json",
+        "sha256": "c14fa7420b6e61aa49148be1d9c99d15d6e427461560a687b1a5990cb7fb72e4",
+        "expected": "ACK",
+        "actual": "ACK",
+        "correct": true,
+        "terminal": true,
+        "usage": {
+          "completion_tokens": 2,
+          "completion_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "prompt_tokens": 212276,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "total_tokens": 212278
+        },
+        "http_status": 200,
+        "ttft_s": 154.147791692,
+        "wall_s": 154.188766895
+      },
+      {
+        "file": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round24/long-213k-source-readahead/212992-1.json",
+        "sha256": "618bf495937b023627acf16492a99420a1b350cea95e59ced9fd0446cecc9f2f",
+        "expected": "silver-maple-41",
+        "actual": "silver-maple-41",
+        "correct": true,
+        "terminal": true,
+        "usage": {
+          "completion_tokens": 7,
+          "completion_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "prompt_tokens": 212303,
+          "prompt_tokens_details": {
+            "cached_tokens": 212269
+          },
+          "total_tokens": 212310
+        },
+        "http_status": 200,
+        "ttft_s": 0.747052342,
+        "wall_s": 0.787426072
+      },
+      {
+        "file": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round24/long-213k-source-readahead/212992-2.json",
+        "sha256": "7730fde4393970cfaaa1fd1e9777d9056e6f6ab901411d6c2b32dde7c2e9c00c",
+        "expected": "amber-willow-92",
+        "actual": "amber-willow-92",
+        "correct": true,
+        "terminal": true,
+        "usage": {
+          "completion_tokens": 7,
+          "completion_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "prompt_tokens": 212335,
+          "prompt_tokens_details": {
+            "cached_tokens": 212296
+          },
+          "total_tokens": 212342
+        },
+        "http_status": 200,
+        "ttft_s": 1.456436095,
+        "wall_s": 1.496773068
+      },
+      {
+        "file": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round24/long-213k-source-readahead/212992-3.json",
+        "sha256": "e9d1329ba4a589f199dbe4b5f47939afae7a65707a3b20576af14d20e5f857d5",
+        "expected": "copper-lotus-35",
+        "actual": "copper-lotus-35",
+        "correct": true,
+        "terminal": true,
+        "usage": {
+          "completion_tokens": 9,
+          "completion_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "prompt_tokens": 212368,
+          "prompt_tokens_details": {
+            "cached_tokens": 212328
+          },
+          "total_tokens": 212377
+        },
+        "http_status": 200,
+        "ttft_s": 1.468015531,
+        "wall_s": 1.508581919
+      },
+      {
+        "file": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round24/long-213k-source-readahead/212992-4.json",
+        "sha256": "d93ca7b366286eb8b3d8cbb0c57d0bbe927593db783d63176c89528246b4d73b",
+        "expected": "copper-lilac-28",
+        "actual": "copper-lilac-28",
+        "correct": true,
+        "terminal": true,
+        "usage": {
+          "completion_tokens": 9,
+          "completion_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "prompt_tokens": 212403,
+          "prompt_tokens_details": {
+            "cached_tokens": 212361
+          },
+          "total_tokens": 212412
+        },
+        "http_status": 200,
+        "ttft_s": 2.135957287,
+        "wall_s": 2.176330828
+      },
+      {
+        "file": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round24/long-213k-source-readahead/212992-5.json",
+        "sha256": "edad0bcf6e958e6ca8daa3840f78e1ff60828b26e8fb4ef2d89cb3cb90c6b0d8",
+        "expected": "teal-jasmine-61",
+        "actual": "teal-jasmine-61",
+        "correct": true,
+        "terminal": true,
+        "usage": {
+          "completion_tokens": 8,
+          "completion_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "prompt_tokens": 212441,
+          "prompt_tokens_details": {
+            "cached_tokens": 212396
+          },
+          "total_tokens": 212449
+        },
+        "http_status": 200,
+        "ttft_s": 1.882392914,
+        "wall_s": 1.922955915
+      }
+    ],
+    "input_manifest": "/home/ran/ninfer-work/benchmarks/frozen-long-context/213k/manifest.json",
+    "original_positions": true,
+    "yarn_factor": null,
+    "original_causal_prefill": true,
+    "original_content_anchors": true,
+    "draft_tokens": 7,
+    "diagnostic_request_index": null,
+    "prefill_chunk": 1024,
+    "large_prefill": 1,
+    "silu_mmq": 1,
+    "diagnostic_request_count": 6,
+    "layer_ready": 0,
+    "canonical_query_reuse": false,
+    "transfer_mode": "sync",
+    "host_pages": 128,
+    "fixed_io_workers": 0,
+    "cold_copy_pipeline": 0,
+    "snapshot": "not loaded: real cold prefill",
+    "environment": {
+      "NINFER_SM89_ATTN_SPLIT_VECTOR": "1",
+      "NINFER_SM89_GDN_PRENORM": "1",
+      "NINFER_HOST_DECODE_OVERLAP": "1",
+      "NINFER_R26_BUNDLE": "0",
+      "NINFER_R27_BUNDLE": "1",
+      "NINFER_R28_BUNDLE": "0",
+      "NINFER_R29_BUNDLE": "0",
+      "NINFER_PROMPT_I8_PIPELINE": "1",
+      "NINFER_KVMEM_SOURCE_READ_AHEAD": "1",
+      "NINFER_KVMEM_SOURCE_LAYER_BATCH": "1",
+      "NINFER_KVMEM_SOURCE_COPY_BATCH": "1",
+      "NINFER_GGUF_MMQ_BF16": "1",
+      "NINFER_GGUF_IQ2_S_MMQ_BF16": "1",
+      "NINFER_GGUF_IQ3_S_MMQ_I64": "1",
+      "NINFER_GGUF_IQ3_XXS_MMQ_I64": "1",
+      "NINFER_KVMEM_ORIGINAL_POSITIONS": "1",
+      "NINFER_KVMEM_SOURCE_EVENT_PIPELINE": "0",
+      "NINFER_KVMEM_TRANSFER_PIPELINE": "0",
+      "NINFER_KVMEM_CANONICAL_PREPARE": "0",
+      "NINFER_KVMEM_CANONICAL_QUERY_REUSE": "0",
+      "NINFER_SM89_SHARED_VECTOR": "0",
+      "NINFER_SM89_SHARED_VECTOR_TRACE": "0",
+      "NINFER_KVMEM_COLD_DIR": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-non-nvfp4-closeout-20261023/s4-long213/backing",
+      "NINFER_KVMEM_LAYER_READY": "0",
+      "NINFER_KVMEM_ORIGINAL_CAUSAL_PREFILL": "1",
+      "NINFER_KVMEM_ORIGINAL_CONTENT_ANCHORS": "1",
+      "NINFER_KVMEM_FIXED_IO_WORKERS": "0",
+      "NINFER_KVMEM_COLD_COPY_PIPELINE": "0",
+      "NINFER_KVMEM_IO_WORKER_SUMMARY": "1",
+      "NINFER_GGUF_LARGE_PREFILL": "1",
+      "NINFER_GGUF_SILU_MMQ": "1",
+      "NINFER_KVMEM_LAYER_READY_SUMMARY": "1",
+      "NINFER_KVMEM_LAYER_READY_TRACE": "0",
+      "NINFER_KVMEM_HOST_PAGES": "128"
+    },
+    "startup": {
+      "argv": [
+        "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/apps/ninfer-serve",
+        "/home/ran/ninfer-work/real-models/qwen3_8_gsq_rco_iq3_s_v3.ninfer",
+        "--model-id",
+        "qualification",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "18118",
+        "--max-context",
+        "212992",
+        "--kv-device-tokens",
+        "36864",
+        "--prefill-chunk",
+        "1024",
+        "--host-kv-mib",
+        "0",
+        "--max-concurrency",
+        "1",
+        "--kv-dtype",
+        "int8",
+        "--greedy",
+        "--no-thinking",
+        "--kvmem",
+        "--kvmem-budget",
+        "32768",
+        "--kvmem-gen-reserve",
+        "512",
+        "--kvmem-action-lrfu",
+        "--kvmem-lrfu-lambda",
+        "0.5",
+        "--kvmem-lrfu-top-frac",
+        "0.3",
+        "--kvmem-transfer-mode",
+        "sync",
+        "--request-log-jsonl",
+        "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-non-nvfp4-closeout-20261023/s4-long213/requests.jsonl",
+        "--spec",
+        "mtp",
+        "--draft-tokens",
+        "7",
+        "--lm-head-draft"
+      ],
+      "artifact": {
+        "bytes_read": 12494575921,
+        "host_to_device_bytes": 12481723392,
+        "load_seconds": 2.570181887,
+        "path": "/home/ran/ninfer-work/real-models/qwen3_8_gsq_rco_iq3_s_v3.ninfer",
+        "peak_staging_bytes": 268435456,
+        "resource_count": 6,
+        "size_bytes": 15017456896,
+        "target": "qwen3_8_27b",
+        "tensor_count": 844,
+        "upload_seconds": 0.783015266,
+        "weights_id": "groupwise-int"
+      },
+      "artifact_type": "ninfer_serve_request_log",
+      "engine": {
+        "context_cache": {
+          "device_state_slots": 1,
+          "enabled": true,
+          "host_kv_capacity_bytes": 0,
+          "host_state_slots": 8,
+          "max_long_anchors_per_continuation": 2,
+          "max_private_continuations": 2,
+          "max_shared_prefixes": 4,
+          "total_device_state_slots": 2
+        },
+        "context_cost": {
+          "hardware_class": "nvidia-geforce-rtx-4070-ti-super-sm89",
+          "model_id": "qwen3.8-27b",
+          "prefill_source": "generic-default",
+          "preset_path": "",
+          "transfer_source": "generic-default",
+          "weights_id": "groupwise-int"
+        },
+        "cuda_graph": true,
+        "device": 0,
+        "kv_cache": "int8-group64",
+        "kv_capacity": 36864,
+        "kv_capacity_max_page_groups": 3328,
+        "kv_capacity_mode": "explicit",
+        "kv_capacity_page_groups": 576,
+        "log_stats_interval_ms": 5000,
+        "max_concurrency": 1,
+        "max_context": 212992,
+        "max_pending_requests": 16,
+        "pending_timeout_ms": 30000,
+        "prefill_chunk": 1024,
+        "prefix_reuse": true,
+        "proposal_head": "optimized",
+        "speculative_backend": "mtp",
+        "speculative_draft_window": 7,
+        "vision": false
+      },
+      "environment": {
+        "compute_capability_major": 8,
+        "compute_capability_minor": 9,
+        "cuda_compile_version": "13.4",
+        "cuda_driver_version": "13.4",
+        "cuda_runtime_version": "13.4",
+        "device": 0,
+        "gpu_name": "NVIDIA GeForce RTX 4070 Ti SUPER",
+        "gpu_uuid": "GPU-40f06487-5ac9-806d-8e2f-b87f18edbef6",
+        "total_device_memory_bytes": 16805068800
+      },
+      "event": "server_start",
+      "memory": {
+        "available_after_startup_bytes": 1761607680,
+        "available_after_weights_bytes": 4032823296,
+        "cuda_graph_allowance_bytes": 85983232,
+        "host_kv_capacity_bytes": 0,
+        "host_kv_occupied_bytes": 0,
+        "host_state_capacity_slots": 8,
+        "host_state_occupied_slots": 0,
+        "kv_capacity_headroom_bytes": 0,
+        "kv_capacity_increment_bytes": 2162688,
+        "kv_payload_bytes": 1695682560,
+        "minimum_runtime_reservation_bytes": 1086540544,
+        "planned_slack_bytes": 1702737152,
+        "runtime_reservation_bytes": 2330086144,
+        "sequence": {
+          "capacity_bytes": 2034618112,
+          "peak_used_bytes": 2034618112,
+          "used_bytes": 2034618112
+        },
+        "vision_workspace": null,
+        "weights": {
+          "capacity_bytes": 12481729536,
+          "peak_used_bytes": 12481729536,
+          "used_bytes": 12481729536
+        },
+        "workspace": {
+          "capacity_bytes": 209484800,
+          "peak_used_bytes": 209484800,
+          "used_bytes": 0
+        }
+      },
+      "sampling_defaults": {
+        "greedy": true,
+        "non_thinking": {
+          "frequency_penalty": 0.0,
+          "min_p": 0.0,
+          "presence_penalty": 1.5,
+          "temperature": 0.699999988079071,
+          "top_k": 20,
+          "top_p": 0.800000011920929
+        },
+        "omitted_seed": "random",
+        "server_overrides": {
+          "frequency_penalty": null,
+          "min_p": null,
+          "presence_penalty": null,
+          "seed": null,
+          "temperature": null,
+          "top_k": null,
+          "top_p": null
+        },
+        "thinking": {
+          "frequency_penalty": 0.0,
+          "min_p": 0.0,
+          "presence_penalty": 0.0,
+          "temperature": 1.0,
+          "top_k": 20,
+          "top_p": 0.949999988079071
+        }
+      },
+      "schema_version": 20,
+      "server": {
+        "api_key_configured": false,
+        "cors_enabled": false,
+        "default_output_tokens": 8192,
+        "default_preserve_thinking": false,
+        "default_thinking": false,
+        "default_thinking_budget": null,
+        "host": "127.0.0.1",
+        "max_request_bytes": 402653184,
+        "media_cache_bytes": 1073741824,
+        "media_live_bytes": 2147483648,
+        "media_preprocess_threads": 0,
+        "port": 18118,
+        "public_model_id": "qualification",
+        "request_log_jsonl": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-non-nvfp4-closeout-20261023/s4-long213/requests.jsonl"
+      },
+      "server_instance_id": "serve-782455-1792765822643165",
+      "timestamp_unix_ms": 1792765825604
+    },
+    "metrics": {
+      "llamacpp:prompt_tokens_total": 212476.0,
+      "llamacpp:prompt_seconds_total": 161.68,
+      "llamacpp:tokens_predicted_total": 42.0,
+      "llamacpp:tokens_predicted_seconds_total": 0.240465,
+      "llamacpp:requests_processing": 0.0,
+      "llamacpp:requests_deferred": 0.0,
+      "ninfer:requests_total": 6.0,
+      "ninfer:requests_completed_total": 6.0,
+      "ninfer:requests_active": 0.0,
+      "ninfer:ttft_seconds_total": 161.809,
+      "ninfer:prefix_cache_hit_tokens_total": 1061650.0,
+      "ninfer:draft_tokens_total": 42.0,
+      "ninfer:draft_accepted_tokens_total": 38.0,
+      "ninfer:computed_prefill_tokens_total": 212489.0,
+      "ninfer:restored_prefill_tokens_total": 0.0,
+      "ninfer:committed_decode_tokens_total": 39.0,
+      "ninfer:reused_prompt_tokens_total": 1061650.0,
+      "ninfer:decode_rounds_total": 8.0,
+      "ninfer:running_requests": 0.0,
+      "ninfer:prefilling_requests": 0.0,
+      "ninfer:waiting_requests": 0.0,
+      "ninfer:materializing_requests": 0.0,
+      "ninfer:capture_pending_requests": 0.0,
+      "ninfer:device_state_occupied_slots": 2.0,
+      "ninfer:host_state_occupied_slots": 0.0,
+      "ninfer:device_main_kv_occupied_pages": 512.0,
+      "ninfer:device_backend_kv_occupied_pages": 512.0,
+      "ninfer:host_kv_occupied_bytes": 0.0,
+      "ninfer:kvmem_enabled": 1.0,
+      "ninfer:kvmem_budget_tokens": 32768.0,
+      "ninfer:kvmem_gen_reserve_tokens": 512.0,
+      "ninfer:kvmem_plans_total": 535.0,
+      "ninfer:kvmem_compactions_total": 372.0,
+      "ninfer:kvmem_compact_skips_total": 0.0,
+      "ninfer:kvmem_stage_in_blocks_total": 6658.0,
+      "ninfer:kvmem_stage_out_blocks_total": 12274.0,
+      "ninfer:kvmem_transfer_runs_total": 11508.0,
+      "ninfer:kvmem_transfer_us_total": 5865609.0,
+      "ninfer:kvmem_async_enabled": 0.0,
+      "ninfer:kvmem_async_submitted_total": 0.0,
+      "ninfer:kvmem_async_completed_total": 0.0,
+      "ninfer:kvmem_async_discarded_total": 0.0,
+      "ninfer:kvmem_async_submit_us_total": 0.0,
+      "ninfer:kvmem_async_wait_us_total": 0.0,
+      "ninfer:kvmem_async_bytes_total": 0.0,
+      "ninfer:kvmem_async_fallbacks_total": 0.0,
+      "ninfer:kvmem_async_restore_submitted_total": 0.0,
+      "ninfer:kvmem_async_restore_us_total": 0.0,
+      "ninfer:kvmem_inflight_pages": 0.0,
+      "ninfer:kvmem_inflight_bytes": 0.0,
+      "ninfer:kvmem_scoreable_blocks_total": 389606.0,
+      "ninfer:kvmem_zero_score_blocks_total": 349786.0,
+      "ninfer:kvmem_window_tokens": 32697.0,
+      "ninfer:kvmem_host_bytes": 280473600.0,
+      "ninfer:kvmem_host_capacity_bytes": 294125568.0,
+      "ninfer:kvmem_cold_bytes": 6171906048.0,
+      "ninfer:kvmem_host_to_cold_spills_total": 5843.0,
+      "ninfer:kvmem_source_k_bytes": 0.0,
+      "ninfer:kvmem_source_k_file_capacity_bytes": 0.0,
+      "ninfer:kvmem_source_k_staging_bytes": 0.0,
+      "ninfer:kvmem_source_k_captures_total": 0.0,
+      "ninfer:kvmem_source_k_rebuilds_total": 0.0,
+      "ninfer:kvmem_history_replay_tokens_total": 0.0,
+      "ninfer:kvmem_query_replay_tokens_total": 162.0,
+      "ninfer:kvmem_history_replay_rounds_total": 0.0,
+      "ninfer:kvmem_history_reused_tokens_total": 0.0,
+      "ninfer:kvmem_replay_checkpoint_capacity_bytes": 615817216.0,
+      "ninfer:kvmem_async_split_batches_total": 0.0,
+      "ninfer:kvmem_nvme_prefetch_submitted_total": 0.0,
+      "ninfer:kvmem_nvme_prefetch_completed_total": 0.0,
+      "ninfer:kvmem_nvme_prefetch_wait_us_total": 0.0,
+      "ninfer:physical_prefill_tokens_total": 212651.0,
+      "ninfer:host_kv_capacity_bytes": 0.0,
+      "ninfer:managed_runtime_budget_limit_bytes": 0.0,
+      "ninfer:capture_skips_total": 6.0,
+      "ninfer:capture_skips{reason=\"cancelled\"}": 0.0,
+      "ninfer:capture_skips{reason=\"nothing_to_publish\"}": 0.0,
+      "ninfer:capture_skips{reason=\"invalid_pressure\"}": 0.0,
+      "ninfer:capture_skips{reason=\"physical_peak\"}": 0.0,
+      "ninfer:capture_skips{reason=\"transaction_busy\"}": 0.0,
+      "ninfer:capture_skips{reason=\"private_baseline_unavailable\"}": 0.0,
+      "ninfer:capture_skips{reason=\"no_admissible_plan\"}": 6.0,
+      "ninfer:capture_skips{reason=\"terminal\"}": 0.0,
+      "ninfer:capture_skips{reason=\"unspecified\"}": 0.0
+    },
+    "session_wall_s": 162.2183049759915,
+    "request_wall_sum_s": 162.080834697,
+    "session_client_gap_s": 0.13747027899148634,
+    "process_io_delta": {
+      "rchar": 6452514881,
+      "wchar": 12624536353,
+      "syscr": 5630,
+      "syscw": 11094,
+      "read_bytes": 227221504,
+      "write_bytes": 9425694720,
+      "cancelled_write_bytes": 0
+    },
+    "process_memory_bytes": {
+      "VmHWM": 17083650048,
+      "VmRSS": 5859188736
+    },
+    "server_exit": 0,
+    "layer_summaries": [
+      {
+        "epochs": 0,
+        "waits": 0,
+        "releases": 0,
+        "source_async_pages": 0,
+        "source_sync_pages": 0,
+        "cold_async_pages": 0,
+        "cold_read_pages": 2809,
+        "cold_read_bytes": 379686912,
+        "cold_copy_pages": 0,
+        "cold_copy_batches": 0,
+        "resident_rephase_pages": 0,
+        "staging_peak_bytes": 405504,
+        "pending_pinned_pages": 0,
+        "inflight_pages": 0,
+        "producer_active": 0
+      },
+      {
+        "epochs": 0,
+        "waits": 0,
+        "releases": 0,
+        "source_async_pages": 0,
+        "source_sync_pages": 0,
+        "cold_async_pages": 0,
+        "cold_read_pages": 2808,
+        "cold_read_bytes": 6072827904,
+        "cold_copy_pages": 0,
+        "cold_copy_batches": 0,
+        "resident_rephase_pages": 0,
+        "staging_peak_bytes": 6488064,
+        "pending_pinned_pages": 0,
+        "inflight_pages": 0,
+        "producer_active": 0
+      }
+    ],
+    "io_worker_summaries": [],
+    "wall_s": 165.69860126200365,
+    "source": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-non-nvfp4-closeout-20261023/s4-long213/report.json",
+    "request_done": [
+      {
+        "artifact_type": "ninfer_serve_request_log",
+        "engine_timing": {
+          "decode": {
+            "device_wait_exposed_seconds": 0.039689689,
+            "host_exposed_seconds": 0.0005192630000000001,
+            "rounds": 1
+          },
+          "device_wait_exposed_seconds": 73.21202605500001,
+          "host_exposed_seconds": {
+            "engine_boundary": 0.00028787800000000004,
+            "engine_commit_output": 0.0010403670000000002,
+            "engine_maintenance": 0.000236578,
+            "program_post": 0.40863134700000003,
+            "program_submit": 80.512926152,
+            "total": 80.923122322
+          },
+          "queue_wait_seconds": 0.025025585000000003,
+          "units": {
+            "control": 0,
+            "prefill": 211
+          }
+        },
+        "event": "request_done",
+        "materialization": {
+          "budget_exhausted": false,
+          "planning_elapsed_ns": 19327,
+          "predicted_future_loss_ns": 0,
+          "predicted_now_ns": 218626685652,
+          "predicted_total_ns": 218626685652,
+          "projection_work": 1,
+          "search_elapsed_ns": 0,
+          "selected_degradation_units": 0,
+          "selected_maximal_fallback": false,
+          "stop_reason": "no_pressure",
+          "targets_evaluated": 1
+        },
+        "request": {
+          "enable_thinking": false,
+          "has_tool_history": true,
+          "media_item_count": 0,
+          "message_count": 5,
+          "model": "qualification",
+          "preserve_thinking": false,
+          "preserve_thinking_semantic_change": false,
+          "protocol": "openai_chat_completions",
+          "request_id": 1,
+          "requested_output_tokens": 24,
+          "requested_output_tokens_source": "client",
+          "requested_reasoning_effort": null,
+          "resolved_reasoning_effort": "none",
+          "sampling": {
+            "frequency_penalty": 0.0,
+            "min_p": 0.0,
+            "presence_penalty": 1.5,
+            "seed": 15459445909745448932,
+            "temperature": 0.0,
+            "top_k": 20,
+            "top_p": 0.800000011920929
+          },
+          "stream": true,
+          "thinking_budget": null,
+          "tool_choice": "auto",
+          "tool_count": 0
+        },
+        "result": {
+          "completion_tokens": 2,
+          "computed_prefill_tokens": 212276,
+          "finish_reason": "stop_token",
+          "model_thinking_tokens": 0,
+          "prefix_cache_hit_tokens": 0,
+          "prefix_reuse_path": "root",
+          "prompt_tokens": 212276,
+          "thinking_budget": null,
+          "thinking_control_applied": false,
+          "thinking_control_tokens": 0,
+          "tool_call_count": 0,
+          "tool_call_parse": {
+            "empty_arguments_omitted": 0,
+            "fallback_reason": "none",
+            "marker_seen": false,
+            "schema_mismatch_arguments": 0,
+            "structured_call_count": 0
+          }
+        },
+        "schema_version": 20,
+        "server_instance_id": "serve-782455-1792765822643165",
+        "speculative": {
+          "accepted_per_position": [
+            1,
+            1,
+            1,
+            1,
+            1,
+            0,
+            0
+          ],
+          "accepted_tokens": 5,
+          "backend": "mtp",
+          "draft_window": 7,
+          "drafted_tokens": 7,
+          "fallback_steps": 0,
+          "rounds": 1
+        },
+        "timestamp_unix_ms": 1792765979802,
+        "timings_seconds": {
+          "decode": 0.040125136,
+          "prefill": 154.1028735859999,
+          "prepare": 0.023207146,
+          "total": 154.183753106,
+          "ttft": 154.143522787,
+          "vision": 0.0
+        }
+      },
+      {
+        "artifact_type": "ninfer_serve_request_log",
+        "engine_timing": {
+          "decode": {
+            "device_wait_exposed_seconds": 0.040170344000000004,
+            "host_exposed_seconds": 0.00013908,
+            "rounds": 1
+          },
+          "device_wait_exposed_seconds": 0.18324335700000002,
+          "host_exposed_seconds": {
+            "engine_boundary": 1.5978000000000002e-05,
+            "engine_commit_output": 3.0342000000000002e-05,
+            "engine_maintenance": 5.54e-06,
+            "program_post": 0.279745966,
+            "program_submit": 0.295187044,
+            "total": 0.57498487
+          },
+          "queue_wait_seconds": 0.022929633,
+          "units": {
+            "control": 0,
+            "prefill": 4
+          }
+        },
+        "event": "request_done",
+        "materialization": {
+          "budget_exhausted": false,
+          "planning_elapsed_ns": 887862,
+          "predicted_future_loss_ns": 0,
+          "predicted_now_ns": 222518899,
+          "predicted_total_ns": 222518899,
+          "projection_work": 5142,
+          "search_elapsed_ns": 174068,
+          "selected_degradation_units": 0,
+          "selected_maximal_fallback": false,
+          "stop_reason": "queue_exhausted",
+          "targets_evaluated": 7
+        },
+        "request": {
+          "enable_thinking": false,
+          "has_tool_history": true,
+          "media_item_count": 0,
+          "message_count": 7,
+          "model": "qualification",
+          "preserve_thinking": false,
+          "preserve_thinking_semantic_change": false,
+          "protocol": "openai_chat_completions",
+          "request_id": 2,
+          "requested_output_tokens": 24,
+          "requested_output_tokens_source": "client",
+          "requested_reasoning_effort": null,
+          "resolved_reasoning_effort": "none",
+          "sampling": {
+            "frequency_penalty": 0.0,
+            "min_p": 0.0,
+            "presence_penalty": 1.5,
+            "seed": 16610360004828647660,
+            "temperature": 0.0,
+            "top_k": 20,
+            "top_p": 0.800000011920929
+          },
+          "stream": true,
+          "thinking_budget": null,
+          "tool_choice": "auto",
+          "tool_count": 0
+        },
+        "result": {
+          "completion_tokens": 7,
+          "computed_prefill_tokens": 34,
+          "finish_reason": "stop_token",
+          "model_thinking_tokens": 0,
+          "prefix_cache_hit_tokens": 212269,
+          "prefix_reuse_path": "private_turn_closure",
+          "prompt_tokens": 212303,
+          "thinking_budget": null,
+          "thinking_control_applied": false,
+          "thinking_control_tokens": 0,
+          "tool_call_count": 0,
+          "tool_call_parse": {
+            "empty_arguments_omitted": 0,
+            "fallback_reason": "none",
+            "marker_seen": false,
+            "schema_mismatch_arguments": 0,
+            "structured_call_count": 0
+          }
+        },
+        "schema_version": 20,
+        "server_instance_id": "serve-782455-1792765822643165",
+        "speculative": {
+          "accepted_per_position": [
+            1,
+            1,
+            1,
+            1,
+            1,
+            0,
+            0
+          ],
+          "accepted_tokens": 5,
+          "backend": "mtp",
+          "draft_window": 7,
+          "drafted_tokens": 7,
+          "fallback_steps": 0,
+          "rounds": 1
+        },
+        "timestamp_unix_ms": 1792765980594,
+        "timings_seconds": {
+          "decode": 0.040236547,
+          "prefill": 0.727916098,
+          "prepare": 0.002892329,
+          "total": 0.784061046,
+          "ttft": 0.743732324,
+          "vision": 0.0
+        }
+      },
+      {
+        "artifact_type": "ninfer_serve_request_log",
+        "engine_timing": {
+          "decode": {
+            "device_wait_exposed_seconds": 0.040014182,
+            "host_exposed_seconds": 0.000159979,
+            "rounds": 1
+          },
+          "device_wait_exposed_seconds": 0.185553605,
+          "host_exposed_seconds": {
+            "engine_boundary": 1.7095e-05,
+            "engine_commit_output": 3.5238000000000004e-05,
+            "engine_maintenance": 5.940000000000001e-06,
+            "program_post": 0.7037946500000001,
+            "program_submit": 0.577008497,
+            "total": 1.2808614200000001
+          },
+          "queue_wait_seconds": 0.023274675,
+          "units": {
+            "control": 0,
+            "prefill": 4
+          }
+        },
+        "event": "request_done",
+        "materialization": {
+          "budget_exhausted": false,
+          "planning_elapsed_ns": 878580,
+          "predicted_future_loss_ns": 0,
+          "predicted_now_ns": 231242454,
+          "predicted_total_ns": 231242454,
+          "projection_work": 5152,
+          "search_elapsed_ns": 165085,
+          "selected_degradation_units": 0,
+          "selected_maximal_fallback": false,
+          "stop_reason": "queue_exhausted",
+          "targets_evaluated": 7
+        },
+        "request": {
+          "enable_thinking": false,
+          "has_tool_history": true,
+          "media_item_count": 0,
+          "message_count": 9,
+          "model": "qualification",
+          "preserve_thinking": false,
+          "preserve_thinking_semantic_change": false,
+          "protocol": "openai_chat_completions",
+          "request_id": 3,
+          "requested_output_tokens": 24,
+          "requested_output_tokens_source": "client",
+          "requested_reasoning_effort": null,
+          "resolved_reasoning_effort": "none",
+          "sampling": {
+            "frequency_penalty": 0.0,
+            "min_p": 0.0,
+            "presence_penalty": 1.5,
+            "seed": 16174863951469274262,
+            "temperature": 0.0,
+            "top_k": 20,
+            "top_p": 0.800000011920929
+          },
+          "stream": true,
+          "thinking_budget": null,
+          "tool_choice": "auto",
+          "tool_count": 0
+        },
+        "result": {
+          "completion_tokens": 7,
+          "computed_prefill_tokens": 39,
+          "finish_reason": "stop_token",
+          "model_thinking_tokens": 0,
+          "prefix_cache_hit_tokens": 212296,
+          "prefix_reuse_path": "private_turn_closure",
+          "prompt_tokens": 212335,
+          "thinking_budget": null,
+          "thinking_control_applied": false,
+          "thinking_control_tokens": 0,
+          "tool_call_count": 0,
+          "tool_call_parse": {
+            "empty_arguments_omitted": 0,
+            "fallback_reason": "none",
+            "marker_seen": false,
+            "schema_mismatch_arguments": 0,
+            "structured_call_count": 0
+          }
+        },
+        "schema_version": 20,
+        "server_instance_id": "serve-782455-1792765822643165",
+        "speculative": {
+          "accepted_per_position": [
+            1,
+            1,
+            1,
+            1,
+            1,
+            1,
+            1
+          ],
+          "accepted_tokens": 7,
+          "backend": "mtp",
+          "draft_window": 7,
+          "drafted_tokens": 7,
+          "fallback_steps": 0,
+          "rounds": 1
+        },
+        "timestamp_unix_ms": 1792765982096,
+        "timings_seconds": {
+          "decode": 0.040095015,
+          "prefill": 1.436048856,
+          "prepare": 0.003504616,
+          "total": 1.493206319,
+          "ttft": 1.4530132880000002,
+          "vision": 0.0
+        }
+      },
+      {
+        "artifact_type": "ninfer_serve_request_log",
+        "engine_timing": {
+          "decode": {
+            "device_wait_exposed_seconds": 0.040003918,
+            "host_exposed_seconds": 0.00013330900000000002,
+            "rounds": 1
+          },
+          "device_wait_exposed_seconds": 0.18559686,
+          "host_exposed_seconds": {
+            "engine_boundary": 1.5577e-05,
+            "engine_commit_output": 3.0241e-05,
+            "engine_maintenance": 5.008e-06,
+            "program_post": 0.702162032,
+            "program_submit": 0.585250319,
+            "total": 1.287463177
+          },
+          "queue_wait_seconds": 0.026904212,
+          "units": {
+            "control": 0,
+            "prefill": 4
+          }
+        },
+        "event": "request_done",
+        "materialization": {
+          "budget_exhausted": false,
+          "planning_elapsed_ns": 911724,
+          "predicted_future_loss_ns": 0,
+          "predicted_now_ns": 232994971,
+          "predicted_total_ns": 232994971,
+          "projection_work": 5142,
+          "search_elapsed_ns": 201008,
+          "selected_degradation_units": 0,
+          "selected_maximal_fallback": false,
+          "stop_reason": "queue_exhausted",
+          "targets_evaluated": 7
+        },
+        "request": {
+          "enable_thinking": false,
+          "has_tool_history": true,
+          "media_item_count": 0,
+          "message_count": 11,
+          "model": "qualification",
+          "preserve_thinking": false,
+          "preserve_thinking_semantic_change": false,
+          "protocol": "openai_chat_completions",
+          "request_id": 4,
+          "requested_output_tokens": 24,
+          "requested_output_tokens_source": "client",
+          "requested_reasoning_effort": null,
+          "resolved_reasoning_effort": "none",
+          "sampling": {
+            "frequency_penalty": 0.0,
+            "min_p": 0.0,
+            "presence_penalty": 1.5,
+            "seed": 17178620112628316785,
+            "temperature": 0.0,
+            "top_k": 20,
+            "top_p": 0.800000011920929
+          },
+          "stream": true,
+          "thinking_budget": null,
+          "tool_choice": "auto",
+          "tool_count": 0
+        },
+        "result": {
+          "completion_tokens": 9,
+          "computed_prefill_tokens": 40,
+          "finish_reason": "stop_token",
+          "model_thinking_tokens": 0,
+          "prefix_cache_hit_tokens": 212328,
+          "prefix_reuse_path": "private_turn_closure",
+          "prompt_tokens": 212368,
+          "thinking_budget": null,
+          "thinking_control_applied": false,
+          "thinking_control_tokens": 0,
+          "tool_call_count": 0,
+          "tool_call_parse": {
+            "empty_arguments_omitted": 0,
+            "fallback_reason": "none",
+            "marker_seen": false,
+            "schema_mismatch_arguments": 0,
+            "structured_call_count": 0
+          }
+        },
+        "schema_version": 20,
+        "server_instance_id": "serve-782455-1792765822643165",
+        "speculative": {
+          "accepted_per_position": [
+            1,
+            1,
+            1,
+            1,
+            1,
+            1,
+            1
+          ],
+          "accepted_tokens": 7,
+          "backend": "mtp",
+          "draft_window": 7,
+          "drafted_tokens": 7,
+          "fallback_steps": 0,
+          "rounds": 1
+        },
+        "timestamp_unix_ms": 1792765983698,
+        "timings_seconds": {
+          "decode": 0.040067408,
+          "prefill": 1.4427347430000002,
+          "prepare": 0.003662148,
+          "total": 1.503636699,
+          "ttft": 1.463481174,
+          "vision": 0.0
+        }
+      },
+      {
+        "artifact_type": "ninfer_serve_request_log",
+        "engine_timing": {
+          "decode": {
+            "device_wait_exposed_seconds": 0.039795027000000004,
+            "host_exposed_seconds": 0.000149982,
+            "rounds": 1
+          },
+          "device_wait_exposed_seconds": 0.183452417,
+          "host_exposed_seconds": {
+            "engine_boundary": 1.4667e-05,
+            "engine_commit_output": 3.0370000000000002e-05,
+            "engine_maintenance": 6.779000000000001e-06,
+            "program_post": 0.8124056810000001,
+            "program_submit": 1.147921191,
+            "total": 1.9603786880000003
+          },
+          "queue_wait_seconds": 0.022668731,
+          "units": {
+            "control": 0,
+            "prefill": 4
+          }
+        },
+        "event": "request_done",
+        "materialization": {
+          "budget_exhausted": false,
+          "planning_elapsed_ns": 879024,
+          "predicted_future_loss_ns": 0,
+          "predicted_now_ns": 236492145,
+          "predicted_total_ns": 236492145,
+          "projection_work": 5152,
+          "search_elapsed_ns": 165461,
+          "selected_degradation_units": 0,
+          "selected_maximal_fallback": false,
+          "stop_reason": "queue_exhausted",
+          "targets_evaluated": 7
+        },
+        "request": {
+          "enable_thinking": false,
+          "has_tool_history": true,
+          "media_item_count": 0,
+          "message_count": 13,
+          "model": "qualification",
+          "preserve_thinking": false,
+          "preserve_thinking_semantic_change": false,
+          "protocol": "openai_chat_completions",
+          "request_id": 5,
+          "requested_output_tokens": 24,
+          "requested_output_tokens_source": "client",
+          "requested_reasoning_effort": null,
+          "resolved_reasoning_effort": "none",
+          "sampling": {
+            "frequency_penalty": 0.0,
+            "min_p": 0.0,
+            "presence_penalty": 1.5,
+            "seed": 17614119777911809104,
+            "temperature": 0.0,
+            "top_k": 20,
+            "top_p": 0.800000011920929
+          },
+          "stream": true,
+          "thinking_budget": null,
+          "tool_choice": "auto",
+          "tool_count": 0
+        },
+        "result": {
+          "completion_tokens": 9,
+          "computed_prefill_tokens": 42,
+          "finish_reason": "stop_token",
+          "model_thinking_tokens": 0,
+          "prefix_cache_hit_tokens": 212361,
+          "prefix_reuse_path": "private_turn_closure",
+          "prompt_tokens": 212403,
+          "thinking_budget": null,
+          "thinking_control_applied": false,
+          "thinking_control_tokens": 0,
+          "tool_call_count": 0,
+          "tool_call_parse": {
+            "empty_arguments_omitted": 0,
+            "fallback_reason": "none",
+            "marker_seen": false,
+            "schema_mismatch_arguments": 0,
+            "structured_call_count": 0
+          }
+        },
+        "schema_version": 20,
+        "server_instance_id": "serve-782455-1792765822643165",
+        "speculative": {
+          "accepted_per_position": [
+            1,
+            1,
+            1,
+            1,
+            1,
+            1,
+            1
+          ],
+          "accepted_tokens": 7,
+          "backend": "mtp",
+          "draft_window": 7,
+          "drafted_tokens": 7,
+          "fallback_steps": 0,
+          "rounds": 1
+        },
+        "timestamp_unix_ms": 1792765985885,
+        "timings_seconds": {
+          "decode": 0.039864264999999996,
+          "prefill": 2.113635254,
+          "prepare": 0.00378994,
+          "total": 2.1702992979999998,
+          "ttft": 2.130336473,
+          "vision": 0.0
+        }
+      },
+      {
+        "artifact_type": "ninfer_serve_request_log",
+        "engine_timing": {
+          "decode": {
+            "device_wait_exposed_seconds": 0.039996934000000005,
+            "host_exposed_seconds": 0.00015142200000000001,
+            "rounds": 1
+          },
+          "device_wait_exposed_seconds": 0.18393319000000002,
+          "host_exposed_seconds": {
+            "engine_boundary": 1.8017e-05,
+            "engine_commit_output": 3.2199e-05,
+            "engine_maintenance": 5.565e-06,
+            "program_post": 0.678804681,
+            "program_submit": 1.023912696,
+            "total": 1.7027731579999998
+          },
+          "queue_wait_seconds": 0.022648254000000003,
+          "units": {
+            "control": 0,
+            "prefill": 4
+          }
+        },
+        "event": "request_done",
+        "materialization": {
+          "budget_exhausted": false,
+          "planning_elapsed_ns": 863553,
+          "predicted_future_loss_ns": 0,
+          "predicted_now_ns": 241735084,
+          "predicted_total_ns": 241735084,
+          "projection_work": 5142,
+          "search_elapsed_ns": 169066,
+          "selected_degradation_units": 0,
+          "selected_maximal_fallback": false,
+          "stop_reason": "queue_exhausted",
+          "targets_evaluated": 7
+        },
+        "request": {
+          "enable_thinking": false,
+          "has_tool_history": true,
+          "media_item_count": 0,
+          "message_count": 15,
+          "model": "qualification",
+          "preserve_thinking": false,
+          "preserve_thinking_semantic_change": false,
+          "protocol": "openai_chat_completions",
+          "request_id": 6,
+          "requested_output_tokens": 24,
+          "requested_output_tokens_source": "client",
+          "requested_reasoning_effort": null,
+          "resolved_reasoning_effort": "none",
+          "sampling": {
+            "frequency_penalty": 0.0,
+            "min_p": 0.0,
+            "presence_penalty": 1.5,
+            "seed": 11424252768836590335,
+            "temperature": 0.0,
+            "top_k": 20,
+            "top_p": 0.800000011920929
+          },
+          "stream": true,
+          "thinking_budget": null,
+          "tool_choice": "auto",
+          "tool_count": 0
+        },
+        "result": {
+          "completion_tokens": 8,
+          "computed_prefill_tokens": 45,
+          "finish_reason": "stop_token",
+          "model_thinking_tokens": 0,
+          "prefix_cache_hit_tokens": 212396,
+          "prefix_reuse_path": "private_turn_closure",
+          "prompt_tokens": 212441,
+          "thinking_budget": null,
+          "thinking_control_applied": false,
+          "thinking_control_tokens": 0,
+          "tool_call_count": 0,
+          "tool_call_parse": {
+            "empty_arguments_omitted": 0,
+            "fallback_reason": "none",
+            "marker_seen": false,
+            "schema_mismatch_arguments": 0,
+            "structured_call_count": 0
+          }
+        },
+        "schema_version": 20,
+        "server_instance_id": "serve-782455-1792765822643165",
+        "speculative": {
+          "accepted_per_position": [
+            1,
+            1,
+            1,
+            1,
+            1,
+            1,
+            1
+          ],
+          "accepted_tokens": 7,
+          "backend": "mtp",
+          "draft_window": 7,
+          "drafted_tokens": 7,
+          "fallback_steps": 0,
+          "rounds": 1
+        },
+        "timestamp_unix_ms": 1792765987824,
+        "timings_seconds": {
+          "decode": 0.040076533,
+          "prefill": 1.8563236410000001,
+          "prepare": 0.005445745,
+          "total": 1.914810798,
+          "ttft": 1.8746405640000001,
+          "vision": 0.0
+        }
+      }
+    ]
+  },
+  "pipeline": {
+    "state": "EXECUTION_COMPLETE_REVIEW_REQUIRED",
+    "steps": [
+      {
+        "name": "build",
+        "command": [
+          "systemd-run",
+          "--user",
+          "--wait",
+          "--pipe",
+          "--unit=ninfer-nonnv-build-20261023",
+          "--property=MemoryMax=8G",
+          "--property=MemorySwapMax=0",
+          "--property=SendSIGKILL=no",
+          "--property=TimeoutStopSec=90",
+          "--working-directory=/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada",
+          "cmake",
+          "--build",
+          "build",
+          "-j2",
+          "--target",
+          "ninfer-serve",
+          "ninfer_bench",
+          "ninfer_speculative_round_test"
+        ],
+        "state": "PASS",
+        "returncode": 0
+      },
+      {
+        "name": "speculative-oracle",
+        "command": [
+          "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/tests/ninfer_speculative_round_test"
+        ],
+        "state": "PASS",
+        "returncode": 0
+      },
+      {
+        "name": "host-lifecycle",
+        "command": [
+          "/usr/bin/python3",
+          "-u",
+          "-m",
+          "tools.bench.host_decode_overlap",
+          "--output",
+          "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-non-nvfp4-closeout-20261023/host-lifecycle"
+        ],
+        "state": "PASS",
+        "returncode": 0
+      },
+      {
+        "name": "host-pairs",
+        "command": [
+          "/usr/bin/python3",
+          "-u",
+          "-m",
+          "tools.bench.sm89_attention_gdn_pairs",
+          "--candidate",
+          "host",
+          "--output",
+          "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-non-nvfp4-closeout-20261023/host-pairs"
+        ],
+        "state": "PASS",
+        "returncode": 0
+      },
+      {
+        "name": "s4-long213",
+        "command": [
+          "/usr/bin/python3",
+          "-u",
+          "-m",
+          "tools.bench.local_long_quality",
+          "--backend",
+          "mtp",
+          "--draft-tokens",
+          "7",
+          "--original",
+          "--original-causal-prefill",
+          "--original-content-anchors",
+          "--case",
+          "213k",
+          "--prefill-chunk",
+          "1024",
+          "--large-prefill",
+          "1",
+          "--silu-mmq",
+          "1",
+          "--host-pages",
+          "128",
+          "--output",
+          "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-non-nvfp4-closeout-20261023/s4-long213"
+        ],
+        "state": "PASS",
+        "returncode": 0
+      }
+    ]
+  },
+  "completion_audit": [
+    {
+      "task": "5.5",
+      "state": "COMPLETE",
+      "evidence": "s4_long213: frozen original six requests exact, real cold prefill, explicit S4 flags, 200W, drained resources, exit0",
+      "limits": "No positive S4 speedup; default0; this combination has no new256K qualification"
+    },
+    {
+      "task": "6.2",
+      "state": "COMPLETE_NOT_ADOPTED",
+      "evidence": "Owned CPU previous-step publication and borrowed post-submit callback; build, three real backend lifecycle pairs, full-ID/work matched three performance pairs",
+      "limits": "C1 only; no GPU lookahead; no stable speedup, default0"
+    },
+    {
+      "task": "12.2",
+      "state": "COMPLETE_COMPARISON",
+      "evidence": "Six natural Pi stops under identical model sampling/cwd/seed/xhigh/budgets; six original artifacts and actual renders",
+      "limits": "Five core scenes pass, AR emperor fails; DFlash2 common capacity rejected; one mixed GSQ/seed"
+    },
+    {
+      "task": "12.3",
+      "state": "COMPLETE_CONDITIONAL_DIAGNOSIS",
+      "evidence": "No established additional MTP defect in creative comparison; independent native sampling oracle PASS; no fabricated mathematical fix",
+      "limits": "Does not prove all quantizations or full-model distributional equivalence; MTP7 cosmetic clipping retained"
+    },
+    {
+      "task": "12.9",
+      "state": "COMPLETE_BOUNDED_DIAGNOSIS",
+      "evidence": "Same-input greedy repeats old prefix before32K/no reclaim; official sampling with fixed weights naturally finishes; harness model defaults and actual request parameters checked",
+      "limits": "Intrinsic model versus weight quantization remains unresolved; no all-seed convergence promise"
+    }
+  ],
+  "defaults": {
+    "NINFER_HOST_DECODE_OVERLAP": 0,
+    "NINFER_SM89_ATTN_SPLIT_VECTOR": 0,
+    "NINFER_SM89_GDN_PRENORM": 0,
+    "power_w": 200
+  }
+}

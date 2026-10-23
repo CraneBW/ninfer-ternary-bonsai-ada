@@ -20,6 +20,8 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <deque>
 #include <exception>
 #include <future>
@@ -110,6 +112,17 @@ public:
         }
         queue_cv_.notify_all();
         if (worker_.joinable()) { worker_.join(); }
+        if (host_decode_overlap_) {
+            std::fprintf(stderr,
+                         "HOST_DECODE_OVERLAP scheduled=%llu processed=%llu overlapped=%llu "
+                         "barrier=%llu failures=%llu pending=%u\n",
+                         static_cast<unsigned long long>(publication_scheduled_),
+                         static_cast<unsigned long long>(publication_processed_),
+                         static_cast<unsigned long long>(publication_overlapped_),
+                         static_cast<unsigned long long>(publication_barriers_),
+                         static_cast<unsigned long long>(publication_failures_),
+                         deferred_publication_ ? 1U : 0U);
+        }
     }
 
     EngineCore(const EngineCore&)            = delete;
@@ -676,6 +689,42 @@ private:
         Clock::time_point started;
     };
 
+    // Adapted from DeepInfer 774ce244's WorkerStepState / prev-step post processing.
+    // Our accepted-prefix, budget and model-state commit stays synchronous. Only the previous
+    // CPU output preview/publication is owned here; no spans into reusable GPU ingress/egress.
+    // This bounded C1 candidate leaves compact multi-lane scheduling and TP unchanged.
+    struct DeferredPublication {
+        std::shared_ptr<Request> request;
+        std::optional<GenerationTimingObservation> timing;
+    };
+
+    void flush_deferred_publication(bool overlapped = false) {
+        if (!deferred_publication_) { return; }
+        auto step = std::move(*deferred_publication_);
+        deferred_publication_.reset();
+        EnginePhaseScope phase(*this, EngineHostPhase::CommitOutput);
+        try {
+            append_output(step.request, step.request->output.commit_preview(),
+                          std::move(step.timing));
+            ++publication_processed_;
+            if (overlapped) { ++publication_overlapped_; }
+            else { ++publication_barriers_; }
+        } catch (...) {
+            ++publication_failures_;
+            throw;
+        }
+    }
+
+    bool can_overlap_deferred_publication() const {
+        if (!deferred_publication_ || max_concurrency_ != 1 || materializing_ ||
+            instance_.program->has_context_transaction()) { return false; }
+        const auto& request = deferred_publication_->request;
+        if (slots_[0] != request || !request->is_decode_ready() ||
+            request->cancelled.load(std::memory_order_acquire)) { return false; }
+        std::lock_guard lock(queue_mutex_);
+        return !stopping_ && pending_.empty();
+    }
+
     [[nodiscard]] std::optional<GenerationTimingObservation>
     record_committed_output(const std::shared_ptr<Request>& request,
                             std::uint32_t accepted_tokens) {
@@ -1079,6 +1128,8 @@ private:
     void commit_pending(PendingBatch&& pending, std::span<const std::uint32_t> lane_indices,
                         bool decode_round,
                         const std::array<bool, kMaximumConcurrency>& cancelled_at_unit_start) {
+        // A backend that did not use the optional host-work window still obeys output order.
+        flush_deferred_publication();
         EnginePhaseScope phase(*this, EngineHostPhase::CommitOutput);
         const std::size_t row_count = lane_indices.size();
         if (row_count == 0 || row_count != pending.row_count() || pending.row_stride() == 0 ||
@@ -1260,9 +1311,22 @@ private:
                     request->budget->commit(accepted);
                     if (decode_round) { Scheduling::consume_service_work(*request, accepted); }
                 }
-                auto published = request->output.commit_preview();
-                auto timing    = record_committed_output(request, accepted);
-                append_output(request, std::move(published), std::move(timing));
+                const bool defer_publication = host_decode_overlap_ && max_concurrency_ == 1 &&
+                    decode_round && !decisions[row].terminal && !committed.captures[row] &&
+                    continuations[row] == ContinuationAction::Decode &&
+                    tp::Lockstep::instance() == nullptr;
+                if (defer_publication) {
+                    if (deferred_publication_) {
+                        throw std::logic_error("more than one CPU publication step is pending");
+                    }
+                    deferred_publication_.emplace(
+                        DeferredPublication{request, record_committed_output(request, accepted)});
+                    ++publication_scheduled_;
+                } else {
+                    auto published = request->output.commit_preview();
+                    auto timing    = record_committed_output(request, accepted);
+                    append_output(request, std::move(published), std::move(timing));
+                }
                 if (decisions[row].terminal) {
                     if (cancelled[row]) {
                         terminal_requests[terminal_count] = request;
@@ -1951,8 +2015,14 @@ private:
         nvtx::ScopedRange decode_range(nvtx::Name::Decode, nvtx::Category::Decode,
                                        static_cast<std::uint64_t>(membership.size));
         ProgramCallScope program_call(*this);
+        const DecodeHostWork host_work = deferred_publication_
+            ? DecodeHostWork{this, [](void* owner) {
+                  static_cast<EngineCore*>(owner)->flush_deferred_publication(true);
+              }}
+            : DecodeHostWork{};
         auto pending = instance_.program->decode(
-            membership.sequence_span(), membership.budget_span(), &program_call.failed_timing());
+            membership.sequence_span(), membership.budget_span(), &program_call.failed_timing(),
+            host_work);
         program_call.finish(pending.execution_timing());
         if (auto* lockstep = tp::Lockstep::instance()) {
             std::uint64_t hash = 1469598103934665603ULL;
@@ -2076,6 +2146,8 @@ private:
     // The worker holds execution_mutex_ across the failing operation and this cleanup, so no
     // Program introspection can observe a partially cleared physical state.
     void fail_all_locked(std::exception_ptr error) noexcept {
+        // Only previously committed CPU output is pending here. Never read the failed GPU unit.
+        try { flush_deferred_publication(); } catch (...) {}
         std::deque<std::shared_ptr<Request>> pending;
         {
             std::lock_guard lock(queue_mutex_);
@@ -2125,12 +2197,20 @@ private:
 
             std::unique_lock execution_lock(execution_mutex_);
             try {
+                // Before cancellation, admission, control or terminal work can change the owner,
+                // publish the prior committed step. The fast path carries just one C1 decode step.
+                if (deferred_publication_ && !can_overlap_deferred_publication()) {
+                    flush_deferred_publication();
+                }
                 set_host_work_class(HostWorkClass::Control);
                 HostPhaseMeasurement boundary = begin_host_phase();
                 const bool have_pending       = expire_pending_requests();
                 (void)progress_context_transaction(have_pending);
                 (void)settle_terminal_requests(boundary);
                 const auto cancelled_at_boundary = snapshot_cancellations();
+                if (deferred_publication_ && cancelled_at_boundary[0]) {
+                    flush_deferred_publication();
+                }
                 cancel_active_requests(cancelled_at_boundary, boundary);
                 RoundMembership membership =
                     scheduler_.build_round_membership(slots_, max_concurrency_);
@@ -2173,10 +2253,14 @@ private:
                 // the GPU unit is in flight is observed at the next worker boundary; commit does
                 // not reinterpret an already-issued unit with a later atomic read.
                 const auto cancelled_at_unit_start = snapshot_cancellations();
+                if (deferred_publication_ && cancelled_at_unit_start[0]) {
+                    flush_deferred_publication();
+                }
                 cancel_active_requests(cancelled_at_unit_start, boundary);
                 const ControlMembership control_membership =
                     scheduler_.build_control_membership(slots_, max_concurrency_);
                 if (!control_membership.empty()) {
+                    flush_deferred_publication();
                     set_host_work_class(HostWorkClass::Control);
                     finish_engine_phase(boundary, EngineHostPhase::Boundary);
                     run_control_batch(control_membership);
@@ -2195,6 +2279,7 @@ private:
                 const ExecutionAction action = scheduler_.choose_execution(
                     !membership.empty(), prefill_runnable, previous_unit_was_decode);
                 if (action == ExecutionAction::Prefill) {
+                    flush_deferred_publication();
                     set_host_work_class(HostWorkClass::Prefill);
                     finish_engine_phase(boundary, EngineHostPhase::Boundary);
                     run_prefill_step(cancelled_at_unit_start);
@@ -2209,6 +2294,7 @@ private:
                     continue;
                 }
                 set_host_work_class(HostWorkClass::Control);
+                flush_deferred_publication();
                 finish_engine_phase(boundary, EngineHostPhase::Boundary);
             } catch (...) {
                 const std::exception_ptr error = std::current_exception();
@@ -2245,6 +2331,16 @@ private:
     std::uint64_t next_publication_order_ = 1;
     std::array<std::shared_ptr<Request>, kMaximumConcurrency> slots_{};
     std::optional<MaterializingRequest> materializing_;
+    const bool host_decode_overlap_ = [] {
+        const char* value = std::getenv("NINFER_HOST_DECODE_OVERLAP");
+        return value != nullptr && value[0] == '1' && value[1] == '\0';
+    }();
+    std::optional<DeferredPublication> deferred_publication_;
+    std::uint64_t publication_scheduled_ = 0;
+    std::uint64_t publication_processed_ = 0;
+    std::uint64_t publication_overlapped_ = 0;
+    std::uint64_t publication_barriers_ = 0;
+    std::uint64_t publication_failures_ = 0;
     Scheduling scheduler_;
     std::atomic<bool> admission_check_pending_{false};
     std::uint64_t worker_accounted_elapsed_ns_ = 0;

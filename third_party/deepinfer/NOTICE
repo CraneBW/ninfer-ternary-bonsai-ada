@@ -1,0 +1,12 @@
+DeepInfer
+https://github.com/deepseek-ai/DeepInfer
+Source revision: 774ce244b87cc0eb8d4b94ab9f5de2ab22049f01
+License: Apache-2.0 (see LICENSE). Upstream worker code is derived from vLLM and modified by DeepSeek.
+
+The previous-step ownership and submit-before-post-process ordering in
+deepinfer/worker/worker.py and deepinfer/worker/zos_status.py informed the bounded
+native C++ adaptation in src/runtime/engine/engine_core.h and
+src/runtime/contract/types.h. No Python framework, DeepSeek model mathematics,
+GPU sequence-length remapping, or foreign-device kernels were copied.
+NInfer retains synchronous accepted-prefix/state commit, existing stream completion,
+and a single owned CPU publication step for its C1 path.

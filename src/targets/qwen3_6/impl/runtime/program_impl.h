@@ -9270,7 +9270,8 @@ ProgramImplCore::progress_active_capture_transaction(runtime::CancellationFlagVi
 
 PendingBatch ProgramImplCore::decode(std::span<const SequenceHandle> members,
                                      std::span<const runtime::RoundBudget> budgets,
-                                     runtime::ExecutionTiming* failed_timing) {
+                                     runtime::ExecutionTiming* failed_timing,
+                                     runtime::DecodeHostWork host_work) {
     if (pending_transaction_ || members.empty() || members.size() > max_concurrency ||
         budgets.size() != members.size()) {
         throw std::invalid_argument("decode membership is invalid");
@@ -9290,7 +9291,7 @@ PendingBatch ProgramImplCore::decode(std::span<const SequenceHandle> members,
     }
     const auto lane_span = std::span<const std::uint32_t>(lanes.data(), members.size());
     try {
-        runtime::BatchedGeneratedRound round = decode_raw(lane_span, budgets, failed_timing);
+        runtime::BatchedGeneratedRound round = decode_raw(lane_span, budgets, failed_timing, host_work);
         if (failed_timing != nullptr) { *failed_timing += round.timing; }
         return wrap_pending(lane_span, std::move(round));
     } catch (...) {
@@ -13836,7 +13837,8 @@ ProgramImplCore::advance_prefill(SequenceState& sequence, RequestControl& reques
 runtime::BatchedGeneratedRound
 ProgramImplCore::decode_ordinary_batch(std::span<const std::uint32_t> lanes,
                                        std::span<const runtime::RoundBudget> budgets,
-                                       runtime::ExecutionTiming* failed_timing) {
+                                       runtime::ExecutionTiming* failed_timing,
+                                       runtime::DecodeHostWork host_work) {
     nvtx::ScopedRange round_range(nvtx::Name::DecodeOrdinaryRound, nvtx::Category::Decode,
                                   static_cast<std::uint64_t>(lanes.size()));
     runtime::ExecutionTimingRecorder timing(runtime::ExecutionTimingPhase::Submit, failed_timing);
@@ -13933,6 +13935,11 @@ ProgramImplCore::decode_ordinary_batch(std::span<const std::uint32_t> lanes,
         schedule::ordinary_decode_batch(schedule_state, static_cast<std::int32_t>(lanes.size()),
                                         envelope, executable);
         submit_range.reset();
+        if (host_work) {
+            timing.pause();
+            host_work.run();
+            timing.resume_submit();
+        }
         timing.begin_wait();
         {
             nvtx::ScopedRange wait_range(nvtx::Name::DecodeOrdinaryWait, nvtx::Category::Control,
@@ -13985,7 +13992,8 @@ ProgramImplCore::decode_ordinary_batch(std::span<const std::uint32_t> lanes,
 runtime::BatchedGeneratedRound
 ProgramImplCore::decode_mtp_batch(std::span<const std::uint32_t> lanes,
                                   std::span<const runtime::RoundBudget> budgets,
-                                  runtime::ExecutionTiming* failed_timing) {
+                                  runtime::ExecutionTiming* failed_timing,
+                                  runtime::DecodeHostWork host_work) {
     nvtx::ScopedRange round_range(nvtx::Name::DecodeMtpRound, nvtx::Category::Mtp,
                                   static_cast<std::uint64_t>(lanes.size()));
     runtime::ExecutionTimingRecorder timing(runtime::ExecutionTimingPhase::Submit, failed_timing);
@@ -14132,6 +14140,11 @@ ProgramImplCore::decode_mtp_batch(std::span<const std::uint32_t> lanes,
         schedule::mtp_decode_batch(schedule_state, static_cast<std::int32_t>(lanes.size()),
                                    verify_window, draft_window, envelopes, executable);
         submit_range.reset();
+        if (host_work) {
+            timing.pause();
+            host_work.run();
+            timing.resume_submit();
+        }
         timing.begin_wait();
         {
             nvtx::ScopedRange wait_range(nvtx::Name::DecodeMtpWait, nvtx::Category::Control,
@@ -14220,7 +14233,8 @@ ProgramImplCore::decode_mtp_batch(std::span<const std::uint32_t> lanes,
 runtime::BatchedGeneratedRound
 ProgramImplCore::decode_dflash_batch(std::span<const std::uint32_t> lanes,
                                      std::span<const runtime::RoundBudget> budgets,
-                                     runtime::ExecutionTiming* failed_timing) {
+                                     runtime::ExecutionTiming* failed_timing,
+                                     runtime::DecodeHostWork host_work) {
     nvtx::ScopedRange round_range(nvtx::Name::DecodeDFlashRound, nvtx::Category::DFlash,
                                   static_cast<std::uint64_t>(lanes.size()));
     runtime::ExecutionTimingRecorder timing(runtime::ExecutionTimingPhase::Submit, failed_timing);
@@ -14340,6 +14354,11 @@ ProgramImplCore::decode_dflash_batch(std::span<const std::uint32_t> lanes,
         schedule::dflash_decode_batch(schedule_state, static_cast<std::int32_t>(lanes.size()),
                                       draft_window, envelopes, target_envelope, executable);
         submit_range.reset();
+        if (host_work) {
+            timing.pause();
+            host_work.run();
+            timing.resume_submit();
+        }
         timing.begin_wait();
         {
             nvtx::ScopedRange wait_range(nvtx::Name::DecodeDFlashWait, nvtx::Category::Control,
@@ -14416,14 +14435,15 @@ ProgramImplCore::decode_dflash_batch(std::span<const std::uint32_t> lanes,
 runtime::BatchedGeneratedRound
 ProgramImplCore::decode_raw(std::span<const std::uint32_t> lanes,
                             std::span<const runtime::RoundBudget> budgets,
-                            runtime::ExecutionTiming* failed_timing) {
+                            runtime::ExecutionTiming* failed_timing,
+                            runtime::DecodeHostWork host_work) {
     if (speculative_backend == SpeculativeBackend::None) {
-        return decode_ordinary_batch(lanes, budgets, failed_timing);
+        return decode_ordinary_batch(lanes, budgets, failed_timing, host_work);
     }
     if (speculative_backend == SpeculativeBackend::Mtp) {
-        return decode_mtp_batch(lanes, budgets, failed_timing);
+        return decode_mtp_batch(lanes, budgets, failed_timing, host_work);
     }
-    return decode_dflash_batch(lanes, budgets, failed_timing);
+    return decode_dflash_batch(lanes, budgets, failed_timing, host_work);
 }
 
 runtime::ExecutionTiming ProgramImplCore::resolve_non_speculative_pending(

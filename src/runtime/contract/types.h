@@ -624,6 +624,19 @@ struct RoundBudget {
     std::uint32_t generated_tokens_remaining = 0;
 };
 
+// A synchronous, borrowed host-work window inside decode: Program invokes this at most once,
+// after submitting device work and before waiting for its outputs. The Engine owns the previous
+// committed step and every object the callback uses until decode returns. The callback must not
+// enter Program, inspect current egress, change membership, or mutate device-visible metadata.
+// On a callback exception Program drains its submitted work before propagating the failure.
+struct DecodeHostWork {
+    void* owner = nullptr;
+    void (*process)(void*) = nullptr;
+
+    explicit operator bool() const noexcept { return process != nullptr; }
+    void run() const { if (process != nullptr) { process(owner); } }
+};
+
 // Target-produced affine reservation curve for one Main KV physical-capacity axis. The byte
 // values come from complete target physical layout plans, not from a model geometry formula in
 // the common runtime.

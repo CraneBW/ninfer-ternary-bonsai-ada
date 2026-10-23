@@ -1,9 +1,14 @@
 # OpenSpec S5：本机 MTP host / GPU 轮次与验证宽度（2026-10-22）
 
+2026-10-23后续已实现有界C1 owned publication与GPU提交重叠，AR/MTP4/短容量DFlash2
+生命周期通过；同binary200W三对未获稳定收益，默认关闭。实现范围、实际可隐藏上限和
+完整结果见[非NVFP4收口报告](2026-10-23-non-nvfp4-closeout.md)。以下保留当时的trace判断和
+adaptive controller原始测量，不将旧未实现状态当作当前状态。
+
 ## 6.1：现有证据下的可迁移性判定
 
 来源固定于 DeepInfer `774ce244b87cc0eb8d4b94ab9f5de2ab22049f01` 的
-`deepinfer/worker/worker.py:113–187`、`engine/zos_status.py:10–19`、
+`deepinfer/worker/worker.py:113–187`、`worker/zos_status.py:10–19`、
 `engine/llm_engine.py:67–119`、`csrc/engine/mtp_varlen.hpp:160–207`；
 许可证 Apache-2.0。映射到本机：
 

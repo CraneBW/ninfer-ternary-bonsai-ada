@@ -2,7 +2,7 @@
 Uses isolated benchmark configuration, standard Pi system prompt/tools and fresh task directories.
 """
 from __future__ import annotations
-import argparse,json,math,os,shutil,subprocess,time
+import argparse,hashlib,json,math,os,shutil,subprocess,time
 from pathlib import Path
 from tools.bench.creative_spec_quality import CASES,PROFILES
 from tools.bench.sm89_profiles import LocalServer,dump,ROOT
@@ -24,6 +24,45 @@ def pi_completion(path, artifact):
                 complete=finished and stop == 'stop' and not errors
                          and artifact.is_file() and artifact.stat().st_size > 0)
 
+def reasoning_cycle(text, start=0):
+    """Locate three long exact repeated windows, with stable 1K..16K character periods.
+
+    Diagnostic evidence only: this is not a generation stop policy or a quality verdict.
+    Store positions and a digest; keep the actual text only in the original Pi receipt.
+    """
+    window, stride, minimum, maximum = 512, 128, 1024, 16384
+    for position in range(start, max(start, len(text)-window+1), stride):
+        sample=text[position:position+window]
+        previous=text.rfind(sample,max(0,position-maximum),max(0,position-minimum+window))
+        if previous<0:continue
+        first=text.rfind(sample,max(0,previous-maximum),max(0,previous-minimum+window))
+        if first<0:continue
+        periods=[previous-first,position-previous]
+        if abs(periods[0]-periods[1]) <= max(periods)*0.05:
+            return dict(starts=[first,previous,position],period_chars=periods,
+                        window_chars=window,window_sha256=hashlib.sha256(sample.encode()).hexdigest())
+    return None
+
+def wait_cycle_diagnostic(proc, path, timeout):
+    deadline=time.monotonic()+timeout
+    thinking='';next_scan=0
+    with path.open() as log:
+        while proc.poll() is None:
+            while True:
+                offset=log.tell();line=log.readline()
+                if not line or not line.endswith('\n'):
+                    log.seek(offset);break
+                event=json.loads(line).get('assistantMessageEvent',{})
+                if event.get('type')=='thinking_delta':thinking+=event['delta']
+            cycle=reasoning_cycle(thinking,next_scan)
+            next_scan=max(next_scan,((len(thinking)-512)//128+1)*128)
+            if cycle:
+                proc.terminate()
+                return proc.wait(timeout=40),dict(**cycle,observed_reasoning_chars=len(thinking))
+            if time.monotonic()>=deadline:raise subprocess.TimeoutExpired(proc.args,timeout)
+            time.sleep(1)
+    return proc.returncode,None
+
 def main():
     ap=argparse.ArgumentParser(__doc__)
     ap.add_argument('--output',type=Path,required=True)
@@ -33,6 +72,8 @@ def main():
                     help='Use registered model recommendations; greedy is a separate diagnostic control')
     ap.add_argument('--workspace',type=Path,help='Existing empty directory, for an exact saved Pi system-prompt path')
     ap.add_argument('--prefix-trace',action='store_true',help='Log prefix identity and checkpoint retirement diagnostics')
+    ap.add_argument('--cycle-diagnostic',action='store_true',
+                    help='AR/greedy/emperor only: preserve 128K budget, cancel after three proved reasoning repetitions; never quality PASS')
     ap.add_argument('--context',type=int,default=262144)
     ap.add_argument('--max-tokens',type=int,default=131072)
     ap.add_argument('--host-pages',type=int,default=128,help='KVMem Host pages, separate from context-cache --host-kv-mib')
@@ -40,6 +81,9 @@ def main():
     ap.add_argument('--cases',nargs='+',choices=['pelican','emperor'],default=['pelican','emperor'])
     args=ap.parse_args();out=args.output.resolve();out.mkdir(parents=True,exist_ok=False)
     if args.host_pages < 1:ap.error('--host-pages must be positive')
+    if args.cycle_diagnostic and (args.profiles!=['ar'] or args.cases!=['emperor'] or
+                                 args.sampling!='greedy' or args.thinking!='xhigh'):
+        ap.error('cycle diagnostic requires --profiles ar --cases emperor --sampling greedy --thinking xhigh')
     backing=out/'backing';backing.mkdir()
     pi=shutil.which('pi');assert pi,'local pi missing; pass the shell PATH into systemd-run'
     assert float(subprocess.check_output(['nvidia-smi','--query-gpu=power.limit','--format=csv,noheader,nounits'],text=True).strip())==200
@@ -59,6 +103,7 @@ def main():
                 environment={k:v for k,v in env.items() if k.startswith('NINFER_')},
                 kvmem_host_pages=args.host_pages,context_cache_host_mib=128,
                 power_w=200,context=args.context,max_tokens=args.max_tokens,thinking=args.thinking,sampling=args.sampling,
+                cycle_diagnostic=args.cycle_diagnostic,
                 sampling_source='https://huggingface.co/Qwen/Qwen3.8-27B#best-practices',
                 kv_working_set=32768,physical_kv=36864,tools=['read','write','edit','ls'],profiles=[],cases=CASES,
                 harness='Installed Pi; standard system prompt; external extensions/skills/context disabled equally; isolated config; no global settings changed')
@@ -97,7 +142,11 @@ def main():
                         event_start=len(read_events(log))
                         with (wd/'pi.jsonl').open('w') as fout,(wd/'pi.stderr').open('w') as ferr:
                             proc=subprocess.Popen(command,cwd=work,env=env,stdout=fout,stderr=ferr)
-                            try:code=proc.wait(timeout=args.timeout)
+                            try:
+                                if args.cycle_diagnostic:
+                                    code,cycle=wait_cycle_diagnostic(proc,wd/'pi.jsonl',args.timeout)
+                                    task['reasoning_cycle']=cycle
+                                else:code=proc.wait(timeout=args.timeout)
                             except subprocess.TimeoutExpired:
                                 proc.terminate();code=proc.wait(timeout=40);task['timeout']=True
                         for produced in list(work.iterdir()):
@@ -108,8 +157,10 @@ def main():
                         task['request_events']=[e for e in events if e.get('event') in ('request_done','request_error')]
                         errors=[e for e in events if e.get('event')=='request_error']
                         task['state']='COMPLETED_NOT_QUALITY_VERDICT' if code==0 and not errors and task['pi_completion']['complete'] and not task.get('timeout') else 'FAILED'
+                        if args.cycle_diagnostic and task.get('reasoning_cycle'):
+                            task['state']='DIAGNOSTIC_CYCLE_CANCELLED'
                         for e in events:
-                            if e.get('event')!='request_done':continue
+                            if e.get('event') not in ('request_start','request_done'):continue
                             request=e['request']
                             assert request['requested_output_tokens']==args.max_tokens, 'Pi output budget changed'
                             assert request['enable_thinking']==(args.thinking!='off'), 'thinking mode mismatch'
@@ -137,6 +188,7 @@ def main():
             row['server_exit']=process.returncode if process is not None else None
             dump(out/'results.json',result)
 
-    result['state']='COLLECTED_NOT_QUALITY_VERDICT';dump(out/'results.json',result)
+    result['state']='DIAGNOSTIC_ONLY' if args.cycle_diagnostic else 'COLLECTED_NOT_QUALITY_VERDICT'
+    dump(out/'results.json',result)
 
 if __name__=='__main__':main()

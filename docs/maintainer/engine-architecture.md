@@ -343,6 +343,29 @@ prefill，不创建另一条调度路径。
 
 普通 decode frontier 推进、输出发布和统计更新不扫描 cache catalog，也不重复运行 pressure planner。
 
+### 5.5 单请求 CPU 输出处理重叠候选
+
+`NINFER_HOST_DECODE_OVERLAP=1` 显式启用一个默认关闭的 C1 候选。它借鉴 DeepInfer
+`WorkerStepState` 的上一轮所有权及 submit-before-postprocess 顺序；来源版本和许可见
+`third_party/deepinfer/NOTICE`。它不改变 GPU 采样、accepted-prefix、预算或模型状态提交，
+也不实现 DeepInfer 的 GPU sequence-length lookahead。
+
+Engine 最多持有一份 `DeferredPublication`：强引用请求和已提交轮次的 timing observation。
+非终态、无 capture、继续 decode 的轮次可推迟 Frontend 的 `commit_preview` 与 response
+publication；下一轮 Program 真正提交 GPU 工作后，经同步借用的 `DecodeHostWork` 回调处理
+上一轮 CPU 输出，再等待当前 GPU 完成。回调不读取当前 egress、不重入 Program、不改变
+membership 或设备 metadata；现有 ingress/egress 和 stream 生命周期仍由 Program 持有。
+
+取消、admission/control/prefill、资源事务、终态和空闲边界先发布待处理的已提交输出。
+两处 cancellation snapshot 均执行这个屏障，避免检查间隙的取消丢失前轮输出。回调异常沿
+Program 的既有 drain/clear 路径传播，Engine 继续执行失败清理；没有异步逃逸的 callback。
+多请求和 TP 保持原同步发布路径。正常结束时 `scheduled == processed`，运行中差值最多为 1；
+退出计数中的 `pending`、`failures` 应为 0。
+
+回调时间归入 Engine commit-output，而不重复记入 Program submit/wait。整个 host submit
+并非该候选的可隐藏收益；只有上述 CPU 输出处理有机会与 GPU 重叠。是否采用须依据同条件
+整体测量，不能由 callback 被执行或计数相等推断性能提升。
+
 ---
 
 ## 6. 两类提交事务
