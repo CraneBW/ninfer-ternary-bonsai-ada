@@ -180,8 +180,8 @@ void verify_real_mixed_formats(const char* artifact_path, const char* oracle_pat
                     w.qtype, rows, k, 1, tokens));
             ninfer::Tensor x(input.p, ninfer::DType::BF16, {k, tokens});
             ninfer::Tensor y(output_data, ninfer::DType::BF16, {rows, tokens});
-            require(rows == 5120 && k == 17408 && (tokens == 512 || tokens == 1024),
-                    "R29 fusion fixture is only actual main down N5120 K17408 T512/1024");
+            require(rows == 5120 && k == 17408 && (tokens == 256 || tokens == 512 || tokens == 1024),
+                    "R29 fusion fixture is only actual main down N5120 K17408 T256/512/1024");
             const char* policy_raw = std::getenv("NINFER_GGUF_SILU_MMQ");
             const bool fused = policy_raw && policy_raw[0] == '1' && policy_raw[1] == '\0';
             std::vector<__nv_bfloat16> ups(ones.size(), __float2bfloat16(1.0f));
@@ -346,8 +346,8 @@ int main(int argc, char** argv) {
                 throw std::invalid_argument("unknown GGUF test option: " + name);
             }
         }
-        require(!options.timing && (options.tokens == 512 || options.tokens == 1024) && !options.entry.empty() && !options.dump_output.empty(),
-                "R29 fixture requires --entry --tokens 512|1024 --dump-output; timing disabled");
+        require(!options.timing && (options.tokens == 256 || options.tokens == 512 || options.tokens == 1024) && !options.entry.empty() && !options.dump_output.empty(),
+                "R29 fixture requires --entry --tokens 256|512|1024 --dump-output; timing disabled");
         require(options.pattern == "constant" || options.pattern == "random",
                 "--pattern must be constant or random");
         if (!options.dump_output.empty()) {

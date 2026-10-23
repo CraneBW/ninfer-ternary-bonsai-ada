@@ -41,6 +41,8 @@ flowchart LR
 
 2026-10-23继续收口：在已验chunk1024/MTP7上新增显式`NINFER_GGUF_SILU_MMQ=1`，复用原SiLU→MMQ融合并扩展T1024，保留BF16舍入边界。200W三对4K/32K prefill成对中位再改善 **0.69%/0.69%**（参考也是chunk1024，不能与上段百分比相加）；新binary原213K/256K各 **6/6**，history replay均0，300W终验后已恢复200W。全局默认仍0；213K冷首单臂156.16s、256K189.40s，仅作质量臂观测，Amber续问仍7.44–10.58s。[实现、理论、完整对照与2048负结果](docs/maintainer/2026-10-23-wide-silu-prefill.md)。
 
+2026-10-23 Pi xhigh补充：MTP4/7均完成鹈鹕SVG与秦始皇骑北极熊动画；修复MTP长生成越过32K工作集时的双KV回收失败。AR鹈鹕完成，秦始皇耗尽131072个思考token仍未交付，不能声称三臂质量全部通过。[实际作品、速度、失败与Host预算修正](docs/maintainer/2026-10-23-pi-xhigh-quality.md)。新增T256 SiLU融合仅为默认关闭的实验：短档prefill中位+0.92%，4352-token尾批档−0.64%，未纳入通用profile；[资格和完整三对](docs/maintainer/2026-10-23-silu-t256.md)。
+
 ## 运行环境与模型
 
 | 项目 | 本项目当前明确范围 |

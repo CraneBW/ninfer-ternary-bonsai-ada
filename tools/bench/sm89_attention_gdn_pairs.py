@@ -1,7 +1,8 @@
 """Same-binary public Engine pairs for SM89 candidates and the selected profile.
 
 Uses the existing frozen GSQ v3 model, C1/Graph/INT8, chunk1024 and MTP7.
-Runs exactly three alternating pairs at pp4096+tg128 and pp32768+tg128.
+Runs three alternating pairs at pp4096/32768+tg128, or pp256/4352+tg128
+for the isolated silu256 extension (existing wide fusion stays on in both arms).
 Complete Graph-prime, warmup and measured token IDs are captured outside timing;
 raw reports retain the actual speculative work. The final profile compares
 chunk512 against qualified chunk1024 with both S4 experiments disabled.
@@ -68,8 +69,8 @@ def capture_ids(path: Path, raw):
         require(len(ids) == int(count) and len(ids) > 0,
                 f"incomplete full token capture in {path}: {label}")
         records.append(dict(label=label, count=int(count), ids=ids))
-    expected_labels = ["decode-graph-prime", "pp4096+tg128", "pp4096+tg128",
-                       "pp32768+tg128", "pp32768+tg128"]
+    expected_labels = ["decode-graph-prime"] + [
+        f"pp{test["n_prompt"]}+tg128" for test in raw["tests"] for _ in range(2)]
     require([r["label"] for r in records] == expected_labels,
             f"missing Graph-prime/warmup/measured token capture: {path}")
     require(records[0]["count"] == raw["config"]["decode_graph_prime"]["output_tokens"],
@@ -82,7 +83,7 @@ def capture_ids(path: Path, raw):
     return records
 
 
-def qualify_report(raw, chunk=1024):
+def qualify_report(raw, chunk=1024, contexts=(4096, 32768)):
     config = raw["config"]
     require(config["draft_tokens"] == 7 and config["proposal_head"] == "optimized"
             and config["speculative_backend"] == "mtp", "MTP7 optimized-head profile changed")
@@ -92,7 +93,7 @@ def qualify_report(raw, chunk=1024):
             and config["repetitions"] == 1 and config["warmup"] == 1,
             "Graph/prime/warmup/repetition profile changed")
     require([(t["n_prompt"], t["n_gen"]) for t in raw["tests"]]
-            == [(4096, 128), (32768, 128)], "public Engine workload changed")
+            == [(tokens, 128) for tokens in contexts], "public Engine workload changed")
     for test in raw["tests"]:
         require(test["requested_output_tokens"] == 129 and len(test["reps"]) == 1,
                 "requested output/repetition count changed")
@@ -123,7 +124,7 @@ def compare(reference, candidate):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--candidate", choices=("both", "attention", "gdn", "final", "chunk2048", "silu"), default="both")
+    parser.add_argument("--candidate", choices=("both", "attention", "gdn", "final", "chunk2048", "silu", "silu256"), default="both")
     parser.add_argument("--screen", action="store_true", help="one preliminary 200W pair only")
     parser.add_argument("--release-acceptance", action="store_true",
                         help="final profile only: one acceptance pair at externally set 300W")
@@ -133,12 +134,13 @@ def main():
         parser.error("--release-acceptance is only valid for --candidate final")
     if args.screen and args.release_acceptance:
         parser.error("--screen and --release-acceptance are separate scopes")
+    contexts = (256, 4352) if args.candidate == "silu256" else (4096, 32768)
     expected_power = 300 if args.release_acceptance else 200
     out = args.output.resolve()
     out.mkdir(parents=True, exist_ok=False)
     result = dict(state="RUNNING", candidate=args.candidate, power_w=expected_power, adopted=False,
                   release_acceptance=args.release_acceptance,
-                  screening=args.screen,
+                  screening=args.screen, contexts=contexts,
                   schedule=[0, 1] if args.release_acceptance or args.screen else [0, 1, 1, 0, 0, 1],
                   arms=[], pairs=[])
     receipt = out / "comparison.json"
@@ -168,7 +170,7 @@ def main():
             report = out / f"{label}.json"
             capture = out / f"{label}.ids.tsv"
             command = [str(binary), "--weights", str(model), "--corpus", str(corpus),
-                       "-pg", "4096,128;32768,128", "--max-ctx", "36864",
+                       "-pg", ";".join(f"{tokens},128" for tokens in contexts), "--max-ctx", "36864",
                        "--prefill-chunk", str(chunk), "--kv-dtype", "int8", "--spec", "mtp",
                        "--draft-tokens", "7", "--lm-head-draft", "-r", "1", "--warmup", "1",
                        "--output", "json", "--output-file", str(report)]
@@ -178,7 +180,8 @@ def main():
                     del env[key]
             env.update(NINFER_R29_BUNDLE="0", NINFER_GGUF_LARGE_PREFILL=str(wide),
                        NINFER_SM89_SHARED_VECTOR="0",
-                       NINFER_GGUF_SILU_MMQ=str(int(bool(mode) and args.candidate == "silu")),
+                       NINFER_GGUF_SILU_MMQ=str(int(args.candidate == "silu256" or (bool(mode) and args.candidate == "silu"))),
+                       NINFER_GGUF_SILU_MMQ_T256=str(int(bool(mode) and args.candidate == "silu256")),
                        NINFER_SM89_ATTN_SPLIT_VECTOR=str(int(bool(mode)
                                                           and args.candidate in ("both", "attention"))),
                        NINFER_SM89_GDN_PRENORM=str(int(bool(mode)
@@ -201,7 +204,7 @@ def main():
             require(signature(binary) == identity and source_signatures() == sources,
                     "binary/production/tool source changed while an arm ran")
             row["power_after_w"] = power_limit(expected_power)
-            qualify_report(row["report"], chunk)
+            qualify_report(row["report"], chunk, contexts)
             row["output_ids"] = capture_ids(capture, row["report"])
             if index % 2 == 1:
                 arms = {arm["mode"]: arm for arm in result["arms"] if arm["pair"] == pair}
@@ -212,7 +215,7 @@ def main():
                      decode=test["decode_output_tok_s_mean"], work=test["speculative"])
                 for test in row["report"]["tests"]]), flush=True)
         medians = []
-        for index, tokens in enumerate((4096, 32768)):
+        for index, tokens in enumerate(contexts):
             medians.append(dict(tokens=tokens, **{
                 key: statistics.median(pair["contexts"][index][key] for pair in result["pairs"])
                 for key in ("prefill_speedup_pct", "decode_speedup_pct", "total_reduction_pct")

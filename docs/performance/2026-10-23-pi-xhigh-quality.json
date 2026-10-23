@@ -1,0 +1,804 @@
+{
+  "schema_version": 1,
+  "state": "MATRIX_EXECUTED_5_COMPLETED_1_AR_OUTPUT_LIMIT",
+  "hardware": "RTX 4070 Ti SUPER / SM89 / 66 SM / 16GiB",
+  "power_w": 200,
+  "model": "qwen3_8_gsq_rco_iq3_s_v3.ninfer",
+  "model_bytes": 15017456896,
+  "production_commit": "da62b0c",
+  "protocol": {
+    "pi_version": "0.99.2",
+    "context": 262144,
+    "max_tokens": 131072,
+    "thinking": "xhigh",
+    "kv_working_set": 32768,
+    "physical_kv": 36864,
+    "tools": [
+      "read",
+      "write",
+      "edit",
+      "ls"
+    ],
+    "harness": "Installed Pi; standard system prompt; external extensions/skills/context disabled equally; isolated config; no global settings changed"
+  },
+  "formal_host_policy": {
+    "context_cache_mib": 128,
+    "kvmem_host_pages": null,
+    "main_host_bytes": 8859418624,
+    "note": "default logical-capacity Host tier; subsequent harness adds explicit cap; not retroactive"
+  },
+  "scope": "Two non-blind creative examples, existing mixed GSQ only; no broad quantization equivalence claim; different output trajectories, not equal-work speedup",
+  "cases": [
+    {
+      "profile": "mtp4",
+      "case": "pelican",
+      "state": "COMPLETED_NOT_QUALITY_VERDICT",
+      "wall_s": 101.76702651799133,
+      "pi_completion": {
+        "stop_reason": "stop",
+        "errors": [],
+        "agent_end": true,
+        "artifact_present": true,
+        "complete": true
+      },
+      "total_output_tokens": 11125,
+      "reasoning_tokens": 7223,
+      "requests": [
+        {
+          "request_id": 1,
+          "result": {
+            "completion_tokens": 10914,
+            "computed_prefill_tokens": 1674,
+            "finish_reason": "stop_token",
+            "model_thinking_tokens": 0,
+            "prefix_cache_hit_tokens": 0,
+            "prefix_reuse_path": "root",
+            "prompt_tokens": 1674,
+            "thinking_budget": null,
+            "thinking_control_applied": false,
+            "thinking_control_tokens": 0,
+            "tool_call_count": 1,
+            "tool_call_parse": {
+              "empty_arguments_omitted": 0,
+              "fallback_reason": "none",
+              "marker_seen": true,
+              "schema_mismatch_arguments": 0,
+              "structured_call_count": 1
+            }
+          },
+          "timings_seconds": {
+            "decode": 98.13129929300031,
+            "prefill": 1.072302549,
+            "prepare": 0.000906201,
+            "total": 99.24263660700001,
+            "ttft": 1.081450287,
+            "vision": 0.0
+          },
+          "speculative": {
+            "accepted_per_position": [
+              2573,
+              2176,
+              1795,
+              1446
+            ],
+            "accepted_tokens": 7990,
+            "backend": "mtp",
+            "draft_window": 4,
+            "drafted_tokens": 11704,
+            "fallback_steps": 0,
+            "rounds": 2926
+          }
+        },
+        {
+          "request_id": 2,
+          "result": {
+            "completion_tokens": 211,
+            "computed_prefill_tokens": 63,
+            "finish_reason": "stop_token",
+            "model_thinking_tokens": 0,
+            "prefix_cache_hit_tokens": 12587,
+            "prefix_reuse_path": "private_endpoint",
+            "prompt_tokens": 12650,
+            "thinking_budget": null,
+            "thinking_control_applied": false,
+            "thinking_control_tokens": 0,
+            "tool_call_count": 0,
+            "tool_call_parse": {
+              "empty_arguments_omitted": 0,
+              "fallback_reason": "none",
+              "marker_seen": false,
+              "schema_mismatch_arguments": 0,
+              "structured_call_count": 0
+            }
+          },
+          "timings_seconds": {
+            "decode": 2.0822884839999998,
+            "prefill": 0.183835825,
+            "prepare": 0.003091009,
+            "total": 2.301372924,
+            "ttft": 0.204015034,
+            "vision": 0.0
+          },
+          "speculative": {
+            "accepted_per_position": [
+              49,
+              40,
+              34,
+              28
+            ],
+            "accepted_tokens": 151,
+            "backend": "mtp",
+            "draft_window": 4,
+            "drafted_tokens": 244,
+            "fallback_steps": 0,
+            "rounds": 61
+          }
+        }
+      ],
+      "first_request_decode_tok_s": 111.20814743740402,
+      "first_request_ttft_s": 1.081450287,
+      "artifact": {
+        "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-pi-xhigh-reclaim-20261023/mtp4/pelican/result.svg",
+        "bytes": 6894,
+        "sha256": "1a627d13ccfd18beaff310783716f091db6b791e327037e204b4605952087532"
+      },
+      "visual_review": "CORE_SCENE_PASS; simplifications in anatomy and pose; no blinded/statistical ranking"
+    },
+    {
+      "profile": "mtp4",
+      "case": "emperor",
+      "state": "COMPLETED_NOT_QUALITY_VERDICT",
+      "wall_s": 417.8184684430016,
+      "pi_completion": {
+        "stop_reason": "stop",
+        "errors": [],
+        "agent_end": true,
+        "artifact_present": true,
+        "complete": true
+      },
+      "total_output_tokens": 42347,
+      "reasoning_tokens": 35143,
+      "requests": [
+        {
+          "request_id": 3,
+          "result": {
+            "completion_tokens": 42072,
+            "computed_prefill_tokens": 1678,
+            "finish_reason": "stop_token",
+            "model_thinking_tokens": 0,
+            "prefix_cache_hit_tokens": 0,
+            "prefix_reuse_path": "root",
+            "prompt_tokens": 1678,
+            "thinking_budget": null,
+            "thinking_control_applied": false,
+            "thinking_control_tokens": 0,
+            "tool_call_count": 1,
+            "tool_call_parse": {
+              "empty_arguments_omitted": 0,
+              "fallback_reason": "none",
+              "marker_seen": true,
+              "schema_mismatch_arguments": 0,
+              "structured_call_count": 1
+            }
+          },
+          "timings_seconds": {
+            "decode": 383.07269690500067,
+            "prefill": 1.1106548609999998,
+            "prepare": 0.00063647,
+            "total": 384.319414933,
+            "ttft": 1.1339863929999998,
+            "vision": 0.0
+          },
+          "speculative": {
+            "accepted_per_position": [
+              9685,
+              8369,
+              7113,
+              6050
+            ],
+            "accepted_tokens": 31217,
+            "backend": "mtp",
+            "draft_window": 4,
+            "drafted_tokens": 43376,
+            "fallback_steps": 13,
+            "rounds": 10844
+          }
+        },
+        {
+          "request_id": 4,
+          "result": {
+            "completion_tokens": 85,
+            "computed_prefill_tokens": 42099,
+            "finish_reason": "stop_token",
+            "model_thinking_tokens": 0,
+            "prefix_cache_hit_tokens": 1671,
+            "prefix_reuse_path": "shared_stable_prefix",
+            "prompt_tokens": 43770,
+            "thinking_budget": null,
+            "thinking_control_applied": false,
+            "thinking_control_tokens": 0,
+            "tool_call_count": 1,
+            "tool_call_parse": {
+              "empty_arguments_omitted": 0,
+              "fallback_reason": "none",
+              "marker_seen": true,
+              "schema_mismatch_arguments": 0,
+              "structured_call_count": 1
+            }
+          },
+          "timings_seconds": {
+            "decode": 1.0066907920000001,
+            "prefill": 29.353093366000007,
+            "prepare": 0.013089132,
+            "total": 30.390411994,
+            "ttft": 29.38330401,
+            "vision": 0.0
+          },
+          "speculative": {
+            "accepted_per_position": [
+              21,
+              15,
+              13,
+              10
+            ],
+            "accepted_tokens": 59,
+            "backend": "mtp",
+            "draft_window": 4,
+            "drafted_tokens": 112,
+            "fallback_steps": 0,
+            "rounds": 28
+          }
+        },
+        {
+          "request_id": 5,
+          "result": {
+            "completion_tokens": 190,
+            "computed_prefill_tokens": 532,
+            "finish_reason": "stop_token",
+            "model_thinking_tokens": 0,
+            "prefix_cache_hit_tokens": 43854,
+            "prefix_reuse_path": "private_endpoint",
+            "prompt_tokens": 44386,
+            "thinking_budget": null,
+            "thinking_control_applied": false,
+            "thinking_control_tokens": 0,
+            "tool_call_count": 0,
+            "tool_call_parse": {
+              "empty_arguments_omitted": 0,
+              "fallback_reason": "none",
+              "marker_seen": false,
+              "schema_mismatch_arguments": 0,
+              "structured_call_count": 0
+            }
+          },
+          "timings_seconds": {
+            "decode": 2.296948994,
+            "prefill": 0.585067233,
+            "prepare": 0.0010598,
+            "total": 2.898134531,
+            "ttft": 0.6004008310000001,
+            "vision": 0.0
+          },
+          "speculative": {
+            "accepted_per_position": [
+              53,
+              36,
+              25,
+              15
+            ],
+            "accepted_tokens": 129,
+            "backend": "mtp",
+            "draft_window": 4,
+            "drafted_tokens": 252,
+            "fallback_steps": 0,
+            "rounds": 63
+          }
+        }
+      ],
+      "first_request_decode_tok_s": 109.82510719220825,
+      "first_request_ttft_s": 1.1339863929999998,
+      "artifact": {
+        "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-pi-xhigh-reclaim-20261023/mtp4/emperor/index.html",
+        "bytes": 15188,
+        "sha256": "1f3ac64dd5ae350ad19eab316a187efc68b8d1bb2a45e77eae467fc1c1d6e8be"
+      },
+      "visual_review": "CORE_SCENE_PASS; simplifications in anatomy and pose; no blinded/statistical ranking"
+    },
+    {
+      "profile": "mtp7",
+      "case": "pelican",
+      "state": "COMPLETED_NOT_QUALITY_VERDICT",
+      "wall_s": 122.39404434300377,
+      "pi_completion": {
+        "stop_reason": "stop",
+        "errors": [],
+        "agent_end": true,
+        "artifact_present": true,
+        "complete": true
+      },
+      "total_output_tokens": 13236,
+      "reasoning_tokens": 9737,
+      "requests": [
+        {
+          "request_id": 1,
+          "result": {
+            "completion_tokens": 13000,
+            "computed_prefill_tokens": 1674,
+            "finish_reason": "stop_token",
+            "model_thinking_tokens": 0,
+            "prefix_cache_hit_tokens": 0,
+            "prefix_reuse_path": "root",
+            "prompt_tokens": 1674,
+            "thinking_budget": null,
+            "thinking_control_applied": false,
+            "thinking_control_tokens": 0,
+            "tool_call_count": 1,
+            "tool_call_parse": {
+              "empty_arguments_omitted": 0,
+              "fallback_reason": "none",
+              "marker_seen": true,
+              "schema_mismatch_arguments": 0,
+              "structured_call_count": 1
+            }
+          },
+          "timings_seconds": {
+            "decode": 118.18236857999942,
+            "prefill": 1.122977531,
+            "prepare": 0.000678055,
+            "total": 119.339622493,
+            "ttft": 1.132301649,
+            "vision": 0.0
+          },
+          "speculative": {
+            "accepted_per_position": [
+              2380,
+              2005,
+              1671,
+              1356,
+              1129,
+              956,
+              807
+            ],
+            "accepted_tokens": 10304,
+            "backend": "mtp",
+            "draft_window": 7,
+            "drafted_tokens": 18886,
+            "fallback_steps": 0,
+            "rounds": 2698
+          }
+        },
+        {
+          "request_id": 2,
+          "result": {
+            "completion_tokens": 236,
+            "computed_prefill_tokens": 63,
+            "finish_reason": "stop_token",
+            "model_thinking_tokens": 0,
+            "prefix_cache_hit_tokens": 14673,
+            "prefix_reuse_path": "private_endpoint",
+            "prompt_tokens": 14736,
+            "thinking_budget": null,
+            "thinking_control_applied": false,
+            "thinking_control_tokens": 0,
+            "tool_call_count": 0,
+            "tool_call_parse": {
+              "empty_arguments_omitted": 0,
+              "fallback_reason": "none",
+              "marker_seen": false,
+              "schema_mismatch_arguments": 0,
+              "structured_call_count": 0
+            }
+          },
+          "timings_seconds": {
+            "decode": 2.655840323999999,
+            "prefill": 0.183487884,
+            "prepare": 0.003898168,
+            "total": 2.876519622,
+            "ttft": 0.204802528,
+            "vision": 0.0
+          },
+          "speculative": {
+            "accepted_per_position": [
+              50,
+              41,
+              31,
+              23,
+              17,
+              12,
+              5
+            ],
+            "accepted_tokens": 179,
+            "backend": "mtp",
+            "draft_window": 7,
+            "drafted_tokens": 420,
+            "fallback_steps": 0,
+            "rounds": 60
+          }
+        }
+      ],
+      "first_request_decode_tok_s": 109.99102620963957,
+      "first_request_ttft_s": 1.132301649,
+      "artifact": {
+        "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-pi-xhigh-reclaim-20261023/mtp7/pelican/result.svg",
+        "bytes": 6455,
+        "sha256": "783ea4d00f6609cc549d74508cbe6a9363c0070b0772b85df25e9d10c60a5c4e"
+      },
+      "visual_review": "CORE_SCENE_PASS; simplifications in anatomy and pose; no blinded/statistical ranking"
+    },
+    {
+      "profile": "mtp7",
+      "case": "emperor",
+      "state": "COMPLETED_NOT_QUALITY_VERDICT",
+      "wall_s": 363.5339239150053,
+      "pi_completion": {
+        "stop_reason": "stop",
+        "errors": [],
+        "agent_end": true,
+        "artifact_present": true,
+        "complete": true
+      },
+      "total_output_tokens": 34347,
+      "reasoning_tokens": 26899,
+      "requests": [
+        {
+          "request_id": 3,
+          "result": {
+            "completion_tokens": 34032,
+            "computed_prefill_tokens": 1678,
+            "finish_reason": "stop_token",
+            "model_thinking_tokens": 0,
+            "prefix_cache_hit_tokens": 0,
+            "prefix_reuse_path": "root",
+            "prompt_tokens": 1678,
+            "thinking_budget": null,
+            "thinking_control_applied": false,
+            "thinking_control_tokens": 0,
+            "tool_call_count": 1,
+            "tool_call_parse": {
+              "empty_arguments_omitted": 0,
+              "fallback_reason": "none",
+              "marker_seen": true,
+              "schema_mismatch_arguments": 0,
+              "structured_call_count": 1
+            }
+          },
+          "timings_seconds": {
+            "decode": 333.5430383580019,
+            "prefill": 1.116393121,
+            "prepare": 0.000672093,
+            "total": 334.759332171,
+            "ttft": 1.130396579,
+            "vision": 0.0
+          },
+          "speculative": {
+            "accepted_per_position": [
+              6378,
+              5256,
+              4319,
+              3482,
+              2843,
+              2376,
+              2012
+            ],
+            "accepted_tokens": 26666,
+            "backend": "mtp",
+            "draft_window": 7,
+            "drafted_tokens": 51548,
+            "fallback_steps": 4,
+            "rounds": 7364
+          }
+        },
+        {
+          "request_id": 4,
+          "result": {
+            "completion_tokens": 55,
+            "computed_prefill_tokens": 34059,
+            "finish_reason": "stop_token",
+            "model_thinking_tokens": 0,
+            "prefix_cache_hit_tokens": 1671,
+            "prefix_reuse_path": "shared_stable_prefix",
+            "prompt_tokens": 35730,
+            "thinking_budget": null,
+            "thinking_control_applied": false,
+            "thinking_control_tokens": 0,
+            "tool_call_count": 1,
+            "tool_call_parse": {
+              "empty_arguments_omitted": 0,
+              "fallback_reason": "none",
+              "marker_seen": true,
+              "schema_mismatch_arguments": 0,
+              "structured_call_count": 1
+            }
+          },
+          "timings_seconds": {
+            "decode": 0.453536269,
+            "prefill": 23.416154296999995,
+            "prepare": 0.011766023,
+            "total": 23.891435395,
+            "ttft": 23.437721515,
+            "vision": 0.0
+          },
+          "speculative": {
+            "accepted_per_position": [
+              10,
+              10,
+              8,
+              6,
+              5,
+              4,
+              4
+            ],
+            "accepted_tokens": 47,
+            "backend": "mtp",
+            "draft_window": 7,
+            "drafted_tokens": 70,
+            "fallback_steps": 0,
+            "rounds": 10
+          }
+        },
+        {
+          "request_id": 5,
+          "result": {
+            "completion_tokens": 260,
+            "computed_prefill_tokens": 1006,
+            "finish_reason": "stop_token",
+            "model_thinking_tokens": 0,
+            "prefix_cache_hit_tokens": 35784,
+            "prefix_reuse_path": "private_endpoint",
+            "prompt_tokens": 36790,
+            "thinking_budget": null,
+            "thinking_control_applied": false,
+            "thinking_control_tokens": 0,
+            "tool_call_count": 0,
+            "tool_call_parse": {
+              "empty_arguments_omitted": 0,
+              "fallback_reason": "none",
+              "marker_seen": false,
+              "schema_mismatch_arguments": 0,
+              "structured_call_count": 0
+            }
+          },
+          "timings_seconds": {
+            "decode": 3.8504647480000007,
+            "prefill": 0.823407605,
+            "prepare": 0.001157586,
+            "total": 4.6901835929999995,
+            "ttft": 0.8385369920000001,
+            "vision": 0.0
+          },
+          "speculative": {
+            "accepted_per_position": [
+              64,
+              45,
+              28,
+              19,
+              13,
+              7,
+              5
+            ],
+            "accepted_tokens": 181,
+            "backend": "mtp",
+            "draft_window": 7,
+            "drafted_tokens": 574,
+            "fallback_steps": 0,
+            "rounds": 82
+          }
+        }
+      ],
+      "first_request_decode_tok_s": 102.02881213630215,
+      "first_request_ttft_s": 1.130396579,
+      "artifact": {
+        "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-pi-xhigh-reclaim-20261023/mtp7/emperor/index.html",
+        "bytes": 15742,
+        "sha256": "42ccbc7925b9c02c0cc84191f9018c367baed3a6c024a691a66ec225fc925599"
+      },
+      "visual_review": "CORE_SCENE_PASS; simplifications in anatomy and pose; no blinded/statistical ranking"
+    },
+    {
+      "profile": "ar",
+      "case": "pelican",
+      "state": "COMPLETED_NOT_QUALITY_VERDICT",
+      "wall_s": 222.92133501799253,
+      "pi_completion": {
+        "stop_reason": "stop",
+        "errors": [],
+        "agent_end": true,
+        "artifact_present": true,
+        "complete": true
+      },
+      "total_output_tokens": 9814,
+      "reasoning_tokens": 6288,
+      "requests": [
+        {
+          "request_id": 1,
+          "result": {
+            "completion_tokens": 9589,
+            "computed_prefill_tokens": 1674,
+            "finish_reason": "stop_token",
+            "model_thinking_tokens": 0,
+            "prefix_cache_hit_tokens": 0,
+            "prefix_reuse_path": "root",
+            "prompt_tokens": 1674,
+            "thinking_budget": null,
+            "thinking_control_applied": false,
+            "thinking_control_tokens": 0,
+            "tool_call_count": 1,
+            "tool_call_parse": {
+              "empty_arguments_omitted": 0,
+              "fallback_reason": "none",
+              "marker_seen": true,
+              "schema_mismatch_arguments": 0,
+              "structured_call_count": 1
+            }
+          },
+          "timings_seconds": {
+            "decode": 216.27954472000047,
+            "prefill": 1.1007423099999998,
+            "prepare": 0.000632939,
+            "total": 217.415569814,
+            "ttft": 1.109715088,
+            "vision": 0.0
+          },
+          "speculative": {
+            "accepted_per_position": [],
+            "accepted_tokens": 0,
+            "backend": "none",
+            "draft_window": 0,
+            "drafted_tokens": 0,
+            "fallback_steps": 0,
+            "rounds": 0
+          }
+        },
+        {
+          "request_id": 2,
+          "result": {
+            "completion_tokens": 225,
+            "computed_prefill_tokens": 63,
+            "finish_reason": "stop_token",
+            "model_thinking_tokens": 0,
+            "prefix_cache_hit_tokens": 11262,
+            "prefix_reuse_path": "private_endpoint",
+            "prompt_tokens": 11325,
+            "thinking_budget": null,
+            "thinking_control_applied": false,
+            "thinking_control_tokens": 0,
+            "tool_call_count": 0,
+            "tool_call_parse": {
+              "empty_arguments_omitted": 0,
+              "fallback_reason": "none",
+              "marker_seen": false,
+              "schema_mismatch_arguments": 0,
+              "structured_call_count": 0
+            }
+          },
+          "timings_seconds": {
+            "decode": 5.127427346000002,
+            "prefill": 0.167709643,
+            "prepare": 0.007679749,
+            "total": 5.320043497,
+            "ttft": 0.191807179,
+            "vision": 0.0
+          },
+          "speculative": {
+            "accepted_per_position": [],
+            "accepted_tokens": 0,
+            "backend": "none",
+            "draft_window": 0,
+            "drafted_tokens": 0,
+            "fallback_steps": 0,
+            "rounds": 0
+          }
+        }
+      ],
+      "first_request_decode_tok_s": 44.33151555045487,
+      "first_request_ttft_s": 1.109715088,
+      "artifact": {
+        "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-pi-xhigh-reclaim-20261023/ar/pelican/result.svg",
+        "bytes": 6219,
+        "sha256": "f9fadc495f1d1cff1050699b7f34cd95e811006444a77e0f7d1591897d0a0305"
+      },
+      "visual_review": "CORE_SCENE_PASS; simplifications in anatomy and pose; no blinded/statistical ranking"
+    },
+    {
+      "profile": "ar",
+      "case": "emperor",
+      "state": "FAILED",
+      "wall_s": 3273.614898941989,
+      "pi_completion": {
+        "stop_reason": "length",
+        "errors": [],
+        "agent_end": true,
+        "artifact_present": false,
+        "complete": false
+      },
+      "total_output_tokens": 131072,
+      "reasoning_tokens": 131072,
+      "requests": [
+        {
+          "request_id": 3,
+          "result": {
+            "completion_tokens": 131072,
+            "computed_prefill_tokens": 1678,
+            "finish_reason": "output_limit",
+            "model_thinking_tokens": 0,
+            "prefix_cache_hit_tokens": 0,
+            "prefix_reuse_path": "root",
+            "prompt_tokens": 1678,
+            "thinking_budget": null,
+            "thinking_control_applied": false,
+            "thinking_control_tokens": 0,
+            "tool_call_count": 0,
+            "tool_call_parse": {
+              "empty_arguments_omitted": 0,
+              "fallback_reason": "none",
+              "marker_seen": false,
+              "schema_mismatch_arguments": 0,
+              "structured_call_count": 0
+            }
+          },
+          "timings_seconds": {
+            "decode": 3271.3415094510287,
+            "prefill": 1.092956044,
+            "prepare": 0.00064259,
+            "total": 3273.448358472,
+            "ttft": 1.115943215,
+            "vision": 0.0
+          },
+          "speculative": {
+            "accepted_per_position": [],
+            "accepted_tokens": 0,
+            "backend": "none",
+            "draft_window": 0,
+            "drafted_tokens": 0,
+            "fallback_steps": 0,
+            "rounds": 0
+          }
+        }
+      ],
+      "first_request_decode_tok_s": 40.06643746039077,
+      "first_request_ttft_s": 1.115943215,
+      "artifact": null,
+      "visual_review": "NOT_DELIVERED_OUTPUT_LIMIT"
+    }
+  ],
+  "recovery": {
+    "mtp4": {
+      "server_exit": 0,
+      "paired_mtp_reclaims": 13
+    },
+    "mtp7": {
+      "server_exit": 0,
+      "paired_mtp_reclaims": 4
+    },
+    "ar": {
+      "server_exit": null,
+      "paired_mtp_reclaims": null
+    }
+  },
+  "failures": [
+    {
+      "source": "tmp-nvcc/opsx-pi-xhigh-v2-20261023/mtp4/emperor",
+      "wall_s": 286.97,
+      "pi_exit": 0,
+      "http": 500,
+      "artifact": false,
+      "cause": "speculative Main KV claim exhausted before generation reclaim",
+      "state": "FAILED_NOT_MODEL_QUALITY_EVIDENCE"
+    }
+  ],
+  "deferred": {
+    "dflash2": "Common Graph/32K working-set static reserve gate fails; separate short 8K exploratory run exists",
+    "other_quantizations": "No additional complete Qwen3.8 artifacts; not downloaded",
+    "long_tool_reuse": "MTP4 emperor second model round computed 42099 tokens and TTFT29.38330401s; cause not established"
+  },
+  "raw_directory": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-pi-xhigh-reclaim-20261023",
+  "harness_exit": 1,
+  "resource_observation": {
+    "systemd_memory_peak_bytes": 21489479680,
+    "systemd_swap_peak_bytes": 561532928,
+    "observed_oom_kill": 0,
+    "power_after_w": 200,
+    "gpu_after_mib": 59
+  },
+  "quality_conclusion": "MTP4/7 delivered both examples without observed core-scene degradation; AR emperor used all 131072 tokens thinking and delivered no artifact. No complete three-arm emperor quality comparison; greedy and bounded-window effects unresolved."
+}

@@ -45,6 +45,16 @@ namespace {
 
 constexpr std::size_t kWorkspaceAlignmentBudget = 4 * 256;
 
+bool silu_t256_enabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("NINFER_GGUF_SILU_MMQ_T256");
+        if (!value || std::strcmp(value, "0") == 0) { return false; }
+        if (std::strcmp(value, "1") == 0) { return true; }
+        throw std::invalid_argument("NINFER_GGUF_SILU_MMQ_T256 must be 0 or 1");
+    }();
+    return enabled;
+}
+
 bool large_prefill_enabled() {
     static const bool enabled = [] {
         const char* value = std::getenv("NINFER_GGUF_LARGE_PREFILL");
@@ -120,7 +130,8 @@ std::size_t workspace_bytes(QType format, std::int32_t rows, std::int32_t k,
 } // namespace
 
 bool gguf_silu_mul_down_supported(const Weight& w, std::int32_t tokens) {
-    if ((tokens != 512 && tokens != 1024) || w.k != 17408 || w.n != 5120 ||
+    if ((tokens != 512 && tokens != 1024 && !(tokens == 256 && silu_t256_enabled())) ||
+        w.k != 17408 || w.n != 5120 ||
         w.input_columns != nullptr || matrix_batch_columns() < tokens) { return false; }
     return w.qtype == QType::GGUF_IQ3_S || w.qtype == QType::GGUF_IQ3_XXS ||
            w.qtype == QType::GGUF_IQ4_XS || w.qtype == QType::GGUF_IQ2_XS ||
@@ -161,7 +172,7 @@ void gguf_linear_dispatch_impl(const Tensor& x, const Weight& w, Tensor& out,
         (fp32_out || gdn_rows || !gguf_silu_mul_down_supported(w, x.ne[1]) ||
          !silu_up->data || silu_up->dtype != DType::BF16 ||
          !silu_up->is_contiguous() || silu_up->ne[0] != w.k || silu_up->ne[1] != x.ne[1])) {
-        throw std::invalid_argument("SiLU/down: expected supported main GGUF K17408 N5120 T512/1024 within MMQ cap");
+        throw std::invalid_argument("SiLU/down: expected supported main GGUF K17408 N5120 T256/512/1024 within MMQ cap");
     }
     const auto block = gguf_block_shape(w.qtype);
     const std::int64_t row_bytes =

@@ -31,9 +31,12 @@ def main():
     ap.add_argument('--thinking',choices=['off','xhigh'],default='xhigh')
     ap.add_argument('--context',type=int,default=262144)
     ap.add_argument('--max-tokens',type=int,default=131072)
+    ap.add_argument('--host-pages',type=int,default=128,help='KVMem Host pages, separate from context-cache --host-kv-mib')
     ap.add_argument('--timeout',type=int,default=7200)
     ap.add_argument('--cases',nargs='+',choices=['pelican','emperor'],default=['pelican','emperor'])
     args=ap.parse_args();out=args.output.resolve();out.mkdir(parents=True,exist_ok=False)
+    if args.host_pages < 1:ap.error('--host-pages must be positive')
+    backing=out/'backing';backing.mkdir()
     pi=shutil.which('pi');assert pi,'local pi missing; pass the shell PATH into systemd-run'
     assert float(subprocess.check_output(['nvidia-smi','--query-gpu=power.limit','--format=csv,noheader,nounits'],text=True).strip())==200
     cfg=out/'pi-agent';cfg.mkdir()
@@ -42,11 +45,14 @@ def main():
     env=dict(os.environ,**PROFILE)
     for key in list(env):
         if key.startswith('NINFER_') and key not in PROFILE:del env[key]
-    env.update(NINFER_R29_BUNDLE='0',NINFER_GGUF_LARGE_PREFILL='1',NINFER_GGUF_SILU_MMQ='1',
+    env.update(NINFER_KVMEM_HOST_PAGES=str(args.host_pages),NINFER_KVMEM_COLD_DIR=str(backing),
+               NINFER_R29_BUNDLE='0',NINFER_GGUF_LARGE_PREFILL='1',NINFER_GGUF_SILU_MMQ='1',
                NINFER_SM89_SHARED_VECTOR='0',NINFER_SM89_ATTN_SPLIT_VECTOR='0',NINFER_SM89_GDN_PRENORM='0',
                PI_CODING_AGENT_DIR=str(cfg),PI_OFFLINE='1',PI_TELEMETRY='0')
     os.environ.update({k:v for k,v in env.items() if k.startswith('NINFER_')})
     result=dict(state='RUNNING',pi=pi,pi_version=subprocess.check_output([pi,'--version'],env=env,text=True).strip(),
+                environment={k:v for k,v in env.items() if k.startswith('NINFER_')},
+                kvmem_host_pages=args.host_pages,context_cache_host_mib=128,
                 power_w=200,context=args.context,max_tokens=args.max_tokens,thinking=args.thinking,kv_working_set=32768,physical_kv=36864,tools=['read','write','edit','ls'],profiles=[],cases=CASES,
                 harness='Installed Pi; standard system prompt; external extensions/skills/context disabled equally; isolated config; no global settings changed')
     work=out/'workspace';work.mkdir()
@@ -62,49 +68,59 @@ def main():
         if backend!='none':cmd+=['--spec',backend,'--draft-tokens',str(width),'--lm-head-draft']
         row=dict(name=name,command=cmd,tasks=[]);result['profiles'].append(row)
         dump(out/'results.json',result)
-        with LocalServer(cmd,'127.0.0.1',18164,log) as server:
-            start=server.wait_until_ready();row['startup']=start
-            dump(out/'results.json',result)
-            if start['memory']['available_after_startup_bytes']<256*1024**2:row['state']='CAPACITY_REJECTED'
-            else:
-                for c in CASES:
-                    if c['id'] not in args.cases:continue
-                    wd=out/name/c['id'];wd.mkdir(parents=True)
-                    assert not list(work.iterdir()), 'benchmark workspace must start empty'
-                    # Same task framing for all profiles, original source sentence unchanged.
-                    prompt=c['prompt']+'\nSave the complete result in this working directory as '+('result.svg' if c['id']=='pelican' else 'index.html')+'. Use self-contained SVG/HTML with no external dependencies.'
-                    command=[pi,'--offline','--no-extensions','--no-skills','--no-context-files','--no-prompt-templates','--provider','ninfer-local','--model','qualification','--thinking',args.thinking,'--tools','read,write,edit,ls','--mode','json','--no-session','-p',prompt]
-                    task=dict(case=c['id'],command=command,cwd=str(work),state='RUNNING');row['tasks'].append(task);dump(out/'results.json',result)
-                    begin=time.monotonic()
-                    event_start=len(read_events(log))
-                    with (wd/'pi.jsonl').open('w') as fout,(wd/'pi.stderr').open('w') as ferr:
-                        proc=subprocess.Popen(command,cwd=work,env=env,stdout=fout,stderr=ferr)
-                        try:code=proc.wait(timeout=args.timeout)
-                        except subprocess.TimeoutExpired:
-                            proc.terminate();code=proc.wait(timeout=40);task['timeout']=True
-                    for produced in list(work.iterdir()):
-                        shutil.move(str(produced),str(wd/produced.name))
-                    task.update(exit_code=code,wall_s=time.monotonic()-begin,files=[str(p.relative_to(wd)) for p in wd.rglob('*') if p.is_file() and p.name not in ('pi.jsonl','pi.stderr')])
-                    task['pi_completion']=pi_completion(wd/'pi.jsonl',wd/('result.svg' if c['id']=='pelican' else 'index.html'))
-                    events=read_events(log)[event_start:]
-                    task['request_events']=[e for e in events if e.get('event') in ('request_done','request_error')]
-                    errors=[e for e in events if e.get('event')=='request_error']
-                    task['state']='COMPLETED_NOT_QUALITY_VERDICT' if code==0 and not errors and task['pi_completion']['complete'] and not task.get('timeout') else 'FAILED'
-                    for e in events:
-                        if e.get('event')!='request_done':continue
-                        request=e['request']
-                        assert request['enable_thinking']==(args.thinking!='off'), 'thinking mode mismatch'
-                        if args.thinking=='xhigh':
-                            assert request['requested_reasoning_effort']=='xhigh' and request['resolved_reasoning_effort']=='xhigh', 'xhigh was not transmitted/resolved'
-                        assert request['sampling']['temperature']==0, 'greedy comparison changed'
-                    dump(out/'results.json',result)
-                    print(name,c['id'],code,task['files'],round(task['wall_s'],2),flush=True)
-                    if task['state']=='FAILED':
-                        row['state']=result['state']='FAILED'
+        server=LocalServer(cmd,'127.0.0.1',18164,log)
+        try:
+            with server:
+                start=server.wait_until_ready();row['startup']=start
+                dump(out/'results.json',result)
+                if start['memory']['available_after_startup_bytes']<256*1024**2:row['state']='CAPACITY_REJECTED'
+                else:
+                    for c in CASES:
+                        if c['id'] not in args.cases:continue
+                        wd=out/name/c['id'];wd.mkdir(parents=True)
+                        assert not list(work.iterdir()), 'benchmark workspace must start empty'
+                        # Same task framing for all profiles, original source sentence unchanged.
+                        prompt=c['prompt']+'\nSave the complete result in this working directory as '+('result.svg' if c['id']=='pelican' else 'index.html')+'. Use self-contained SVG/HTML with no external dependencies.'
+                        command=[pi,'--offline','--no-extensions','--no-skills','--no-context-files','--no-prompt-templates','--provider','ninfer-local','--model','qualification','--thinking',args.thinking,'--tools','read,write,edit,ls','--mode','json','--no-session','-p',prompt]
+                        task=dict(case=c['id'],command=command,cwd=str(work),state='RUNNING');row['tasks'].append(task);dump(out/'results.json',result)
+                        begin=time.monotonic()
+                        event_start=len(read_events(log))
+                        with (wd/'pi.jsonl').open('w') as fout,(wd/'pi.stderr').open('w') as ferr:
+                            proc=subprocess.Popen(command,cwd=work,env=env,stdout=fout,stderr=ferr)
+                            try:code=proc.wait(timeout=args.timeout)
+                            except subprocess.TimeoutExpired:
+                                proc.terminate();code=proc.wait(timeout=40);task['timeout']=True
+                        for produced in list(work.iterdir()):
+                            shutil.move(str(produced),str(wd/produced.name))
+                        task.update(exit_code=code,wall_s=time.monotonic()-begin,files=[str(p.relative_to(wd)) for p in wd.rglob('*') if p.is_file() and p.name not in ('pi.jsonl','pi.stderr')])
+                        task['pi_completion']=pi_completion(wd/'pi.jsonl',wd/('result.svg' if c['id']=='pelican' else 'index.html'))
+                        events=read_events(log)[event_start:]
+                        task['request_events']=[e for e in events if e.get('event') in ('request_done','request_error')]
+                        errors=[e for e in events if e.get('event')=='request_error']
+                        task['state']='COMPLETED_NOT_QUALITY_VERDICT' if code==0 and not errors and task['pi_completion']['complete'] and not task.get('timeout') else 'FAILED'
+                        for e in events:
+                            if e.get('event')!='request_done':continue
+                            request=e['request']
+                            assert request['enable_thinking']==(args.thinking!='off'), 'thinking mode mismatch'
+                            if args.thinking=='xhigh':
+                                assert request['requested_reasoning_effort']=='xhigh' and request['resolved_reasoning_effort']=='xhigh', 'xhigh was not transmitted/resolved'
+                            assert request['sampling']['temperature']==0, 'greedy comparison changed'
                         dump(out/'results.json',result)
-                        raise RuntimeError(f"Pi task failed despite possible zero exit: {task['pi_completion']}; server errors={errors}")
-                row['state']='COLLECTED'
-        row['server_exit']=server.process.returncode;dump(out/'results.json',result)
+                        print(name,c['id'],code,task['files'],round(task['wall_s'],2),flush=True)
+                        if task['state']=='FAILED':
+                            row['state']=result['state']='FAILED'
+                            dump(out/'results.json',result)
+                            raise RuntimeError(f"Pi task failed despite possible zero exit: {task['pi_completion']}; server errors={errors}")
+                    row['state']='COLLECTED'
+        except BaseException as error:
+            row['state']=result['state']='FAILED'
+            row['error']=str(error)
+            raise
+        finally:
+            process=getattr(server,'process',None)
+            row['server_exit']=process.returncode if process is not None else None
+            dump(out/'results.json',result)
+
     result['state']='COLLECTED_NOT_QUALITY_VERDICT';dump(out/'results.json',result)
 
 if __name__=='__main__':main()

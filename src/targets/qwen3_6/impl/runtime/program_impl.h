@@ -7711,7 +7711,8 @@ std::uint32_t ProgramImplCore::kvmem_reclaim_generation(SequenceState& sequence,
         // frontier. Its state fold and these copies are ordered on device.stream;
         // no recurrent state is rewound, and no old ingress/graph is in flight.
         const auto selected = text_kv_addresses->kvmem_selected_blocks(sequence.kv->text);
-        const auto budget = text_kv_addresses->kvmem_budget_tokens() - reserve_tokens;
+        const auto budget = std::min(pool_pages * static_cast<std::uint32_t>(kPagedKVPageSize),
+                                     text_kv_addresses->kvmem_budget_tokens()) - reserve_tokens;
         const auto backend_window = backend_kv_addresses->kvmem_compact(
             *sequence.kv->backend, budget, device.stream, {}, false,
             backend_kv_addresses->kvmem_shared_prefix_pages(*sequence.kv->backend), selected);

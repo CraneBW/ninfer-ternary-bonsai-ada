@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Qualify the existing BF16-rounded SiLU/down fusion at T512 or T1024.
+"""Qualify the existing BF16-rounded SiLU/down fusion at T256, T512 or T1024.
 
 Reuses R29 represented-weight FP64 row sums and full quant/projected/residual
 captures. Supply the independent oracle for the fixed artifact explicitly.
@@ -33,7 +33,7 @@ def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--binary',type=Path,default=ROOT/'build/tests/ninfer_gguf_silu_down_test')
     p.add_argument('--oracle',type=Path,required=True)
-    p.add_argument('--tokens',type=int,choices=(512,1024),default=1024)
+    p.add_argument('--tokens',type=int,choices=(256,512,1024),default=1024)
     p.add_argument('--output-dir',type=Path,required=True)
     p.add_argument('--timeout-seconds',type=float,default=120)
     a=p.parse_args();a.binary=a.binary.resolve();a.oracle=a.oracle.resolve();a.output_dir=a.output_dir.resolve()
@@ -45,7 +45,7 @@ def main():
     watched=(a.binary,a.oracle,MODEL);frozen={str(x):sig(x) for x in watched}
     result=dict(status='running',power_w=200,tokens=a.tokens,binary=dict(path=str(a.binary),sha256=sha(a.binary)),
         oracle=dict(path=str(a.oracle),sha256=sha(a.oracle)),input_signatures=frozen,
-        fixed_flags={'NINFER_R28_BUNDLE':'0','NINFER_R27_BUNDLE':'1','NINFER_R26_BUNDLE':'0','NINFER_GGUF_LARGE_PREFILL':'1','NINFER_R29_BUNDLE':'0'},
+        fixed_flags={'NINFER_R28_BUNDLE':'0','NINFER_R27_BUNDLE':'1','NINFER_R26_BUNDLE':'0','NINFER_GGUF_LARGE_PREFILL':'1','NINFER_R29_BUNDLE':'0','NINFER_GGUF_SILU_MMQ_T256':'1'},
         cases=[],processes=[],performance_runs=0,engine_calls=0,random_independent_oracle=False)
     def save():(a.output_dir/'summary.json').write_text(json.dumps(result,indent=2)+'\n')
     save()
@@ -60,7 +60,7 @@ def main():
                     command=[str(a.binary),str(MODEL),str(a.oracle),'--entry',f'gguf_{suffix}_n5120_k17408',
                              '--tokens',str(a.tokens),'--pattern',pattern,'--dump-output',str(capture)]
                     env=dict(os.environ,NINFER_R29_BUNDLE='0',NINFER_R29_BUNDLE_TRACE='0',
-                        NINFER_GGUF_SILU_MMQ=flag,NINFER_GGUF_SILU_MMQ_TRACE='1',NINFER_GGUF_LARGE_PREFILL='1',
+                        NINFER_GGUF_SILU_MMQ=flag,NINFER_GGUF_SILU_MMQ_T256='1',NINFER_GGUF_SILU_MMQ_TRACE='1',NINFER_GGUF_LARGE_PREFILL='1',
                         NINFER_R28_BUNDLE='0',NINFER_R28_BUNDLE_TRACE='0',NINFER_R27_BUNDLE='1',
                         NINFER_R27_BUNDLE_TRACE='0',NINFER_R26_BUNDLE='0',NINFER_R26_BUNDLE_TRACE='0',
                         NINFER_GGUF_MMQ_BF16='1',NINFER_GGUF_IQ2_S_MMQ_BF16='1',
