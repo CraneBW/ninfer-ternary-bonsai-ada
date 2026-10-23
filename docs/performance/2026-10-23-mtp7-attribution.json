@@ -1,0 +1,711 @@
+{
+  "scope": "200W MTP7/Graph/chunk1024 measured 32K pp + tg128 trace; observer affected, not a clean benchmark or 213K critical-path fraction",
+  "phases": {
+    "prefill": {
+      "round_count": 32,
+      "host_range_ms": 21702.234545,
+      "kernel_ms": 21612.097754,
+      "groups": [
+        {
+          "name": "gguf_products",
+          "count": 41646,
+          "gpu_ms": 17680.261024,
+          "fraction": 0.8180724159795044
+        },
+        {
+          "name": "attention_producer",
+          "count": 519,
+          "gpu_ms": 2285.658443,
+          "fraction": 0.1057582872804176
+        },
+        {
+          "name": "other",
+          "count": 20366,
+          "gpu_ms": 885.178393,
+          "fraction": 0.04095754160820274
+        },
+        {
+          "name": "gdn_state",
+          "count": 4608,
+          "gpu_ms": 738.782449,
+          "fraction": 0.034183745484089575
+        },
+        {
+          "name": "external_l2norm",
+          "count": 3072,
+          "gpu_ms": 18.198276,
+          "fraction": 0.0008420411663477616
+        },
+        {
+          "name": "rope",
+          "count": 551,
+          "gpu_ms": 3.969185,
+          "fraction": 0.0001836557027077752
+        },
+        {
+          "name": "attention_split_reduce",
+          "count": 7,
+          "gpu_ms": 0.049984,
+          "fraction": 2.312778730178975e-06
+        }
+      ],
+      "kernels": [
+        {
+          "name": "void mul_mat_q<(ggml_type)21, (int)128, (bool)0, (ggml_prec)30, __nv_bfloat16>(const char *, const int *, const int *, const int *, T5 *, float *, const float *, uint3, int, int, int, int, int, uint3, uint3, int, int, int, uint3, uint3, int, int, int, uint3)",
+          "count": 4832,
+          "gpu_ms": 3535.269618,
+          "fraction": 0.16357827260640107
+        },
+        {
+          "name": "void mul_mat_q<(ggml_type)23, (int)128, (bool)0, (ggml_prec)30, __nv_bfloat16>(const char *, const int *, const int *, const int *, T5 *, float *, const float *, uint3, int, int, int, int, int, uint3, uint3, int, int, int, uint3, uint3, int, int, int, uint3)",
+          "count": 3712,
+          "gpu_ms": 3516.51106,
+          "fraction": 0.16271030697837552
+        },
+        {
+          "name": "void ninfer_r17_iq3s_i64_mul_mat_q<(ggml_type)21, (int)128, (bool)0, (ggml_prec)30, __nv_bfloat16>(const char *, const int *, const int *, const int *, T5 *, float *, const float *, uint3, int, int, int, int, int, uint3, uint3, int, int, int, uint3, uint3, int, int, int, uint3)",
+          "count": 1280,
+          "gpu_ms": 2442.628076,
+          "fraction": 0.1130213320244637
+        },
+        {
+          "name": "void ninfer::ops::prompt_i8_pipeline::causal_attention_prompt_i8_pipeline_kernel<ninfer::ops::CausalAttentionGeometry<(int)24, (int)4, (int)1>, ninfer::ops::PagedKVBatchMetadata<(bool)0>>(const __nv_bfloat16 *, const signed char *, const unsigned char *, const __half *, const __half *, T2, const int *, float, __nv_bfloat16 *, int)",
+          "count": 512,
+          "gpu_ms": 2284.551128,
+          "fraction": 0.10570705139334158
+        },
+        {
+          "name": "void ninfer_r19_iq3xxs_i64_mul_mat_q<(ggml_type)18, (int)128, (bool)0, (ggml_prec)30, __nv_bfloat16>(const char *, const int *, const int *, const int *, T5 *, float *, const float *, uint3, int, int, int, int, int, uint3, uint3, int, int, int, uint3, uint3, int, int, int, uint3)",
+          "count": 1248,
+          "gpu_ms": 2243.433422,
+          "fraction": 0.10380451946571369
+        },
+        {
+          "name": "void mul_mat_q<(ggml_type)18, (int)128, (bool)0, (ggml_prec)30, __nv_bfloat16>(const char *, const int *, const int *, const int *, T5 *, float *, const float *, uint3, int, int, int, int, int, uint3, uint3, int, int, int, uint3, uint3, int, int, int, uint3)",
+          "count": 2176,
+          "gpu_ms": 1330.139801,
+          "fraction": 0.0615460755425195
+        },
+        {
+          "name": "void mul_mat_q<(ggml_type)12, (int)128, (bool)0, (ggml_prec)30, __nv_bfloat16>(const char *, const int *, const int *, const int *, T5 *, float *, const float *, uint3, int, int, int, int, int, uint3, uint3, int, int, int, uint3, uint3, int, int, int, uint3)",
+          "count": 1312,
+          "gpu_ms": 1122.251797,
+          "fraction": 0.05192701836601178
+        },
+        {
+          "name": "void mul_mat_q<(ggml_type)22, (int)128, (bool)0, (ggml_prec)30, __nv_bfloat16>(const char *, const int *, const int *, const int *, T5 *, float *, const float *, uint3, int, int, int, int, int, uint3, uint3, int, int, int, uint3, uint3, int, int, int, uint3)",
+          "count": 512,
+          "gpu_ms": 1035.538316,
+          "fraction": 0.04791475255141954
+        },
+        {
+          "name": "void mul_mat_q<(ggml_type)10, (int)128, (bool)0, (ggml_prec)30, __nv_bfloat16>(const char *, const int *, const int *, const int *, T5 *, float *, const float *, uint3, int, int, int, int, int, uint3, uint3, int, int, int, uint3, uint3, int, int, int, uint3)",
+          "count": 672,
+          "gpu_ms": 759.70493,
+          "fraction": 0.03515183665405144
+        },
+        {
+          "name": "void mul_mat_q<(ggml_type)17, (int)128, (bool)0, (ggml_prec)30, __nv_bfloat16>(const char *, const int *, const int *, const int *, T5 *, float *, const float *, uint3, int, int, int, int, int, uint3, uint3, int, int, int, uint3, uint3, int, int, int, uint3)",
+          "count": 352,
+          "gpu_ms": 635.24699,
+          "fraction": 0.02939312033615189
+        },
+        {
+          "name": "void ninfer::ops::gguf::detail::vec::kernel<(ggml_type)29, (int)8, (bool)0, (int)0>(ninfer::ops::gguf::detail::VecArgs)",
+          "count": 4096,
+          "gpu_ms": 349.205998,
+          "fraction": 0.016157894618784446
+        },
+        {
+          "name": "ninfer::ops::silu_and_mul_kernel(const __nv_bfloat16 *, const __nv_bfloat16 *, __nv_bfloat16 *, long)",
+          "count": 2055,
+          "gpu_ms": 336.157401,
+          "fraction": 0.015554131062440872
+        },
+        {
+          "name": "void ninfer::ops::gguf::detail::<unnamed>::quantize_matrix_kernel<(mmq_q8_1_ds_layout)0>(const __nv_bfloat16 *, const int *, const int *, int, block_q8_1_mmq *, int, int, int)",
+          "count": 14464,
+          "gpu_ms": 326.288546,
+          "fraction": 0.015097495380318184
+        },
+        {
+          "name": "void ninfer::ops::detail::gated_delta_net::chunked::state_passing::state_passing_kernel<(int)16>(const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, const float *, const float *, __nv_bfloat16 *, __nv_bfloat16 *, float *, ninfer::ops::detail::gated_delta_net::head_map, int)",
+          "count": 1536,
+          "gpu_ms": 317.566889,
+          "fraction": 0.014693940986881954
+        },
+        {
+          "name": "void mul_mat_q<(ggml_type)16, (int)128, (bool)0, (ggml_prec)30, float>(const char *, const int *, const int *, const int *, T5 *, float *, const float *, uint3, int, int, int, int, int, uint3, uint3, int, int, int, uint3, uint3, int, int, int, uint3)",
+          "count": 256,
+          "gpu_ms": 249.345926,
+          "fraction": 0.011537331028120613
+        },
+        {
+          "name": "void ninfer::ops::detail::gated_delta_net::chunked::prepare_wy_wu::prepare_wy_wu_kernel<(int)64, (int)32, (int)8>(const __nv_bfloat16 *, const __nv_bfloat16 *, const float *, const float *, __nv_bfloat16 *, __nv_bfloat16 *, float *, ninfer::ops::detail::gated_delta_net::head_map)",
+          "count": 1536,
+          "gpu_ms": 246.597343,
+          "fraction": 0.011410153045155432
+        },
+        {
+          "name": "void ninfer::ops::detail::gated_delta_net::chunked::output::output_kernel<(bool)1>(const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, const float *, const __nv_bfloat16 *, __nv_bfloat16 *, ninfer::ops::detail::gated_delta_net::head_map, float, int)",
+          "count": 1536,
+          "gpu_ms": 174.618217,
+          "fraction": 0.008079651452052191
+        },
+        {
+          "name": "void ninfer::ops::causal_conv1d_prefill_pairs_kernel<ninfer::ops::detail::CausalConvSplitOutput3<__nv_bfloat162, (int)1024, (int)1024, (int)3072>>(const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, T1, int, int)",
+          "count": 1536,
+          "gpu_ms": 155.984479,
+          "fraction": 0.0072174612929987395
+        },
+        {
+          "name": "ninfer::ops::residual_add_bf16x8_kernel(const ninfer::ops::Bf16PairPack<(int)4> *, ninfer::ops::Bf16PairPack<(int)4> *, long)",
+          "count": 4110,
+          "gpu_ms": 122.915478,
+          "fraction": 0.0056873460132878875
+        },
+        {
+          "name": "void ninfer::ops::rmsnorm_warp_bf16x2_kernel<(ninfer::ops::RmsEpilogue)2, (int)512, (bool)0, (int)0>(const __nv_bfloat162 *, const __nv_bfloat162 *, const __nv_bfloat162 *, __nv_bfloat162 *, int, long, float)",
+          "count": 1536,
+          "gpu_ms": 63.440753,
+          "fraction": 0.0029354278202012246
+        },
+        {
+          "name": "void ninfer::ops::detail::bf16_gdn_gating_proj_gemm_mma_kernel<ninfer::ops::detail::Bf16Gdn27Geometry, (int)8, (bool)1, (int)8, (bool)0, (int)0>(const __nv_bfloat16 *, const __nv_bfloat16 *, __nv_bfloat16 *, float, const __nv_bfloat16 *, const __nv_bfloat16 *, const float *, const float *, float *, float *, float *, int)",
+          "count": 3072,
+          "gpu_ms": 58.498607,
+          "fraction": 0.0027067528412031633
+        },
+        {
+          "name": "void ninfer::ops::kv_cache_append_full_i8_page_kernel<ninfer::ops::KVCacheAppendFullGeometry<(int)4>, (bool)0, (bool)0, (bool)0, (bool)0, (bool)0, (bool)0, ninfer::ops::PagedKVBatchMetadata<(bool)0>>(const __nv_bfloat16 *, const __nv_bfloat16 *, const int *, T8, signed char *, unsigned char *, __half *, __half *, int)",
+          "count": 512,
+          "gpu_ms": 57.756659,
+          "fraction": 0.002672422624467831
+        },
+        {
+          "name": "void mul_mat_q<(ggml_type)14, (int)128, (bool)0, (ggml_prec)30, float>(const char *, const int *, const int *, const int *, T5 *, float *, const float *, uint3, int, int, int, int, int, uint3, uint3, int, int, int, uint3, uint3, int, int, int, uint3)",
+          "count": 96,
+          "gpu_ms": 50.94476,
+          "fraction": 0.0023572334615491485
+        },
+        {
+          "name": "void ninfer::ops::rmsnorm_cta_bf16x2_kernel<(ninfer::ops::RmsEpilogue)0, (int)256, (int)10, (bool)1, (int)5120>(const __nv_bfloat162 *, const __nv_bfloat162 *, const __nv_bfloat162 *, __nv_bfloat162 *, int, long, float)",
+          "count": 4256,
+          "gpu_ms": 49.523558,
+          "fraction": 0.0022914739033527694
+        },
+        {
+          "name": "void ninfer::ops::gguf::detail::<unnamed>::quantize_matrix_kernel<(mmq_q8_1_ds_layout)1>(const __nv_bfloat16 *, const int *, const int *, int, block_q8_1_mmq *, int, int, int)",
+          "count": 1312,
+          "gpu_ms": 31.671979,
+          "fraction": 0.0014654745393300889
+        },
+        {
+          "name": "ninfer::ops::gguf::detail::<unnamed>::store_plane_kernel(const float *, long, int, ninfer::ops::gguf::detail::VecStore)",
+          "count": 352,
+          "gpu_ms": 20.848359,
+          "fraction": 0.0009646615167720752
+        },
+        {
+          "name": "void ninfer::ops::l2norm_warp_bf16x2_kernel<(int)512>(const __nv_bfloat162 *, __nv_bfloat162 *, int, long, float)",
+          "count": 3072,
+          "gpu_ms": 18.198276,
+          "fraction": 0.0008420411663477616
+        },
+        {
+          "name": "ninfer::ops::sigmoid_gate_mul_bf16x8_kernel(const ninfer::ops::Bf16PairPack<(int)4> *, ninfer::ops::Bf16PairPack<(int)4> *, long)",
+          "count": 519,
+          "gpu_ms": 16.591541,
+          "fraction": 0.0007676969255300176
+        },
+        {
+          "name": "void ninfer::ops::rmsnorm_warp_bf16x2_kernel<(ninfer::ops::RmsEpilogue)0, (int)128, (bool)1, (int)256>(const __nv_bfloat162 *, const __nv_bfloat162 *, const __nv_bfloat162 *, __nv_bfloat162 *, int, long, float)",
+          "count": 1069,
+          "gpu_ms": 16.386128,
+          "fraction": 0.0007581923877318772
+        },
+        {
+          "name": "void ninfer::ops::gguf::detail::<unnamed>::quantize_matrix_kernel<(mmq_q8_1_ds_layout)2>(const __nv_bfloat16 *, const int *, const int *, int, block_q8_1_mmq *, int, int, int)",
+          "count": 672,
+          "gpu_ms": 12.381939,
+          "fraction": 0.0005729170366031836
+        },
+        {
+          "name": "ninfer::ops::gguf::detail::<unnamed>::quantize_vector_kernel(const __nv_bfloat16 *, const int *, signed char *, __half2 *, int)",
+          "count": 4164,
+          "gpu_ms": 7.35208,
+          "fraction": 0.00034018354366545774
+        },
+        {
+          "name": "void ninfer::ops::gguf::detail::vec::kernel<(ggml_type)12, (int)1, (bool)0, (int)5120>(ninfer::ops::gguf::detail::VecArgs)",
+          "count": 8,
+          "gpu_ms": 5.413856,
+          "fraction": 0.0002505011804787897
+        },
+        {
+          "name": "void ninfer::ops::gguf::detail::vec::kernel<(ggml_type)14, (int)1, (bool)0, (int)0>(ninfer::ops::gguf::detail::VecArgs)",
+          "count": 60,
+          "gpu_ms": 4.314988,
+          "fraction": 0.00019965613931213018
+        },
+        {
+          "name": "void ninfer::ops::rope_fixed_kernel<(ninfer::ops::RopeKernelMode)0, (int)24, (int)4>(const int *, __nv_bfloat16 *, __nv_bfloat16 *, int, long, long)",
+          "count": 518,
+          "gpu_ms": 3.857759,
+          "fraction": 0.0001784999792204808
+        },
+        {
+          "name": "void ninfer::ops::kv_cache_append_full_i8_page_kernel<ninfer::ops::KVCacheAppendFullGeometry<(int)4>, (bool)0, (bool)0, (bool)0, (bool)0, (bool)0, (bool)0, ninfer::ops::PagedKVDirectMetadata>(const __nv_bfloat16 *, const __nv_bfloat16 *, const int *, T8, signed char *, unsigned char *, __half *, __half *, int)",
+          "count": 32,
+          "gpu_ms": 3.591679,
+          "fraction": 0.0001661883562105972
+        },
+        {
+          "name": "ninfer::ops::causal_conv1d_prefill_state_kernel(const __nv_bfloat16 *, const __nv_bfloat16 *, __nv_bfloat16 *, int, int)",
+          "count": 1536,
+          "gpu_ms": 3.047573,
+          "fraction": 0.00014101236421790433
+        },
+        {
+          "name": "void ninfer::ops::gguf::detail::vec::slice_dequantize_kernel<(ggml_type)22, __nv_bfloat16>(const unsigned char *, long, const int *, int, int, T2 *, long)",
+          "count": 70,
+          "gpu_ms": 1.768583,
+          "fraction": 8.183300946215033e-05
+        },
+        {
+          "name": "ninfer::ops::mtp_pack_fc_input_kernel(const __nv_bfloat16 *, const __nv_bfloat16 *, __nv_bfloat16 *, int)",
+          "count": 38,
+          "gpu_ms": 1.157848,
+          "fraction": 5.357406824544386e-05
+        },
+        {
+          "name": "void ninfer::ops::causal_attention_small_t_i8_tiled_kernel<ninfer::ops::CausalAttentionGeometry<(int)24, (int)4, (int)1>, (int)1, (int)8, (int)2, (int)32, (bool)0, (bool)0, (bool)0, (bool)0, (bool)0, (bool)0, (bool)0, (bool)0, (bool)0, ninfer::ops::CausalAppendInput>(const __nv_bfloat16 *, T15, const int *, signed char *, unsigned char *, __half *, __half *, const int *, const int *, const int *, int, int, int, int, float, float *, float *, float *)",
+          "count": 6,
+          "gpu_ms": 0.942576,
+          "fraction": 4.3613350759786685e-05
+        },
+        {
+          "name": "void ninfer::ops::causal_attention_small_t_i8_tiled_kernel<ninfer::ops::CausalAttentionGeometry<(int)24, (int)4, (int)1>, (int)1, (int)8, (int)2, (int)32, (bool)0, (bool)0, (bool)0, (bool)0, (bool)0, (bool)0, (bool)0, (bool)0, (bool)0, ninfer::ops::CausalCachedInput>(const __nv_bfloat16 *, T15, const int *, signed char *, unsigned char *, __half *, __half *, const int *, const int *, const int *, int, int, int, int, float, float *, float *, float *)",
+          "count": 1,
+          "gpu_ms": 0.164739,
+          "fraction": 7.622536316240281e-06
+        },
+        {
+          "name": "void ninfer::ops::rope_fixed_kernel<(ninfer::ops::RopeKernelMode)0, (int)4, (int)0>(const int *, __nv_bfloat16 *, __nv_bfloat16 *, int, long, long)",
+          "count": 32,
+          "gpu_ms": 0.10941,
+          "fraction": 5.062442398945295e-06
+        },
+        {
+          "name": "void ninfer::ops::causal_attention_small_t_reduce_output_kernel<ninfer::ops::CausalAttentionGeometry<(int)24, (int)4, (int)1>, (int)256, (bool)1, (bool)0, (bool)0, (bool)0>(const float *, const float *, const float *, const int *, const int *, int, int, int, int, int, __nv_bfloat16 *)",
+          "count": 7,
+          "gpu_ms": 0.049984,
+          "fraction": 2.312778730178975e-06
+        },
+        {
+          "name": "ninfer::ops::set_i32_scalar_kernel(int *, int)",
+          "count": 35,
+          "gpu_ms": 0.034464,
+          "fraction": 1.5946624151105993e-06
+        },
+        {
+          "name": "ninfer::ops::fill_i32_positions_kernel(int *, int, int)",
+          "count": 32,
+          "gpu_ms": 0.031264,
+          "fraction": 1.4465971955088723e-06
+        },
+        {
+          "name": "ninfer::ops::argmax_tiled_atomic_kernel(const __nv_bfloat16 *, int *, int, int)",
+          "count": 7,
+          "gpu_ms": 0.028545,
+          "fraction": 1.32078802922853e-06
+        },
+        {
+          "name": "ninfer::ops::proposal_remap_token_ids_kernel(int *, int, const int *, int)",
+          "count": 7,
+          "gpu_ms": 0.011296,
+          "fraction": 5.226702251940962e-07
+        },
+        {
+          "name": "ninfer::ops::increment_i32_scalar_kernel(int *)",
+          "count": 6,
+          "gpu_ms": 0.0072,
+          "fraction": 3.3314674410388566e-07
+        },
+        {
+          "name": "ninfer::ops::offset_i32_positions_kernel(const int *, const int *, int *, int)",
+          "count": 6,
+          "gpu_ms": 0.007072,
+          "fraction": 3.2722413531981656e-07
+        },
+        {
+          "name": "ninfer::ops::sampling_partial_topk_kernel(const __nv_bfloat16 *, const ninfer::ops::SamplingConfig *, int, int, ninfer::ops::SamplingWorkspace)",
+          "count": 1,
+          "gpu_ms": 0.003776,
+          "fraction": 1.7471695913003782e-07
+        },
+        {
+          "name": "ninfer::ops::sampling_group_finalize_sample_kernel(int *, const ninfer::ops::SamplingConfig *, const int *, int, int, int, int, ninfer::ops::SamplingWorkspace)",
+          "count": 1,
+          "gpu_ms": 0.003072,
+          "fraction": 1.421426108176579e-07
+        },
+        {
+          "name": "void ninfer::ops::rope_fixed_kernel<(ninfer::ops::RopeKernelMode)0, (int)24, (int)0>(const int *, __nv_bfloat16 *, __nv_bfloat16 *, int, long, long)",
+          "count": 1,
+          "gpu_ms": 0.002016,
+          "fraction": 9.328108834908798e-08
+        }
+      ]
+    },
+    "decode.mtp_round": {
+      "round_count": 17,
+      "host_range_ms": 788.464731,
+      "kernel_ms": 762.487721,
+      "groups": [
+        {
+          "name": "gguf_products",
+          "count": 19958,
+          "gpu_ms": 629.149763,
+          "fraction": 0.8251277308110251
+        },
+        {
+          "name": "attention_producer",
+          "count": 391,
+          "gpu_ms": 87.093939,
+          "fraction": 0.11422339875293545
+        },
+        {
+          "name": "other",
+          "count": 9707,
+          "gpu_ms": 22.308,
+          "fraction": 0.02925686458365931
+        },
+        {
+          "name": "gdn_state",
+          "count": 816,
+          "gpu_ms": 18.548513,
+          "fraction": 0.024326310429856744
+        },
+        {
+          "name": "attention_split_reduce",
+          "count": 391,
+          "gpu_ms": 4.509193,
+          "fraction": 0.005913790971067979
+        },
+        {
+          "name": "rope",
+          "count": 391,
+          "gpu_ms": 0.878313,
+          "fraction": 0.0011519044514554221
+        }
+      ],
+      "kernels": [
+        {
+          "name": "void ninfer::ops::causal_attention_small_t_i8_tiled_kernel<ninfer::ops::CausalAttentionGeometry<(int)24, (int)4, (int)1>, (int)8, (int)6, (int)2, (int)32, (bool)0, (bool)0, (bool)0, (bool)0, (bool)0, (bool)0, (bool)0, (bool)0, (bool)1, ninfer::ops::CausalAppendInput>(const __nv_bfloat16 *, T15, const int *, signed char *, unsigned char *, __half *, __half *, const int *, const int *, const int *, int, int, int, int, float, float *, float *, float *)",
+          "count": 289,
+          "gpu_ms": 73.199073,
+          "fraction": 0.09600033021384223
+        },
+        {
+          "name": "void ninfer::ops::gguf::detail::vec::kernel<(ggml_type)12, (int)1, (bool)0, (int)5120>(ninfer::ops::gguf::detail::VecArgs)",
+          "count": 119,
+          "gpu_ms": 71.81729,
+          "fraction": 0.09418812660459878
+        },
+        {
+          "name": "void ninfer::ops::gguf::detail::vec::kernel<(ggml_type)14, (int)1, (bool)0, (int)0>(ninfer::ops::gguf::detail::VecArgs)",
+          "count": 918,
+          "gpu_ms": 63.224649,
+          "fraction": 0.082918907752483
+        },
+        {
+          "name": "void ninfer::ops::gguf::detail::r27::reduce_scatter_store_kernel<(ggml_type)21>(ninfer::ops::gguf::detail::VecArgs)",
+          "count": 680,
+          "gpu_ms": 57.753585,
+          "fraction": 0.07574362630293426
+        },
+        {
+          "name": "void ninfer::ops::gguf::detail::r27::reduce_scatter_store_kernel<(ggml_type)18>(ninfer::ops::gguf::detail::VecArgs)",
+          "count": 663,
+          "gpu_ms": 56.582561,
+          "fraction": 0.07420783239078547
+        },
+        {
+          "name": "void ninfer::ops::gguf::detail::vec::kernel<(ggml_type)21, (int)8, (bool)0, (int)17408>(ninfer::ops::gguf::detail::VecArgs)",
+          "count": 374,
+          "gpu_ms": 40.238408,
+          "fraction": 0.05277253245105045
+        },
+        {
+          "name": "void ninfer::ops::gguf::detail::vec::kernel<(ggml_type)21, (int)8, (bool)0, (int)5120>(ninfer::ops::gguf::detail::VecArgs)",
+          "count": 1649,
+          "gpu_ms": 39.489241,
+          "fraction": 0.05179000253041452
+        },
+        {
+          "name": "void ninfer::ops::gguf::detail::vec::kernel<(ggml_type)23, (int)8, (bool)0, (int)17408>(ninfer::ops::gguf::detail::VecArgs)",
+          "count": 357,
+          "gpu_ms": 37.867442,
+          "fraction": 0.04966301877010817
+        },
+        {
+          "name": "void ninfer::ops::gguf::detail::r27::reduce_scatter_store_kernel<(ggml_type)23>(ninfer::ops::gguf::detail::VecArgs)",
+          "count": 425,
+          "gpu_ms": 36.675104,
+          "fraction": 0.048099271620926205
+        },
+        {
+          "name": "void ninfer::ops::gguf::detail::vec::kernel<(ggml_type)12, (int)8, (bool)0, (int)5120>(ninfer::ops::gguf::detail::VecArgs)",
+          "count": 459,
+          "gpu_ms": 34.638593,
+          "fraction": 0.045428394511811424
+        },
+        {
+          "name": "void ninfer::ops::gguf::detail::vec::kernel<(ggml_type)18, (int)8, (bool)0, (int)5120>(ninfer::ops::gguf::detail::VecArgs)",
+          "count": 952,
+          "gpu_ms": 21.590447,
+          "fraction": 0.028315796314312056
+        },
+        {
+          "name": "void ninfer::ops::gguf::detail::vec::kernel<(ggml_type)21, (int)8, (bool)0, (int)6144>(ninfer::ops::gguf::detail::VecArgs)",
+          "count": 544,
+          "gpu_ms": 20.679556,
+          "fraction": 0.027121165928913366
+        },
+        {
+          "name": "void ninfer::ops::gguf::detail::vec::kernel<(ggml_type)23, (int)8, (bool)0, (int)5120>(ninfer::ops::gguf::detail::VecArgs)",
+          "count": 884,
+          "gpu_ms": 19.805271,
+          "fraction": 0.025974544185479415
+        },
+        {
+          "name": "void ninfer::ops::detail::gated_delta_net::recurrent_record_kernel<(bool)1, (int)2>(ninfer::ops::detail::gated_delta_net::RecordAccess<T1>)",
+          "count": 816,
+          "gpu_ms": 18.548513,
+          "fraction": 0.024326310429856744
+        },
+        {
+          "name": "ninfer::ops::gguf::detail::<unnamed>::quantize_vector_kernel(const __nv_bfloat16 *, const int *, signed char *, __half2 *, int)",
+          "count": 9911,
+          "gpu_ms": 15.799056,
+          "fraction": 0.020720407115906853
+        },
+        {
+          "name": "void ninfer::ops::gguf::detail::vec::kernel<(ggml_type)22, (int)8, (bool)0, (int)5120>(ninfer::ops::gguf::detail::VecArgs)",
+          "count": 204,
+          "gpu_ms": 14.386536,
+          "fraction": 0.018867892037831256
+        },
+        {
+          "name": "void ninfer::ops::causal_attention_small_t_i8_tiled_kernel<ninfer::ops::CausalAttentionGeometry<(int)24, (int)4, (int)1>, (int)1, (int)8, (int)2, (int)32, (bool)0, (bool)0, (bool)0, (bool)0, (bool)0, (bool)0, (bool)0, (bool)0, (bool)1, ninfer::ops::CausalAppendInput>(const __nv_bfloat16 *, T15, const int *, signed char *, unsigned char *, __half *, __half *, const int *, const int *, const int *, int, int, int, int, float, float *, float *, float *)",
+          "count": 102,
+          "gpu_ms": 13.894866,
+          "fraction": 0.018223068539093234
+        },
+        {
+          "name": "void ninfer::ops::gguf::detail::vec::kernel<(ggml_type)14, (int)8, (bool)0, (int)0>(ninfer::ops::gguf::detail::VecArgs)",
+          "count": 153,
+          "gpu_ms": 13.255018,
+          "fraction": 0.017383910107583226
+        },
+        {
+          "name": "void ninfer::ops::gguf::detail::vec::kernel<(ggml_type)18, (int)8, (bool)0, (int)17408>(ninfer::ops::gguf::detail::VecArgs)",
+          "count": 119,
+          "gpu_ms": 12.891396,
+          "fraction": 0.016907021116475133
+        },
+        {
+          "name": "void ninfer::ops::gguf::detail::vec::kernel<(ggml_type)23, (int)8, (bool)0, (int)6144>(ninfer::ops::gguf::detail::VecArgs)",
+          "count": 306,
+          "gpu_ms": 11.23006,
+          "fraction": 0.014728184717875608
+        },
+        {
+          "name": "void ninfer::ops::gguf::detail::vec::kernel<(ggml_type)10, (int)8, (bool)0, (int)5120>(ninfer::ops::gguf::detail::VecArgs)",
+          "count": 340,
+          "gpu_ms": 10.893981,
+          "fraction": 0.014287418275683944
+        },
+        {
+          "name": "void ninfer::ops::gguf::detail::vec::kernel<(ggml_type)12, (int)8, (bool)0, (int)17408>(ninfer::ops::gguf::detail::VecArgs)",
+          "count": 102,
+          "gpu_ms": 10.663388,
+          "fraction": 0.013984996356420015
+        },
+        {
+          "name": "void ninfer::ops::gguf::detail::vec::kernel<(ggml_type)17, (int)8, (bool)0, (int)5120>(ninfer::ops::gguf::detail::VecArgs)",
+          "count": 136,
+          "gpu_ms": 8.173869,
+          "fraction": 0.01072000082739693
+        },
+        {
+          "name": "void ninfer::ops::gguf::detail::vec::kernel<(ggml_type)22, (int)8, (bool)0, (int)17408>(ninfer::ops::gguf::detail::VecArgs)",
+          "count": 68,
+          "gpu_ms": 7.38835,
+          "fraction": 0.009689795384914796
+        },
+        {
+          "name": "void ninfer::ops::gguf::detail::vec::kernel<(ggml_type)16, (int)8, (bool)0, (int)5120>(ninfer::ops::gguf::detail::VecArgs)",
+          "count": 136,
+          "gpu_ms": 6.157327,
+          "fraction": 0.00807531299248293
+        },
+        {
+          "name": "void ninfer::ops::gguf::detail::vec::kernel<(ggml_type)12, (int)8, (bool)0, (int)6144>(ninfer::ops::gguf::detail::VecArgs)",
+          "count": 153,
+          "gpu_ms": 5.9907,
+          "fraction": 0.007856782260235244
+        },
+        {
+          "name": "void ninfer::ops::detail::<unnamed>::gdn_norm_gating_27_simt<(int)2, (int)512>(const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, const float *, const float *, __nv_bfloat16 *, float *, float *, int, float)",
+          "count": 816,
+          "gpu_ms": 5.9829,
+          "fraction": 0.007846552587303894
+        },
+        {
+          "name": "void ninfer::ops::gguf::detail::vec::kernel<(ggml_type)17, (int)8, (bool)0, (int)17408>(ninfer::ops::gguf::detail::VecArgs)",
+          "count": 51,
+          "gpu_ms": 5.013368,
+          "fraction": 0.0065750147339094
+        },
+        {
+          "name": "void ninfer::ops::causal_attention_small_t_reduce_output_kernel<ninfer::ops::CausalAttentionGeometry<(int)24, (int)4, (int)1>, (int)256, (bool)1, (bool)0, (bool)1, (bool)0>(const float *, const float *, const float *, const int *, const int *, int, int, int, int, int, __nv_bfloat16 *)",
+          "count": 391,
+          "gpu_ms": 4.509193,
+          "fraction": 0.005913790971067979
+        },
+        {
+          "name": "void ninfer::ops::rmsnorm_cta_bf16x2_kernel<(ninfer::ops::RmsEpilogue)0, (int)256, (int)10, (bool)1, (int)5120>(const __nv_bfloat162 *, const __nv_bfloat162 *, const __nv_bfloat162 *, __nv_bfloat162 *, int, long, float)",
+          "count": 1972,
+          "gpu_ms": 3.309058,
+          "fraction": 0.004339818083444258
+        },
+        {
+          "name": "ninfer::ops::residual_add_bf16x8_kernel(const ninfer::ops::Bf16PairPack<(int)4> *, ninfer::ops::Bf16PairPack<(int)4> *, long)",
+          "count": 2414,
+          "gpu_ms": 3.265362,
+          "fraction": 0.004282510931084227
+        },
+        {
+          "name": "void ninfer::ops::gguf::detail::vec::kernel<(ggml_type)18, (int)8, (bool)0, (int)6144>(ninfer::ops::gguf::detail::VecArgs)",
+          "count": 85,
+          "gpu_ms": 3.131294,
+          "fraction": 0.004106681214345745
+        },
+        {
+          "name": "void ninfer::ops::detail::<unnamed>::gdn_projected_conv_kernel<(int)10240, (int)2048, (int)2048, (int)6144, (int)0, ninfer::ops::detail::NoHistoryPublish>(const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, const int *, const int *, __nv_bfloat16 *, __nv_bfloat16 *, __nv_bfloat16 *, int, T6)",
+          "count": 816,
+          "gpu_ms": 2.749075,
+          "fraction": 0.003605402322275561
+        },
+        {
+          "name": "ninfer::ops::silu_and_mul_kernel(const __nv_bfloat16 *, const __nv_bfloat16 *, __nv_bfloat16 *, long)",
+          "count": 1207,
+          "gpu_ms": 2.570896,
+          "fraction": 0.0033717211821172395
+        },
+        {
+          "name": "void ninfer::ops::gguf::detail::vec::kernel<(ggml_type)10, (int)8, (bool)0, (int)17408>(ninfer::ops::gguf::detail::VecArgs)",
+          "count": 17,
+          "gpu_ms": 1.688511,
+          "fraction": 0.0022144763167930414
+        },
+        {
+          "name": "void ninfer::ops::gguf::detail::vec::kernel<(ggml_type)29, (int)8, (bool)0, (int)0>(ninfer::ops::gguf::detail::VecArgs)",
+          "count": 17,
+          "gpu_ms": 1.475638,
+          "fraction": 0.0019352941160346896
+        },
+        {
+          "name": "void ninfer::ops::rmsnorm_warp_bf16x2_kernel<(ninfer::ops::RmsEpilogue)2, (int)512, (bool)1, (int)0>(const __nv_bfloat162 *, const __nv_bfloat162 *, const __nv_bfloat162 *, __nv_bfloat162 *, int, long, float)",
+          "count": 816,
+          "gpu_ms": 1.351577,
+          "fraction": 0.001772588545068518
+        },
+        {
+          "name": "void ninfer::ops::rmsnorm_warp_bf16x2_kernel<(ninfer::ops::RmsEpilogue)0, (int)128, (bool)1, (int)256>(const __nv_bfloat162 *, const __nv_bfloat162 *, const __nv_bfloat162 *, __nv_bfloat162 *, int, long, float)",
+          "count": 782,
+          "gpu_ms": 0.996851,
+          "fraction": 0.0013073666270882807
+        },
+        {
+          "name": "void ninfer::ops::rope_fixed_kernel<(ninfer::ops::RopeKernelMode)0, (int)24, (int)4>(const int *, __nv_bfloat16 *, __nv_bfloat16 *, int, long, long)",
+          "count": 391,
+          "gpu_ms": 0.878313,
+          "fraction": 0.0011519044514554221
+        },
+        {
+          "name": "ninfer::ops::argmax_tiled_atomic_kernel(const __nv_bfloat16 *, int *, int, int)",
+          "count": 136,
+          "gpu_ms": 0.862516,
+          "fraction": 0.0011311867407763803
+        },
+        {
+          "name": "ninfer::ops::sigmoid_gate_mul_bf16x8_kernel(const ninfer::ops::Bf16PairPack<(int)4> *, ninfer::ops::Bf16PairPack<(int)4> *, long)",
+          "count": 391,
+          "gpu_ms": 0.678702,
+          "fraction": 0.0008901153176734238
+        },
+        {
+          "name": "void ninfer::ops::gguf::detail::vec::slice_dequantize_kernel<(ggml_type)22, __nv_bfloat16>(const unsigned char *, long, const int *, int, int, T2 *, long)",
+          "count": 136,
+          "gpu_ms": 0.649124,
+          "fraction": 0.0008513238733191351
+        },
+        {
+          "name": "ninfer::ops::proposal_remap_token_ids_kernel(int *, int, const int *, int)",
+          "count": 119,
+          "gpu_ms": 0.139042,
+          "fraction": 0.00018235310047701083
+        },
+        {
+          "name": "ninfer::ops::mtp_pack_fc_input_kernel(const __nv_bfloat16 *, const __nv_bfloat16 *, __nv_bfloat16 *, int)",
+          "count": 119,
+          "gpu_ms": 0.131457,
+          "fraction": 0.00017240539929953835
+        },
+        {
+          "name": "ninfer::ops::speculative_sampling_partial_topk_kernel(const __nv_bfloat16 *, const int *, const int *, const ninfer::ops::SamplingConfig *, int, int, int, int, ninfer::ops::SamplingWorkspace, unsigned long)",
+          "count": 17,
+          "gpu_ms": 0.091617,
+          "fraction": 0.00012015537755787676
+        },
+        {
+          "name": "void ninfer::ops::speculative_sampling_group_finalize_kernel<(bool)0>(const int *, const int *, const int *, const float *, const int *, int *, int *, int *, int *, int *, const ninfer::ops::SamplingConfig *, int, int, int, int, ninfer::ops::SamplingWorkspace, unsigned long)",
+          "count": 17,
+          "gpu_ms": 0.043296,
+          "fraction": 5.678255374816718e-05
+        },
+        {
+          "name": "ninfer::ops::speculative_select_accepted_hidden_kernel(const __nv_bfloat16 *, const int *, __nv_bfloat16 *, int, int)",
+          "count": 34,
+          "gpu_ms": 0.042785,
+          "fraction": 5.6112379021510826e-05
+        },
+        {
+          "name": "ninfer::ops::mtp_prepare_next_round_kernel(const int *, const int *, const int *, const int *, const int *, const int *, const int *, const int *, int *, int *, int *, int *, int *, int, int, int, int)",
+          "count": 17,
+          "gpu_ms": 0.033665,
+          "fraction": 4.415153067100998e-05
+        },
+        {
+          "name": "ninfer::ops::scatter_bf16x8_kernel(const uint4 *, const int *, uint4 *, int)",
+          "count": 17,
+          "gpu_ms": 0.031488,
+          "fraction": 4.129640272593977e-05
+        },
+        {
+          "name": "ninfer::ops::speculative_prepare_verify_inputs_kernel(const int *, const int *, const int *, const int *, int *, int *, int)",
+          "count": 17,
+          "gpu_ms": 0.027713,
+          "fraction": 3.634550332647259e-05
+        }
+      ]
+    }
+  },
+  "receipt": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-cold-prefill-goal-20261023/mtp7-attribution",
+  "power_w": 200,
+  "binary_commit": "8d5adba",
+  "clean_performance_reference": "2026-10-23-cold-prefill.json"
+}

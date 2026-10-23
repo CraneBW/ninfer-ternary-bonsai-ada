@@ -81,3 +81,20 @@ python3 -m tools.bench.layer_ready_pairs --bulk --output <新目录>
 256K 使用 `tools.bench.local_long_quality` 的 `--case 256k --passed-213k <已通过候选目录> --backend mtp --draft-tokens 7 --original --original-causal-prefill --original-content-anchors --prefill-chunk 1024 --large-prefill 1`。它验证前置 213K 的二进制、模型和相关配置，不跨档继承未验资格。
 
 可显式使用本轮已验宽批 profile；没有翻转全局默认，也没有把尚未确认稳定收益的异步 bulk 叠加为“更快整包”。NVFP4 按用户要求未做；未做 300W 发布终测，未推送或打 tag。下一步仍需按 OpenSpec 评估实际 attention/GDN 热点及最终相容 profile，保留条件任务未完成状态。
+
+
+## 后续小收益的实际预算
+
+提交主批次后，补一份当前 MTP7/chunk1024/32K 的 Nsight Systems CUDA+NVTX/node trace，仅捕获已 warmup 的正式一轮。它用于区分热点，受探针影响，不代替前述无 trace 的整体对照；也不是 213K 的关键路径测量。详见 [MTP7 归因](../performance/2026-10-23-mtp7-attribution.json)。
+
+| GPU kernel 时间和的分类 | prefill | MTP7 decode |
+| --- | ---: | ---: |
+| GGUF products | 17,680.261ms / 81.81% | 629.150ms / 82.51% |
+| attention producer | 2,285.658ms / 10.58% | 87.094ms / 11.42% |
+| GDN state | 738.782ms / 3.42% | 18.549ms / 2.43% |
+| split reducer | 0.050ms / 0.00023% | 4.509ms / 0.591% |
+| 外部 l2norm | 18.198ms / 0.084% | 已在 recurrent 内部执行，不能据外部零值声称无归一化成本 |
+
+当前 MTP7 的 split reducer 确实比旧 MTP15 trace 更值得保留为小收益候选；若条件性地把它加速一倍，对这里的 decode kernel 和最多约改善 0.30%，并非冷 prefill 改善 0.30%。计划与 producer 适配一并验证，不因不足10%丢弃。此估算没有扣除新增 shared/barrier 的成本，也没有消除观察者效应，不能提前认领。
+
+另外已拉取真正的 tuxKOH/ninfer-V100X2 稀疏源码，固定 `5c51513096a9fceb9bb1609e43b15efecac30f93`；它与已有 huangserva/ninfer-v100-tpx 目录不同。源端 `prepare_recurrent_qk_kernel` 用 FP32 Q/K 缓冲，只在 Volta 的 normalize/T≥64 顺序 recurrence 路线启用。本机 T≥64 已经是 BF16 pre-norm 加 chunked；直接搬过来不会消除冷 prefill 的重复归一化。短 T 内每 Q/K 行可能被 32 个 DV warp × 3 个 V heads 重复归一化，需适配本机 raw-BF16 records、FP32 state、部分接受和 fold，不能把“96 次归一化”说成“96倍 kernel 提速”。S4 的实现任务仍未勾选；新源码和预算将用于下一批，未把研究计为实现。
