@@ -870,6 +870,17 @@ tokens. Published endpoints and masked-draft backends still pin their geometry;
 an unfundable next unit fails explicitly. Final request batches retire before
 reusable checkpoint publication; see the current CLI/serving validation scope.
 
+After those transfers drain, terminal publication retires old private rewrite/anchor
+checkpoints below the compacted lineage's `kv_reuse_floor` (or with no remaining
+positive KV frontier). Their references are released using the existing checkpoint
+ownership rules; aliased checkpoints and the primary StateImage remain protected.
+The latest endpoint keeps its exact ledger identity and Main/backend/GDN state.
+An obsolete prompt checkpoint must not make the entire valid endpoint disappear
+when its ledger frontier plus the window offset becomes negative. Admission still
+requires the same exact tokens, positions, execution boundaries and KV coverage.
+`NINFER_PREFIX_TRACE=1` reports checkpoint retirement, prefix IDs/frontiers and
+terminal publication failures for diagnosis, without dumping prompt text.
+
 
 ### KVMem pre-query lexical restore (2026-10-20)
 

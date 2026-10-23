@@ -261,6 +261,29 @@ RequestBasePlan ProgramImplCore::plan_request(const PreparedPromptData& prompt,
     }
     validate_sampling(options.sampling);
 
+    // Opt-in diagnosis before the digest shortlist: a mismatched endpoint never reaches
+    // inspect_lane(). Report IDs/geometry only, without dumping user text or changing eligibility.
+    if (std::getenv("NINFER_PREFIX_TRACE") != nullptr) {
+        for (std::size_t index = 0; index < continuation_states.size(); ++index) {
+            if (continuation_slots[index].role != ContinuationSlotRole::Catalogued) { continue; }
+            const auto& source = continuation_states[index];
+            const auto mismatch = std::mismatch(prompt.token_ids.begin(), prompt.token_ids.end(),
+                                                source.ledger.begin(), source.ledger.end());
+            const std::size_t common = std::distance(prompt.token_ids.begin(), mismatch.first);
+            const auto frontier = static_cast<std::uint32_t>(
+                static_cast<std::int64_t>(source.execution_frontier) - source.kv_offset);
+            std::fprintf(stderr,
+                         "PREFIX_TRACE slot=%zu prompt=%zu ledger=%zu endpoint=%u valid=%d "
+                         "common=%zu incoming=%d resident=%d identity=%d floor=%u offset=%d\n",
+                         index, prompt.token_ids.size(), source.ledger.size(), frontier,
+                         source.endpoint_valid, common,
+                         mismatch.first == prompt.token_ids.end() ? -1 : *mismatch.first,
+                         mismatch.second == source.ledger.end() ? -1 : *mismatch.second,
+                         source.prefix_identity.matches(prompt, std::min<std::size_t>(common, frontier)),
+                         source.kv_reuse_floor, source.kv_offset);
+        }
+    }
+
     auto base                             = std::make_unique<RequestBasePlanImpl>();
     base->context_cache                   = prompt.context_cache;
     base->summary.prompt_tokens           = static_cast<std::uint32_t>(prompt.token_ids.size());

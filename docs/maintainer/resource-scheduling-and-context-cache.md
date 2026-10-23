@@ -289,6 +289,11 @@ identity。
 这样对话系统追加新的 user message 或改写生成尾部时，仍能复用稳定历史，而不会把可变 suffix 错当成
 prefix identity 的一部分。
 
+生成期间发生 KVMem 回收后，旧检查点可能落到当前 `kv_reuse_floor` 之下。终态先排空搬运，再按已有
+引用所有权规则退休这些已无匹配 KV 覆盖的私有 rewrite/anchor，随后生成 catalog summary；不能将其
+过时 frontier 转成负 KV slot 后连带丢弃仍有效的最新 endpoint。最新状态的 token、position、执行
+边界和联合 StateImage 匹配条件不变；无法匹配的新历史仍从合法早期检查点或 Root 重建。
+
 Checkpoint 发布后：
 
 - identity、frontier 和 required coverage 不变；

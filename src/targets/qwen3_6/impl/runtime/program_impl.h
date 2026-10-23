@@ -7532,6 +7532,52 @@ ProgramImplCore::continuation_summary(const SequenceState& sequence) const {
     return summary;
 }
 
+void ProgramImplCore::retire_unresumable_checkpoints(SequenceState& sequence) {
+    // A generated KVMem window may move past the prompt's ResponseReplay and old
+    // anchors. Their StateImages still exist, but their KV no longer describes that
+    // boundary. Use the same floor as inspect_lane, before translating catalog frontiers
+    // into packed slots (which can otherwise become negative and discard a good endpoint).
+    const auto resumable = [&](std::uint32_t frontier) {
+        const std::int64_t slots = static_cast<std::int64_t>(frontier) + sequence.kv_offset;
+        return frontier >= sequence.kv_reuse_floor && slots > 0 &&
+               slots <= sequence.execution_frontier;
+    };
+    const auto release_unowned = [&](StateImageHandle handle) {
+        // Follow the existing checkpoint-drop ownership protocol: reference aliases and
+        // the terminal primary StateImage survive; only the last unowned image is freed.
+        if (handle == sequence.state.read || handle == sequence.state.write ||
+            (sequence.reserved_state && handle == *sequence.reserved_state) ||
+            state_store->checkpoint_references(handle) != 0) { return; }
+        if (!state_store->release(handle)) {
+            throw std::logic_error("unresumable checkpoint StateImage remained pinned");
+        }
+    };
+    if (sequence.rewrite_checkpoint.valid && !resumable(sequence.rewrite_checkpoint.frontier)) {
+        if (!sequence.rewrite_state) {
+            throw std::logic_error("unresumable rewrite checkpoint has no StateImage");
+        }
+        const auto state = *sequence.rewrite_state;
+        if (std::getenv("NINFER_PREFIX_TRACE") != nullptr) {
+            std::fprintf(stderr, "PREFIX_TRACE retire_rewrite frontier=%u floor=%u offset=%d\n",
+                         sequence.rewrite_checkpoint.frontier, sequence.kv_reuse_floor,
+                         sequence.kv_offset);
+        }
+        state_store->release_checkpoint_reference(state);
+        sequence.rewrite_state.reset();
+        sequence.rewrite_checkpoint = {};
+        sequence.rewrite_checkpoint_hidden = {};
+        release_unowned(state);
+    }
+    for (std::size_t index = sequence.long_anchors.size(); index != 0; --index) {
+        const auto anchor = sequence.long_anchors[index - 1];
+        if (resumable(anchor.frontier)) { continue; }
+        state_store->release_checkpoint_reference(anchor.state);
+        sequence.long_anchors.erase(sequence.long_anchors.begin() +
+                                   static_cast<std::ptrdiff_t>(index - 1));
+        release_unowned(anchor.state);
+    }
+}
+
 void ProgramImplCore::populate_continuation_summary(const SequenceState& sequence,
                                                     qwen3_6::ContinuationSummary& summary) const {
     validate_long_anchor_ordinals(sequence.long_anchors,
@@ -7649,8 +7695,9 @@ std::uint32_t ProgramImplCore::kvmem_reclaim_generation(SequenceState& sequence,
     // (`set_checkpoint_requirement` in the finish path, after the round-boundary compaction),
     // so nothing has named this geometry yet while the request is still decoding. A later
     // reuse of the compacted lineage is handled by the plan's own geometry: it resumes at
-    // `reuse_base + source.kv_offset` and refuses a resume below `kv_reuse_floor`, so a window
-    // that lost its middle costs a cache miss rather than a wrong read. Gating on it here would
+    // `reuse_base + source.kv_offset` and refuses a resume below `kv_reuse_floor`. At finish,
+    // checkpoints below that floor are retired before building the catalog summary, keeping
+    // the latest valid endpoint publishable. Gating on a rewrite checkpoint here would
     // block every reclaim for a prefix-caching request, i.e. all of them.
     const bool paired_mtp = speculative_backend == SpeculativeBackend::Mtp;
     const bool pinned = (speculative_backend != SpeculativeBackend::None && !paired_mtp) ||
@@ -9756,6 +9803,7 @@ FinishResult ProgramImplCore::finish(SequenceHandle sequence) noexcept {
         if (state.kv->backend) {
             (void)backend_kv_addresses->retire_kvmem_transfers(true);
         }
+        retire_unresumable_checkpoints(state);
         text_kv_addresses->set_checkpoint_requirement(state.kv->text, state.execution_frontier);
         if (state.kv->backend) {
             backend_kv_addresses->set_checkpoint_requirement(*state.kv->backend,
@@ -9763,6 +9811,11 @@ FinishResult ProgramImplCore::finish(SequenceHandle sequence) noexcept {
         }
         populate_continuation_summary(state, out.summary);
         out.summary.active_references = 0;
+    } catch (const std::exception& error) {
+        if (std::getenv("NINFER_PREFIX_TRACE") != nullptr) {
+            std::fprintf(stderr, "PREFIX_TRACE finish_discard %s\n", error.what());
+        }
+        return out;
     } catch (...) { return out; }
     release_active_shared_references(state);
     release_sequence_growth_entitlement(state);

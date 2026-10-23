@@ -1125,6 +1125,7 @@ private:
     [[nodiscard]] detail::PhysicalResources
     owner_exclusive_resources(const SharedPrefixState& shared) const;
     [[nodiscard]] detail::PhysicalResources physical_occupancy() const noexcept;
+    void retire_unresumable_checkpoints(SequenceState& sequence);
     [[nodiscard]] bool physical_peak_fits(detail::PhysicalResources peak) const noexcept;
     [[nodiscard]] StateImageHandle
     selected_state(const SequenceState& sequence, ReusePath reuse,

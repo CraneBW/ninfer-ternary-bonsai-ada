@@ -43,6 +43,8 @@ flowchart LR
 
 2026-10-23 Pi xhigh补充：MTP4/7均完成鹈鹕SVG与秦始皇骑北极熊动画；修复MTP长生成越过32K工作集时的双KV回收失败。AR鹈鹕完成，秦始皇耗尽131072个思考token仍未交付，不能声称三臂质量全部通过。[实际作品、速度、失败与Host预算修正](docs/maintainer/2026-10-23-pi-xhigh-quality.md)。新增T256 SiLU融合仅为默认关闭的实验：短档prefill中位+0.92%，4352-token尾批档−0.64%，未纳入通用profile；[资格和完整三对](docs/maintainer/2026-10-23-silu-t256.md)。
 
+同日晚间续作：Pi质量harness默认恢复Qwen3.8官方thinking采样（temperature1.0/top_p0.95/top_k20），AR秦始皇补充样本自然完成；旧greedy失败保留，不能将不同采样/cwd当成严格质量对照。修复生成回收后旧检查点连带丢弃有效endpoint的问题：原Pi MTP4工具续轮TTFT **29.383→0.246s**、常规prefill **42099→21 token**，首轮作品相同，200W。详见[采样诊断与历史复用收据](docs/maintainer/2026-10-23-generation-continuation.md)。
+
 ## 运行环境与模型
 
 | 项目 | 本项目当前明确范围 |

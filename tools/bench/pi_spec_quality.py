@@ -2,7 +2,7 @@
 Uses isolated benchmark configuration, standard Pi system prompt/tools and fresh task directories.
 """
 from __future__ import annotations
-import argparse,json,os,shutil,subprocess,time
+import argparse,json,math,os,shutil,subprocess,time
 from pathlib import Path
 from tools.bench.creative_spec_quality import CASES,PROFILES
 from tools.bench.sm89_profiles import LocalServer,dump,ROOT
@@ -29,6 +29,10 @@ def main():
     ap.add_argument('--output',type=Path,required=True)
     ap.add_argument('--profiles',nargs='+',choices=PROFILES,default=['mtp4','mtp7','ar'])
     ap.add_argument('--thinking',choices=['off','xhigh'],default='xhigh')
+    ap.add_argument('--sampling',choices=['model','greedy'],default='model',
+                    help='Use registered model recommendations; greedy is a separate diagnostic control')
+    ap.add_argument('--workspace',type=Path,help='Existing empty directory, for an exact saved Pi system-prompt path')
+    ap.add_argument('--prefix-trace',action='store_true',help='Log prefix identity and checkpoint retirement diagnostics')
     ap.add_argument('--context',type=int,default=262144)
     ap.add_argument('--max-tokens',type=int,default=131072)
     ap.add_argument('--host-pages',type=int,default=128,help='KVMem Host pages, separate from context-cache --host-kv-mib')
@@ -49,18 +53,24 @@ def main():
                NINFER_R29_BUNDLE='0',NINFER_GGUF_LARGE_PREFILL='1',NINFER_GGUF_SILU_MMQ='1',
                NINFER_SM89_SHARED_VECTOR='0',NINFER_SM89_ATTN_SPLIT_VECTOR='0',NINFER_SM89_GDN_PRENORM='0',
                PI_CODING_AGENT_DIR=str(cfg),PI_OFFLINE='1',PI_TELEMETRY='0')
+    if args.prefix_trace:env['NINFER_PREFIX_TRACE']='1'
     os.environ.update({k:v for k,v in env.items() if k.startswith('NINFER_')})
     result=dict(state='RUNNING',pi=pi,pi_version=subprocess.check_output([pi,'--version'],env=env,text=True).strip(),
                 environment={k:v for k,v in env.items() if k.startswith('NINFER_')},
                 kvmem_host_pages=args.host_pages,context_cache_host_mib=128,
-                power_w=200,context=args.context,max_tokens=args.max_tokens,thinking=args.thinking,kv_working_set=32768,physical_kv=36864,tools=['read','write','edit','ls'],profiles=[],cases=CASES,
+                power_w=200,context=args.context,max_tokens=args.max_tokens,thinking=args.thinking,sampling=args.sampling,
+                sampling_source='https://huggingface.co/Qwen/Qwen3.8-27B#best-practices',
+                kv_working_set=32768,physical_kv=36864,tools=['read','write','edit','ls'],profiles=[],cases=CASES,
                 harness='Installed Pi; standard system prompt; external extensions/skills/context disabled equally; isolated config; no global settings changed')
-    work=out/'workspace';work.mkdir()
+    work=args.workspace.resolve() if args.workspace else out/'workspace'
+    work.mkdir(parents=True,exist_ok=args.workspace is not None)
+    assert not list(work.iterdir()), 'benchmark workspace must start empty'
     result['working_directory']=str(work)
     dump(out/'results.json',result)
     for name in args.profiles:
         backend,width=PROFILES[name];log=out/f'{name}.jsonl'
-        cmd=[str(ROOT/'build/apps/ninfer-serve'),'/home/ran/ninfer-work/real-models/qwen3_8_gsq_rco_iq3_s_v3.ninfer','--model-id','qualification','--host','127.0.0.1','--port','18164','--max-context',str(args.context),'--kv-device-tokens','36864','--kvmem','--kvmem-budget','32768','--kvmem-gen-reserve','512','--kvmem-transfer-mode','sync','--host-kv-mib','128','--prefill-chunk','1024','--max-concurrency','1','--kv-dtype','int8','--greedy','--preserve-thinking','--default-max-tokens',str(args.max_tokens),'--seed','42','--presence-penalty','0','--request-log-jsonl',str(log)]
+        cmd=[str(ROOT/'build/apps/ninfer-serve'),'/home/ran/ninfer-work/real-models/qwen3_8_gsq_rco_iq3_s_v3.ninfer','--model-id','qualification','--host','127.0.0.1','--port','18164','--max-context',str(args.context),'--kv-device-tokens','36864','--kvmem','--kvmem-budget','32768','--kvmem-gen-reserve','512','--kvmem-transfer-mode','sync','--host-kv-mib','128','--prefill-chunk','1024','--max-concurrency','1','--kv-dtype','int8','--preserve-thinking','--default-max-tokens',str(args.max_tokens),'--seed','42','--request-log-jsonl',str(log)]
+        if args.sampling=='greedy':cmd+=['--greedy','--presence-penalty','0']
         if args.thinking=='off':cmd+=['--no-thinking']
         if name=='dflash2':
             result['profiles'].append(dict(name=name,state='CAPACITY_REJECTED_STATIC',reason='32K working set / 36K physical KV does not meet the DFlash2 256MiB reserve gate; short-mode receipt is separate'))
@@ -101,10 +111,16 @@ def main():
                         for e in events:
                             if e.get('event')!='request_done':continue
                             request=e['request']
+                            assert request['requested_output_tokens']==args.max_tokens, 'Pi output budget changed'
                             assert request['enable_thinking']==(args.thinking!='off'), 'thinking mode mismatch'
                             if args.thinking=='xhigh':
                                 assert request['requested_reasoning_effort']=='xhigh' and request['resolved_reasoning_effort']=='xhigh', 'xhigh was not transmitted/resolved'
-                            assert request['sampling']['temperature']==0, 'greedy comparison changed'
+                            expected=dict(temperature=0 if args.sampling=='greedy' else (1.0 if args.thinking=='xhigh' else 0.7),
+                                          top_p=0.95 if args.thinking=='xhigh' else 0.8,top_k=20,min_p=0,
+                                          presence_penalty=0 if args.sampling=='greedy' or args.thinking=='xhigh' else 1.5,
+                                          frequency_penalty=0,seed=42)
+                            for key,value in expected.items():
+                                assert math.isclose(request['sampling'][key],value,abs_tol=1e-6), f'sampling mismatch: {key}'
                         dump(out/'results.json',result)
                         print(name,c['id'],code,task['files'],round(task['wall_s'],2),flush=True)
                         if task['state']=='FAILED':
