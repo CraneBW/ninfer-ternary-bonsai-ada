@@ -494,8 +494,60 @@ static void test_action_lrfu_long_ties() {
           "256K current action was not protected");
 }
 
+static void test_causal_prefill() {
+    auto repo = make_chain(20);
+    KvSelectConfig cfg;
+    cfg.block_tokens=64;cfg.budget_tokens=8*64;
+    cfg.sink_tokens=64;cfg.recent_tokens=64;cfg.action_lrfu=true;
+    const std::vector<std::uint32_t> expected{0,13,14,15,16,17,18,19};
+    CHECK(kvmem_select_prefill_blocks(repo.blocks(),cfg).block_ids==expected,
+          "causal history must retain the sink and newest rows within budget");
+    std::vector<KvBlockMeta> changed(repo.blocks().begin(),repo.blocks().end());
+    for(std::size_t i=1;i<13;++i) {
+        changed[i].retrieval_score=10000;
+        changed[i].profile_score=10000;
+        changed[i].stratum=BlockStratum::ActionProtected;
+    }
+    CHECK(kvmem_select_prefill_blocks(changed,cfg).block_ids==expected,
+          "future query/action metadata must not change history attention inputs");
+    changed[1].stratum=BlockStratum::PinnedSink;
+    CHECK(kvmem_select_prefill_blocks(changed,cfg).block_ids==
+          std::vector<std::uint32_t>({0,1,14,15,16,17,18,19}),
+          "static system prefix must remain protected within the same budget");
+}
+
+static void test_content_prefill() {
+    constexpr std::uint32_t page = 64;
+    std::vector<std::int32_t> tokens(40 * page, 7);
+    tokens[5 * page + 20] = 1001;
+    tokens[5 * page + 21] = 1002;
+    const auto anchors = kvmem_content_anchor_pages(tokens, 39 * page, 8 * page);
+    CHECK(anchors == std::vector<std::uint32_t>({5, 6}), "content anchors missed rare record");
+    tokens[39 * page] = 9001;
+    tokens[39 * page + 1] = 9002;
+    CHECK(kvmem_content_anchor_pages(tokens, 39 * page, 8 * page) == anchors,
+          "future query changed content anchors");
+    auto repo = make_chain(40);
+    KvSelectConfig cfg;
+    cfg.block_tokens = page;
+    cfg.budget_tokens = 8 * page;
+    cfg.sink_tokens = page;
+    cfg.recent_tokens = page;
+    const auto selected = kvmem_select_prefill_blocks(repo.blocks(), cfg, anchors).block_ids;
+    CHECK(selected == std::vector<std::uint32_t>({0, 5, 6, 35, 36, 37, 38, 39}),
+          "content anchors displaced sink/recent or exceeded fixed budget");
+    KvmemSelectionCondition a, b;
+    a.prefill_policy = b.prefill_policy = 2;
+    a.lexical = b.lexical = anchors;
+    CHECK(a == b, "identical content conditions rejected");
+    b.lexical.push_back(8);
+    CHECK(!(a == b), "changed content anchors admitted for history reuse");
+}
+
 int main() {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
+    test_causal_prefill();
+    test_content_prefill();
     test_lexical_history_rescue();
     std::printf("lexical_history_rescue ok\n");
     test_passthrough();

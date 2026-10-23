@@ -18,6 +18,7 @@
 #include "targets/qwen3_6/impl/runtime/logical_kv_store.h"
 #include "targets/qwen3_6/impl/runtime/state_image_store.h"
 #include "targets/qwen3_6/impl/runtime/prefix_identity.h"
+#include "kvmem/kvmem_lexical.h"
 #include "targets/qwen3_6/impl/runtime/resource_projection.h"
 #include "targets/qwen3_6/impl/runtime/text_context.h"
 #include "targets/qwen3_6/impl/runtime/vision_context.h"
@@ -193,6 +194,7 @@ struct RequestBasePlanImpl<NINFER_QWEN36_VARIANT> {
     qwen3_6::detail::PrefixShortlistDigests prefix_digests;
     std::uint32_t prefix_identity_tag = 0;
     bool allow_prefix_reuse           = false;
+    ninfer::kvmem::KvmemSelectionCondition original_selection_condition;
 };
 
 // Program-owned physical planning state shared by request materialization and active capture.
@@ -215,6 +217,7 @@ struct ResourceCandidateState {
     detail::PhysicalResources source_resources;
     NINFER_QWEN36_RUNTIME_NS::ReusePath reuse = NINFER_QWEN36_RUNTIME_NS::ReusePath::Root;
     std::uint32_t reuse_base                  = 0;
+    ninfer::kvmem::KvmemSelectionCondition original_selection_condition;
     // Cache-slot frontier that the reused KV actually reaches. It equals `reuse_base` except on
     // a KVMem-compacted lineage, where the ledger keeps the consumed prompt length while the KV
     // stops at its compacted window (`reuse_base + source.kv_offset`).
@@ -441,6 +444,7 @@ struct SequenceState {
     // resume beyond q0 in original-position mode (KVMem faf3c225 protocol).
     std::uint32_t last_query_begin = 0;
     std::uint32_t last_query_end = 0;
+    ninfer::kvmem::KvmemSelectionCondition original_selection_condition;
     // Lowest prompt index this lineage may be resumed from once its KV was compacted into a
     // window: below it the retained tail would expose the new request to tokens the checkpoint
     // state has not seen yet. Zero while the KV still mirrors the whole token prefix.
@@ -659,6 +663,7 @@ public:
     [[nodiscard]] ReleaseResult release_continuation(ContinuationHandle&& continuation) noexcept;
     [[nodiscard]] ReleaseResult release_shared_prefix(SharedPrefixHandle&& shared) noexcept;
     void fail_all_cleanup() noexcept;
+    [[nodiscard]] qwen3_6::PreparedPrompt recover_canonical_request();
     [[nodiscard]] detail::PhysicalResources admission_capacity() const noexcept;
     [[nodiscard]] bool isolated_request_feasible(const RequestBasePlan& base) const noexcept;
 
@@ -706,7 +711,11 @@ public:
     const bool vision_enabled;
     const bool use_cuda_graph;
     const bool causal_scoring;
-    const bool original_kv_positions;
+    // Startup mode can only transition to canonical after all old owners are retired.
+    bool original_kv_positions;
+    const bool original_causal_prefill;
+    const bool original_content_prefill;
+    std::optional<PreparedPromptData> drained_original_prompt_;
     const std::size_t kv_payload_bytes;
     const std::size_t graph_allowance_bytes;
     const WorkspacePlan workspace_plan;

@@ -145,13 +145,14 @@ void verify_gathered_columns(int tokens) {
 
 struct RealOptions {
     bool timing = false;
+    bool shared_vector = false;
     std::string format;
     std::string entry;
     std::string dump_output;
     std::string pattern = "constant";
     int tokens = 0;
 
-    bool filtered() const { return !format.empty() || !entry.empty() || tokens != 0; }
+    bool filtered() const { return shared_vector || !format.empty() || !entry.empty() || tokens != 0; }
 };
 
 void verify_real_mixed_formats(const char* artifact_path, const char* oracle_path,
@@ -296,7 +297,32 @@ void verify_real_mixed_formats(const char* artifact_path, const char* oracle_pat
                     w.qtype, rows, k, 1, tokens));
             ninfer::Tensor x(input.p, ninfer::DType::BF16, {k, tokens});
             ninfer::Tensor y(output_data, ninfer::DType::BF16, {rows, tokens});
-            ninfer::ops::detail::gguf_linear_dispatch(x, w, y, ws, nullptr);
+            if (options.shared_vector) {
+                require(tokens <= 8, "shared-vector qualification requires T<=8");
+                ninfer::DeviceBuffer second(output_bytes);
+                ninfer::Tensor duplicate(second.p, ninfer::DType::BF16, {rows, tokens});
+                const std::array<ninfer::ops::detail::GgufProduct, 2> products{{
+                    {&w, &y}, {&w, &duplicate}}};
+                require(ninfer::ops::detail::try_gguf_shared_vector_dispatch(
+                            x, products, ws, nullptr), "shared-vector route did not execute");
+                require(cudaDeviceSynchronize() == cudaSuccess, "shared-vector completion");
+                std::vector<__nv_bfloat16> a(result.size()), b(result.size());
+                output.copy_to_host(a.data(), output_bytes, kOutputGuardBytes);
+                second.copy_to_host(b.data(), output_bytes);
+                require(std::memcmp(a.data(), b.data(), output_bytes) == 0,
+                        "shared-vector second destination differs");
+                // Exact route equivalence qualifies inherited rounding/state
+                // evidence; it is ADDITIONAL to the independent FP64 oracle below.
+                ninfer::ops::detail::gguf_linear_dispatch(x, w, duplicate, ws, nullptr);
+                require(cudaDeviceSynchronize() == cudaSuccess, "ordinary reference completion");
+                second.copy_to_host(b.data(), output_bytes);
+                require(std::memcmp(a.data(), b.data(), output_bytes) == 0,
+                        "shared-vector changed represented product bytes");
+                std::printf("GGUF_SHARED_VECTOR entry=%s T=%d N=%d K=%d two_outputs_bitwise=1 PASS\n",
+                            entry.key().c_str(), tokens, rows, k);
+            } else {
+                ninfer::ops::detail::gguf_linear_dispatch(x, w, y, ws, nullptr);
+            }
             require(cudaDeviceSynchronize() == cudaSuccess, "GSQ CUDA product");
             output.copy_to_host(result.data(), output_bytes, kOutputGuardBytes);
             std::array<std::uint8_t, kOutputGuardBytes> prefix, suffix;
@@ -394,6 +420,8 @@ int main(int argc, char** argv) {
             const std::string name = argv[arg];
             if (name == "--time") {
                 options.timing = true;
+            } else if (name == "--shared-vector") {
+                options.shared_vector = true;
             } else if (name == "--format" || name == "--entry" || name == "--tokens" ||
                        name == "--dump-output" || name == "--pattern") {
                 require(arg + 1 < argc, "GGUF filter option is missing a value");

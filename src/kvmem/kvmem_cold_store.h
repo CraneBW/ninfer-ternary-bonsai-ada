@@ -5,10 +5,12 @@
 // NVMe-mounted directory with NINFER_KVMEM_COLD_DIR to use actual SSD storage.
 
 #include "kvmem/snapshot_backing.h"
+#include "core/host_worker_pool.h"
 #include <algorithm>
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
@@ -35,6 +37,30 @@ namespace ninfer::kvmem {
 
 class ColdKVStore {
 public:
+    // Unlike std::async futures, packaged_task futures do not join when
+    // destroyed. Keep the existing caller contract explicit for both modes:
+    // a pending read always retires before its captured pinned buffer can die.
+    class ReadFuture {
+    public:
+        ReadFuture() = default;
+        explicit ReadFuture(std::future<void> value) : value_(std::move(value)) {}
+        ReadFuture(ReadFuture&&) noexcept = default;
+        ReadFuture& operator=(ReadFuture&& other) noexcept {
+            if (this != &other) { join(); value_ = std::move(other.value_); }
+            return *this;
+        }
+        ~ReadFuture() { join(); }
+        void get() { value_.get(); }
+        [[nodiscard]] bool valid() const noexcept { return value_.valid(); }
+    private:
+        void join() noexcept {
+            if (value_.valid()) {
+                try { value_.wait(); } catch (...) { std::terminate(); }
+            }
+        }
+        std::future<void> value_;
+    };
+
     struct Handle {
         std::uint32_t slot = 0;
         std::uint32_t generation = 0;
@@ -97,6 +123,14 @@ public:
     }
 
     ~ColdKVStore() {
+        // Join readers while this store, snapshot backing and file descriptor
+        // still exist, including exceptional caller teardown.
+        read_workers_.reset();
+        const char* summary = std::getenv("NINFER_KVMEM_IO_WORKER_SUMMARY");
+        if (summary && std::strcmp(summary, "1") == 0 && worker_reads_) {
+            std::fprintf(stderr, "KVMEM_IO_WORKERS reads=%llu workers=2 queue_capacity=2 page_bytes=%zu pending=0\n",
+                static_cast<unsigned long long>(worker_reads_), page_bytes_);
+        }
 #if defined(_WIN32)
         if (file_ != INVALID_HANDLE_VALUE) { ::CloseHandle(file_); }
 #else
@@ -178,7 +212,7 @@ public:
 
     // Adapt KVMem start_prefetch: validate on the owner thread, then read only
     // the immutable extent. Caller owns the handle and destination until get().
-    [[nodiscard]] std::future<void> prefetch(Handle handle, std::span<std::byte> destination) const {
+    [[nodiscard]] ReadFuture prefetch(Handle handle, std::span<std::byte> destination) const {
         require_size(destination.size());
         if (!valid(handle)) { throw std::invalid_argument("KVMem prefetch handle is stale"); }
         // Resolve immutable metadata on the owner thread. Other records may be
@@ -194,13 +228,27 @@ public:
         // owning transaction still has both the future and its pinned buffer.
         const char* fault = std::getenv("NINFER_KVMEM_TEST_COLD_PREAD_FAILURE");
         const bool inject_read_error = fault && std::strcmp(fault, "1") == 0;
-        return std::async(std::launch::async,
-                          [this, offset, descriptor, destination, inject_read_error] {
+        auto work = [this, offset, descriptor, destination, inject_read_error] {
             if (inject_read_error) {
                 throw std::runtime_error("KVMem injected Cold pread failure");
             }
             transfer_at(offset, destination.data(), false, descriptor);
-        });
+        };
+        const char* fixed = std::getenv("NINFER_KVMEM_FIXED_IO_WORKERS");
+        if (fixed && std::strcmp(fixed, "1") == 0) {
+            // KVMem faf3c225 StorageIoQueue: bounded workers and immutable
+            // captured extents. Reuse the native pool, not a thread per page.
+            // Existing source-K/Cold callers own at most two read slots; no
+            // new pinned bytes, GPU calls or metadata mutation in workers.
+            if (!read_workers_) { read_workers_ = std::make_unique<HostWorkerPool>(2, 2); }
+            auto ready = read_workers_->submit(std::move(work));
+            ++worker_reads_;
+            return ReadFuture(std::move(ready));
+        }
+        if (fixed && std::strcmp(fixed, "0") != 0) {
+            throw std::invalid_argument("NINFER_KVMEM_FIXED_IO_WORKERS must be 0 or 1");
+        }
+        return ReadFuture(std::async(std::launch::async, std::move(work)));
     }
 
     [[nodiscard]] bool valid(Handle handle) const noexcept {
@@ -221,6 +269,8 @@ public:
     }
 
 private:
+    mutable std::unique_ptr<HostWorkerPool> read_workers_;
+    mutable std::uint64_t worker_reads_ = 0;
     std::shared_ptr<const SnapshotBacking> snapshot_;
     struct Slot {
         std::uint32_t generation = 1;

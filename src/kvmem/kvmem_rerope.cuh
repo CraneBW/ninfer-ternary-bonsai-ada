@@ -85,11 +85,9 @@ __device__ __forceinline__ void kvmem_rerope_int8_g64_token(
     // -- un-RoPE at the baked slot, re-RoPE at the new slot (dims [0,64)) --
     const int pair      = lane;  // rotary pairs are (p, p+32) for p in [0,32)
     const int axis      = pair % 3;
-    const float phi_src = static_cast<float>(pos_src[axis]) * kTextRopeInvFrequency[pair];
-    const float phi_dst = static_cast<float>(pos_dst[axis]) * kTextRopeInvFrequency[pair];
     float ss = 0.0f, cs = 0.0f, sd = 0.0f, cd = 0.0f;
-    sincosf(phi_src, &ss, &cs);
-    sincosf(phi_dst, &sd, &cd);
+    text_rope_sincos(pos_src[axis],pair,&ss,&cs);
+    text_rope_sincos(pos_dst[axis],pair,&sd,&cd);
     // stored pair convention (apply_rope_head): x0' = x0*cos - x1*sin; x1' = x1*cos + x0*sin
     const float u0 = row[0] * cs + row[1] * ss;  // inverse: sin flips sign
     const float u1 = row[1] * cs - row[0] * ss;

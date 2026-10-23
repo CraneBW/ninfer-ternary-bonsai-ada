@@ -1123,6 +1123,30 @@ public:
         kvmem_pending_demote_.reset();
         if (kvmem_enabled_) {
             const char* trace = std::getenv("NINFER_KVMEM_LAYER_READY_TRACE");
+            const char* summary = std::getenv("NINFER_KVMEM_LAYER_READY_SUMMARY");
+            if (summary && std::strcmp(summary, "1") == 0) {
+                std::fprintf(stderr,
+                    "KVMEM_LAYER_SUMMARY epochs=%llu waits=%llu releases=%llu "
+                    "source_async_pages=%llu source_sync_pages=%llu cold_async_pages=%llu "
+                    "cold_read_pages=%llu cold_read_bytes=%llu cold_copy_pages=%llu cold_copy_batches=%llu "
+                    "resident_rephase_pages=%llu staging_peak_bytes=%zu "
+                    "pending_pinned_pages=%zu inflight_pages=%u producer_active=%d\n",
+                    static_cast<unsigned long long>(kvmem_layer_ready_ ? kvmem_layer_ready_->epoch() : 0),
+                    static_cast<unsigned long long>(kvmem_layer_ready_ ? kvmem_layer_ready_->waits() : 0),
+                    static_cast<unsigned long long>(kvmem_layer_ready_ ? kvmem_layer_ready_->releases() : 0),
+                    static_cast<unsigned long long>(kvmem_layer_source_async_pages_),
+                    static_cast<unsigned long long>(kvmem_layer_source_sync_pages_),
+                    static_cast<unsigned long long>(kvmem_layer_cold_async_pages_),
+                    static_cast<unsigned long long>(kvmem_cold_read_pages_),
+                    static_cast<unsigned long long>(kvmem_cold_read_pages_ * kvmem_host_layout_.page_stride),
+                    static_cast<unsigned long long>(kvmem_cold_copy_pages_),
+                    static_cast<unsigned long long>(kvmem_cold_copy_batches_),
+                    static_cast<unsigned long long>(kvmem_layer_rephase_pages_),
+                    (kvmem_source_k_ ? kvmem_source_k_->staging_bytes() : 0) +
+                        (kvmem_cold_staging_ ? kvmem_cold_staging_->capacity_bytes() : 0),
+                    kvmem_layer_pending_pages(), kvmem_inflight_pages(),
+                    kvmem_layer_ready_ && kvmem_layer_ready_->active() ? 1 : 0);
+            }
             if (trace && std::strcmp(trace, "1") == 0) {
                 std::fprintf(stderr,
                     "KVMEM_LAYER_FINAL pending_pinned_pages=%zu inflight_pages=%u "
@@ -1186,6 +1210,20 @@ public:
     }
 
     [[nodiscard]] std::uint32_t occupied() const noexcept { return capacity() - free_count_; }
+
+    // KVMem/ActKV's archive epochs must never change their position semantics.
+    // A canonical restart first retires EVERY old address (including catalogued
+    // continuations), then starts a fresh archive epoch on the same physical pool.
+    // No native original K/V or old checkpoint is converted or reused here.
+    void restart_empty_as_canonical() {
+        if (!kvmem_enabled_ || !kvmem_original_positions_ || occupied() != 0 ||
+            kvmem_pending_demote_) {
+            throw std::logic_error("canonical restart requires an empty original KV store");
+        }
+        kvmem_source_k_ = std::make_unique<ninfer::kvmem::ImmutableKStore>(
+            pages_->physical_pool().geometry());
+        kvmem_original_positions_ = false;
+    }
 
     [[nodiscard]] std::optional<KVAddressSpaceHandle> create_active(std::uint32_t entitlement,
                                                                     std::int32_t execution_row) {
@@ -2155,6 +2193,10 @@ public:
         return kvmem_layer_failure_drains_;
     }
 
+    [[nodiscard]] std::uint64_t kvmem_cold_copy_pages() const noexcept {
+        return kvmem_cold_copy_pages_;
+    }
+
     void drain_kvmem_layer_reader(KVAddressSpaceHandle handle) {
         if (kvmem_layer_ready_ && handle.valid() && handle == kvmem_layer_ready_address_) {
             // Cancellation / address invalidation is not a same-stream
@@ -3100,7 +3142,9 @@ public:
                                 bool sink_only = false, std::uint32_t pinned_prefix_pages = 0,
                                 std::span<const std::uint32_t> coupled_selection = {},
                                 std::optional<std::uint32_t> replay_from = std::nullopt,
-                                bool prefill_layer_consumer = false) {
+                                bool prefill_layer_consumer = false,
+                                               bool original_causal_history = false,
+                                               bool prefill_bulk_consumer = false) {
         if (!kvmem_enabled_) { return 0; }
         // Finish the prior producer before reusing its pinned/device metadata;
         // reader writes on the compute stream remain ordered with new work.
@@ -3179,6 +3223,16 @@ public:
             stream != cudaStreamLegacy && pipeline_geometry.page_tokens == kPagedKVPageSize &&
             pipeline_geometry.device_plane_order == PagedKVPlaneOrder::PageMajor &&
             pipeline_geometry.planes.size() == 16 * 4;
+        const char* cold_flag = std::getenv("NINFER_KVMEM_COLD_COPY_PIPELINE");
+        // Canonical replay preparation is still plain prefill, but cannot
+        // publish layer-ready tickets. Its whole-batch copy may use the same
+        // bounded ring provided it also owns failed-compaction disposal.
+        const bool bulk_cold = (prefill_layer_consumer || prefill_bulk_consumer) &&
+            cold_flag && std::strcmp(cold_flag, "1") == 0 &&
+            !kvmem_original_positions_ && kvmem_async_device_ && stream &&
+            stream != cudaStreamLegacy && pipeline_geometry.page_tokens == kPagedKVPageSize &&
+            pipeline_geometry.device_plane_order == PagedKVPlaneOrder::PageMajor &&
+            pipeline_geometry.planes.size() == 16 * 4;
         // A future.get(), partial CUDA enqueue or metadata publication may
         // throw after some work has already been submitted. Keep this scope
         // alive until every local ColdRead future has been joined during stack
@@ -3186,7 +3240,7 @@ public:
         // reallocate any producer-owned Host source / physical KV target.
         bool compaction_complete = false;
         const auto abort_layer_attempt = [&]() noexcept {
-            if (!layer_ready || compaction_complete) { return; }
+            if ((!layer_ready && !bulk_cold) || compaction_complete) { return; }
             try {
                 if (kvmem_layer_ready_) { kvmem_layer_ready_->drain_consumers(); }
                 if (kvmem_source_k_) { kvmem_source_k_->drain_layer_source(); }
@@ -3320,7 +3374,10 @@ public:
                     std::max<std::uint32_t>(1, budget_blocks / 4) * kPagedKVPageSize;
             }
             kvmem_score_window(index, pool, stream);
-            sel = repo.preview_select(cfg, mandatory_ids,
+            sel = original_causal_history
+                ? ninfer::kvmem::kvmem_select_prefill_blocks(repo.blocks(), cfg,
+                                                          kvmem_lexical_pages_[index])
+                : repo.preview_select(cfg, mandatory_ids,
                                       kvmem_lexical_pages_[index],
                                       kvmem_older_matches_[index]); // K3 ranks the middle
         }
@@ -3423,7 +3480,7 @@ public:
             ninfer::kvmem::ColdKVStore::Handle source;
             HostKVAllocation buffer;
             // Destroy future first, including unwinding: never free bytes still used by I/O.
-            std::future<void> ready;
+            ninfer::kvmem::ColdKVStore::ReadFuture ready;
         };
         std::vector<std::uint32_t> cold_read_ids;
         std::vector<ColdRead> cold_reads;
@@ -3682,6 +3739,7 @@ public:
                     source_restores.size() <= 2;
                 if (!source_restores.empty() && !layer_sources) {
                     kvmem_source_k_->restore_many(source_restores, pool, stream);
+                    kvmem_layer_source_sync_pages_ += source_restores.size();
                 }
                 const bool layer_cold = layer_ready && cold_layer_count_ != 0;
                 if (!rerope_pages.empty() || layer_sources || layer_cold) {
@@ -3738,6 +3796,9 @@ public:
                                 ticket.mark_ready(layer);
                             }
                             kvmem_layer_ready_address_ = handle;
+                            kvmem_layer_source_async_pages_ += layer_sources ? source_restores.size() : 0;
+                            kvmem_layer_cold_async_pages_ += layer_cold ? cold_layer_count_ : 0;
+                            kvmem_layer_rephase_pages_ += rerope_pages.size();
                             if (const char* trace = std::getenv("NINFER_KVMEM_LAYER_READY_TRACE");
                                 trace && std::strcmp(trace, "1") == 0) {
                                 std::fprintf(stderr,
@@ -3937,6 +3998,41 @@ public:
             // the original, already-drained per-page H2D path.
             const bool layer_cold_stage = layer_ready && !cold_restores.empty() &&
                 cold_restores.size() <= cold_layer_slots_.size();
+            const bool cold_copy_pipeline = bulk_cold && !layer_cold_stage && cold_restores.size() > 2;
+            // Reuse the archive loader's two-slot retirement contract and
+            // Sync/Async ledger46 submit-before-retire ordering. The existing
+            // three-page arena holds at most three read/H2D owners in total,
+            // with at most two of either kind. No extra pinned allocation or
+            // early page publication.
+            struct ColdCopySlot {
+                HostKVAllocation source;
+                cudaStream_t stream = nullptr;
+                cudaEvent_t done = nullptr;
+                bool submitted = false;
+                void retire() {
+                    if (submitted) {
+                        KVMEM_CUDA_CHECK(cudaEventSynchronize(done));
+                        submitted = false;
+                    }
+                    source.release();
+                }
+                ~ColdCopySlot() {
+                    // A partial enqueue need not be covered by done yet.
+                    if (submitted && cudaStreamSynchronize(stream) != cudaSuccess) {
+                        std::terminate();
+                    }
+                    if (done) { (void)cudaEventDestroy(done); }
+                }
+            };
+            std::array<ColdCopySlot, 2> cold_copies;
+            if (cold_copy_pipeline) {
+                for (auto& slot : cold_copies) {
+                    slot.stream = stream;
+                    KVMEM_CUDA_CHECK(cudaEventCreateWithFlags(&slot.done, cudaEventDisableTiming));
+                }
+                ++kvmem_cold_copy_batches_;
+            }
+            std::size_t cold_copy_index = 0;
             for (const auto [id, device] : cold_restores) {
                 HostKVAllocation buffer;
                 const auto record = kvmem_block_cold_[index][id];
@@ -3966,23 +4062,50 @@ public:
                     kvmem_cold_file_->load(record,
                         std::span<std::byte>(writable.data(), kvmem_host_layout_.page_stride));
                 }
+                ++kvmem_cold_read_pages_;
                 if (layer_cold_stage) {
                     auto& slot = cold_layer_slots_.at(cold_layer_count_++);
                     slot.staging = std::move(buffer);
                     slot.block_id = id;
                     slot.physical = pool.physical_index_of(device);
                 } else {
+                    ColdCopySlot* slot = nullptr;
+                    if (cold_copy_pipeline) {
+                        slot = &cold_copies[cold_copy_index % cold_copies.size()];
+                        slot->retire();
+                        slot->source = std::move(buffer);
+                        // Set before any CUDA enqueue, including a partial failure.
+                        slot->submitted = true;
+                    }
                     const std::array<HostKVAllocationConstView, 1> source{
-                        kvmem_cold_staging_->view(buffer)};
+                        kvmem_cold_staging_->view(slot ? slot->source : buffer)};
                     const std::array<DeviceKVPageHandle, 1> destination{device};
                     transfer_runs += pool.copy_from_host_pages(source, destination, stream);
-                    kvmem_cold_sync(stream);
+                    if (slot) {
+                        const char* fault = std::getenv("NINFER_KVMEM_TEST_COLD_COPY_FAILURE");
+                        if (fault && std::strcmp(fault, "1") == 0) {
+                            throw std::runtime_error("KVMem injected Cold copy failure after H2D enqueue");
+                        }
+                        KVMEM_CUDA_CHECK(cudaEventRecord(slot->done, stream));
+                        ++kvmem_cold_copy_pages_;
+                        ++cold_copy_index;
+                    } else {
+                        kvmem_cold_sync(stream);
+                    }
                 }
                 (void)kvmem_cold_file_->release(record);
                 kvmem_block_cold_[index][id] = {};
                 buffer.release();
-                if (!layer_cold_stage) { start_cold_read(); }
+                if (!layer_cold_stage) {
+                    // Submit this page before retiring the previous DMA. Its
+                    // freed slot lets the next disk read overlap this copy.
+                    if (cold_copy_pipeline && next_cold_read < cold_read_ids.size()) {
+                        cold_copies[cold_copy_index % cold_copies.size()].retire();
+                    }
+                    start_cold_read();
+                }
             }
+            for (auto& slot : cold_copies) { slot.retire(); }
         } else if (transfer_runs != 0 && !async_demote) {
             KVMEM_CUDA_CHECK(cudaStreamSynchronize(stream));
         }
@@ -4292,9 +4415,13 @@ public:
         return checkpoint;
     }
 
-    [[nodiscard]] std::uint32_t rewind_original_prefix(
-        KVAddressSpaceHandle handle, const OriginalPrefixCheckpoint& checkpoint,
-        cudaStream_t stream = nullptr) {
+    // Preflight the complete native archive before any Main/MTP/StateImage member
+    // of a joint original-prefix rewind is mutated. The donor KVMem checkpoint
+    // contract validates each record before restore; unlike a single-store
+    // rewind, the paired Program must validate BOTH stores before the first
+    // destructive truncate. Pending DMA is retired before checking page owners.
+    void validate_original_prefix(KVAddressSpaceHandle handle,
+                                  const OriginalPrefixCheckpoint& checkpoint) {
         (void)retire_kvmem_transfers(true);
         Address& address = require_active(handle);
         if (!kvmem_original_positions_ || address.original_epoch == 0 ||
@@ -4325,6 +4452,29 @@ public:
                 throw std::logic_error("original KV prefix belongs to a replaced first-write page");
             }
         }
+    }
+
+    // A failure after the first destructive step of a paired Main/MTP rewind
+    // invalidates the entire original-position branch. The caller drains GPU
+    // and Cold workers before releasing the address; this noexcept marker
+    // prevents any intervening original-prefix capture/rewind from treating
+    // an already-partially-restored owner as a valid checkpoint.
+    void invalidate_original_prefix_branch(KVAddressSpaceHandle handle) noexcept {
+        if (!kvmem_original_positions_) { return; }
+        try { require_active(handle).original_epoch = 0; }
+        catch (...) {}
+    }
+
+    [[nodiscard]] std::uint32_t rewind_original_prefix(
+        KVAddressSpaceHandle handle, const OriginalPrefixCheckpoint& checkpoint,
+        cudaStream_t stream = nullptr) {
+        validate_original_prefix(handle, checkpoint);
+        Address& address = require_active(handle);
+        const auto index = static_cast<std::size_t>(&address - addresses_.data());
+        auto& repo = kvmem_repos_[index];
+        auto& native = kvmem_native_records_[index];
+        const auto frontier = checkpoint.logical_frontier;
+        const auto count = pages_for_tokens(frontier);
         try {
             // A probe can compact again. Derive the cut from the CURRENT map,
             // never from q0 plus an offset saved before that compaction. Keep
@@ -4811,6 +4961,13 @@ private:
     std::uint64_t kvmem_transfer_runs_     = 0;
     std::uint64_t kvmem_transfer_us_       = 0;
     std::uint64_t kvmem_layer_failure_drains_ = 0;
+    std::uint64_t kvmem_layer_source_async_pages_ = 0;
+    std::uint64_t kvmem_layer_source_sync_pages_ = 0;
+    std::uint64_t kvmem_layer_cold_async_pages_ = 0;
+    std::uint64_t kvmem_layer_rephase_pages_ = 0;
+    std::uint64_t kvmem_cold_read_pages_ = 0;
+    std::uint64_t kvmem_cold_copy_pages_ = 0;
+    std::uint64_t kvmem_cold_copy_batches_ = 0;
     std::uint64_t kvmem_scoreable_blocks_  = 0;
     std::uint64_t kvmem_zero_score_blocks_ = 0;
     std::uint32_t kvmem_window_tokens_     = 0;

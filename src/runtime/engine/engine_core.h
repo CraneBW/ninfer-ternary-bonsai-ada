@@ -5,6 +5,7 @@
 #include "core/device.h"
 #include "core/nvtx.h"
 #include "ninfer/types.h"
+#include "runtime/contract/drained_request_failure.h"
 #include "runtime/contract/types.h"
 #include "runtime/engine/request_record.h"
 #include "runtime/engine/resource_manager.h"
@@ -727,6 +728,11 @@ private:
             request->computed_prompt_tokens > begin.prompt_tokens - begin.reused_prompt_tokens) {
             throw std::logic_error("prompt progress exceeds the admitted prompt frontier");
         }
+        const auto frontier = begin.reused_prompt_tokens + request->computed_prompt_tokens;
+        // A canonical retry recomputes from Root. Keep public progress monotonic,
+        // while cumulative computed-prefill statistics still count both attempts.
+        if (request->canonical_restarted && frontier < request->published_prompt_frontier) { return; }
+        request->published_prompt_frontier = frontier;
         const PromptProgress progress{
             .total_prompt_tokens     = begin.prompt_tokens,
             .reused_prompt_tokens    = begin.reused_prompt_tokens + request->restored_prompt_tokens,
@@ -746,11 +752,15 @@ private:
             throw std::logic_error("request admission published generation start twice");
         }
         request->admitted_begin = begin;
-        if (request->observation.phase_timings || request->observation.live_timings ||
-            request->observation.prompt_progress) {
+        if (!request->canonical_restarted &&
+            (request->observation.phase_timings || request->observation.live_timings ||
+             request->observation.prompt_progress)) {
             request->admitted_at = Clock::now();
         }
-        if (request->consumer_mode != OutputConsumerMode::Streaming) { return; }
+        // The same API request already published its start, possibly consumed
+        // by another thread. Never publish a second start or reset its TTFT clock.
+        if (request->canonical_restarted ||
+            request->consumer_mode != OutputConsumerMode::Streaming) { return; }
         {
             std::lock_guard lock(request->mutex);
             if (request->stream_start || request->response_done) {
@@ -1427,26 +1437,94 @@ private:
         }
         setup.finish();
         ProgramCallScope program_call(*this);
-        auto progress =
-            instance_.program->advance_prefill(*request->sequence, &program_call.failed_timing());
-        program_call.finish(progress.timing);
+        std::optional<typename Package::PrefillProgress> progress;
+        try {
+            progress.emplace(
+                instance_.program->advance_prefill(*request->sequence, &program_call.failed_timing()));
+        } catch (const DrainedRequestFailure& drained) {
+            // Only the Program's explicit, fully synchronized and retired
+            // request-local failure signal may keep this Engine alive. Any
+            // other exception still reaches worker_loop's fatal cleanup.
+            // TP ranks must fail together, never drop one lane independently.
+            const std::exception_ptr cause = drained.cause();
+            if (tp::Lockstep::instance() != nullptr || !cause ||
+                resources_.context_transaction_kind().has_value() ||
+                instance_.program->has_context_transaction() ||
+                scheduler_.prefill_lane() != lane || slots_[lane] != request ||
+                !request->is_prefilling() || request->capture_pending ||
+                !request->lane || request->lane->value != lane || !request->sequence ||
+                resources_.lane_state(LaneId{lane}) != LogicalLaneState::Active) {
+                throw;
+            }
+            // Program already drained GPU/Cold and released the physical
+            // Main/MTP/State owners. Reconcile only the Engine's logical lane;
+            // calling Program::abort here would double-release a dead handle.
+            const std::array<LaneId, 1> failed_lane{LaneId{lane}};
+            resources_.release_failed_commit(std::span<const LaneId>(failed_lane));
+            if (resources_.lane_state(LaneId{lane}) != LogicalLaneState::Free) {
+                throw; // Manager could not retire it: preserve fatal policy.
+            }
+            if (max_concurrency_ == 1 && !materializing_ &&
+                !request->canonical_restarted && request->generated.empty() &&
+                !request->first_token &&
+                !request->cancelled.load(std::memory_order_acquire)) {
+                // Program reuses the resident model but retires all original
+                // archives/StateImages and rebuilds canonical graphs. The old
+                // logical catalogue is cleared only AFTER physical retirement.
+                auto prompt = instance_.program->recover_canonical_request();
+                resources_.clear_after_program_cleanup();
+                program_call.finish(program_call.failed_timing());
+                scheduler_.reset();
+                slots_[lane].reset();
+                request->sequence.reset();
+                request->lane.reset();
+                request->budget.reset();
+                request->base_plan.reset();
+                request->admitted_begin.reset();
+                request->begin.reset();
+                request->computed_prompt_tokens = 0;
+                request->restored_prompt_tokens = 0;
+                request->remaining_service_work = 0;
+                request->backfill_epoch = 0;
+                request->backfill_class = BackfillClass::None;
+                request->canonical_restarted = true;
+                request->prompt = std::move(prompt);
+                request->model_state = EngineRequestState::Waiting;
+                {
+                    std::lock_guard lock(queue_mutex_);
+                    for (const auto& queued : pending_) { queued->base_plan.reset(); }
+                    pending_.push_front(request);
+                }
+                request_admission_check();
+                publish_runtime_stats();
+                return;
+            }
+            program_call.finish(program_call.failed_timing());
+            scheduler_.clear_prefill_lane(lane);
+            complete_error(request, cause);
+            slots_[lane].reset();
+            request_admission_check();
+            publish_runtime_stats();
+            return;
+        }
+        program_call.finish(progress->timing);
         if (auto* lockstep = tp::Lockstep::instance()) {
             std::uint64_t hash = 1469598103934665603ULL;
-            if (progress.pending) {
-                const auto& first = *progress.pending;
+            if (progress->pending) {
+                const auto& first = *progress->pending;
                 const std::int32_t n = first.row_counts().empty() ? 1 : first.row_counts()[0];
                 if (n > 0 && static_cast<std::size_t>(n) <= first.tokens().size()) {
                     hash = tp::Lockstep::hash_tokens(
                         first.tokens().subspan(0, static_cast<std::size_t>(n)), hash);
                 }
             }
-            const std::uint64_t count = (static_cast<std::uint64_t>(progress.processed_prompt_tokens)
+            const std::uint64_t count = (static_cast<std::uint64_t>(progress->processed_prompt_tokens)
                                          << 2) |
-                                        (progress.complete ? 1U : 0U) |
-                                        (progress.capture ? 2U : 0U);
+                                        (progress->complete ? 1U : 0U) |
+                                        (progress->capture ? 2U : 0U);
             const auto agreed = tp_agree_cancellations(*lockstep, tp::UnitKind::Prefill, count,
                                                        hash, request->computed_prompt_tokens);
-            resolve_prefill_progress(request, std::move(progress), agreed);
+            resolve_prefill_progress(request, std::move(*progress), agreed);
             if (agreed[lane] && slots_[lane] == request) {
                 // Both ranks abort the partially prefilled request after the same chunk.
                 HostPhaseMeasurement boundary = begin_host_phase();
@@ -1456,7 +1534,7 @@ private:
             publish_runtime_stats();
             return;
         }
-        resolve_prefill_progress(request, std::move(progress), cancelled_at_unit_start);
+        resolve_prefill_progress(request, std::move(*progress), cancelled_at_unit_start);
         publish_runtime_stats();
     }
 
@@ -1601,9 +1679,11 @@ private:
                     request->backfill_class              = control.backfill_class;
                     request->materialization_diagnostics = terminal.diagnostics;
                     request->model_state                 = EngineRequestState::Prefill;
-                    request->host_timing.queue_wait_ns =
-                        elapsed_ns(request->submitted, Clock::now());
-                    request->queue_wait_recorded = true;
+                    if (!request->queue_wait_recorded) {
+                        request->host_timing.queue_wait_ns =
+                            elapsed_ns(request->submitted, Clock::now());
+                        request->queue_wait_recorded = true;
+                    }
                     slots_[lane]                 = request;
                     record_prefix_selection(control.summary);
                     materializing_.reset();

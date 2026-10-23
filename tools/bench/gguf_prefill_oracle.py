@@ -21,6 +21,8 @@ def main():
     p.add_argument("--gguf-source", type=Path, required=True)
     p.add_argument("--full-shapes", action="store_true",
                    help="decode complete existing up/down projections for each format")
+    p.add_argument("--all-linear-shapes", action="store_true",
+                   help="all unique registered non-vocabulary matrix shapes, full rows, bounded decoding")
     a = p.parse_args()
     sys.path.insert(0, str(a.gguf_source))
     import numpy as np
@@ -28,11 +30,17 @@ def main():
     from gguf.quants import dequantize
 
     formats = ["iq4_xs", "iq3_s", "iq3_xxs", "iq2_xs", "q2_k", "q4_k"]
+    if a.all_linear_shapes:
+        formats += ["iq2_s", "iq2_xxs", "q6_k"]
     result = {"artifact": str(a.artifact.resolve()), "decoder": "gguf CPU NumPy",
               "decoder_version": importlib.metadata.version("gguf"), "formats": {}}
     if a.full_shapes:
         result["token_counts"] = [1, 8, 9, 512, 1024, 2048, 2049]
         result["timing_tokens"] = [1, 512, 1024, 2048]
+    if a.all_linear_shapes:
+        result["token_counts"] = [1023, 1024]
+        result["timing_tokens"] = [1024]
+        result["scope"] = "all unique GGUF matrix formats/shapes with N<=34816; vocabulary heads excluded; IQ1_M vector-only unchanged"
     with a.artifact.open("rb") as f:
         header = f.read(32)
         assert header[:8] == b"NINFER\0\x03"
@@ -45,7 +53,14 @@ def main():
                           if x.get("format") == format_name and x.get("kind") == "tensor"
                           and len(x["shape"]) == 2 and x["shape"][0] >= 128
                           and x["shape"][1] % 256 == 0]
-            if a.full_shapes:
+            if a.all_linear_shapes:
+                unique = {}
+                for obj in candidates:
+                    n,k = obj["shape"]
+                    if n <= 34816 and n % 128 == 0:
+                        unique.setdefault((n,k), obj)
+                selected = list(unique.values())
+            elif a.full_shapes:
                 selected = []
                 for shape in ([34816, 5120], [5120, 17408], [17408, 5120]):
                     obj = next((x for x in candidates if x["shape"] == shape), None)
@@ -57,7 +72,7 @@ def main():
             block, size = GGML_QUANT_SIZES[qt]
             for obj in selected:
                 n, k = obj["shape"]
-                rows = n if a.full_shapes else 128
+                rows = n if a.full_shapes or a.all_linear_shapes else 128
                 row_bytes = k // block * size
                 if k % block or obj["bytes"] < rows * row_bytes:
                     raise ValueError(f"invalid tensor geometry: {obj['id']}")
@@ -71,7 +86,7 @@ def main():
                     packed = np.frombuffer(payload, dtype=np.uint8).reshape(count, row_bytes)
                     decoded = dequantize(packed, qt)
                     row_sums.extend(decoded.astype(np.float64).sum(axis=1).tolist())
-                key = f"{format_name}_n{n}_k{k}" if a.full_shapes else format_name
+                key = f"{format_name}_n{n}_k{k}" if a.full_shapes or a.all_linear_shapes else format_name
                 result["formats"][key] = {
                     "format": format_name, "object_id": obj["id"],
                     "offset": obj["offset"], "n": n, "k": k, "rows": rows,

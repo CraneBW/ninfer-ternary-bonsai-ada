@@ -20,7 +20,7 @@ using namespace ninfer::targets::qwen3_6::detail;
 namespace {
 constexpr std::uint32_t kLayers = 16;
 constexpr std::uint32_t kTokens = kPagedKVPageSize;
-constexpr std::uint32_t kPhysical = 8;
+constexpr std::uint32_t kPhysical = 16;
 int failures = 0;
 #define CHECK(ok, ...)                                                         \
     do {                                                                       \
@@ -32,9 +32,12 @@ int failures = 0;
         }                                                                      \
     } while (0)
 
-enum class Case { Success, PreadFailure, PartialH2dFailure };
+enum class Case { Success, PreadFailure, PartialH2dFailure, Bulk, BulkFailure,
+                  BulkNoLayer, BulkNoLayerFailure };
 
 void forced_cold_layer_recall(Case test_case) {
+    const bool without_layers = test_case == Case::BulkNoLayer || test_case == Case::BulkNoLayerFailure;
+    const bool bulk = test_case == Case::Bulk || test_case == Case::BulkFailure || without_layers;
 #if defined(_WIN32)
     CHECK(::_putenv_s("NINFER_KVMEM_HOST_PAGES", "1") == 0, "Host quota");
     CHECK(::_putenv_s("NINFER_KVMEM_LAYER_READY", "1") == 0, "Layer opt-in");
@@ -44,6 +47,13 @@ void forced_cold_layer_recall(Case test_case) {
     CHECK(::setenv("NINFER_KVMEM_LAYER_READY", "1", 1) == 0, "Layer opt-in");
     CHECK(::setenv("NINFER_KVMEM_LAYER_READY_TRACE", "1", 1) == 0, "Layer trace");
 #endif
+    if (bulk) {
+#if defined(_WIN32)
+        CHECK(::_putenv_s("NINFER_KVMEM_COLD_COPY_PIPELINE", "1") == 0, "bulk Cold copy");
+#else
+        CHECK(::setenv("NINFER_KVMEM_COLD_COPY_PIPELINE", "1", 1) == 0, "bulk Cold copy");
+#endif
+    }
     DeviceContext device;
     KVPageGeometry geometry;
     geometry.page_tokens = kTokens;
@@ -70,13 +80,14 @@ void forced_cold_layer_recall(Case test_case) {
     const auto handle = store.create_inactive();
     if (!handle) { throw std::runtime_error("failed to allocate KVMem address"); }
     store.activate(*handle, kPhysical, 0);
-    store.ensure_mapped_to_tokens(*handle, 6 * kTokens);
-    store.commit_frontier(*handle, 6 * kTokens);
+    const auto initial_pages = bulk ? 12U : 6U;
+    store.ensure_mapped_to_tokens(*handle, initial_pages * kTokens);
+    store.commit_frontier(*handle, initial_pages * kTokens);
 
     // Make V codes semantically observable independent of rephased K. Source
     // page 1 and 2 must carry their original patterns through Host or NVMe.
     const auto originally = store.window_page_handles(*handle);
-    CHECK(originally.size() == 6, "expected six original K/V blocks");
+    CHECK(originally.size() == initial_pages, "wrong original K/V block count");
     for (std::uint32_t block = 0; block < originally.size(); ++block) {
         const auto physical = pool.physical_index_of(pages.physical(originally[block]));
         for (std::uint32_t layer = 0; layer < kLayers; ++layer) {
@@ -94,12 +105,16 @@ void forced_cold_layer_recall(Case test_case) {
     // First selection parks blocks 1 and 2 under a one-page Host budget.
     // At least one must spill to Cold. The next explicit selection requests
     // BOTH again, forcing one genuine Cold stage-in in a two-page recall.
-    const std::array<std::uint32_t, 4> first{0, 3, 4, 5};
-    const auto w1 = store.kvmem_compact(*handle, 4 * kTokens, device.stream, {},
+    const std::vector<std::uint32_t> first = bulk
+        ? std::vector<std::uint32_t>{0,7,8,9,10,11} : std::vector<std::uint32_t>{0,3,4,5};
+    const auto budget = static_cast<std::uint32_t>(first.size()) * kTokens;
+    const auto w1 = store.kvmem_compact(*handle, budget, device.stream, {},
                                        false, 0, first);
-    CHECK(w1 == 4 * kTokens && store.kvmem_cold_bytes() != 0,
+    CHECK(w1 == budget && store.kvmem_cold_bytes() != 0,
           "initial one-Host-page compaction did not spill to Cold");
-    const std::array<std::uint32_t, 4> second{0, 1, 2, 5};
+    const std::vector<std::uint32_t> second = bulk
+        ? std::vector<std::uint32_t>{0,1,2,3,4,5} : std::vector<std::uint32_t>{0,1,2,5};
+    if (bulk) { store.enable_kvmem_async_d2h(device); }
     if (test_case == Case::PreadFailure) {
         // A real std::async Cold prefetch delivers a read error via get().
         store.enable_kvmem_async_d2h(device);
@@ -110,6 +125,12 @@ void forced_cold_layer_recall(Case test_case) {
         CHECK(::setenv("NINFER_KVMEM_TEST_COLD_PREAD_FAILURE", "1", 1) == 0,
               "enable pread error receipt");
 #endif
+    } else if (test_case == Case::BulkFailure || test_case == Case::BulkNoLayerFailure) {
+#if defined(_WIN32)
+        CHECK(::_putenv_s("NINFER_KVMEM_TEST_COLD_COPY_FAILURE", "1") == 0, "bulk enqueue failure");
+#else
+        CHECK(::setenv("NINFER_KVMEM_TEST_COLD_COPY_FAILURE", "1", 1) == 0, "bulk enqueue failure");
+#endif
     } else if (test_case == Case::PartialH2dFailure) {
 #if defined(_WIN32)
         CHECK(::_putenv_s("NINFER_KVMEM_TEST_PARTIAL_LAYER_H2D_FAILURE", "1") == 0,
@@ -119,11 +140,12 @@ void forced_cold_layer_recall(Case test_case) {
               "enable partial H2D error receipt");
 #endif
     }
-    if (test_case != Case::Success) {
+    if (test_case != Case::Success && test_case != Case::Bulk && test_case != Case::BulkNoLayer) {
         bool received_injected_error = false;
         try {
-            (void)store.kvmem_compact(*handle, 4 * kTokens, device.stream, {},
-                                      false, 0, second, std::nullopt, true);
+            (void)store.kvmem_compact(*handle, budget, device.stream, {},
+                                      false, 0, second, std::nullopt, !without_layers,
+                                      false, without_layers);
         } catch (const std::runtime_error& error) {
             received_injected_error =
                 std::string_view(error.what()).find("injected") != std::string_view::npos;
@@ -147,17 +169,18 @@ void forced_cold_layer_recall(Case test_case) {
               pool.allocated_pages());
         return;
     }
-    const auto w2 = store.kvmem_compact(*handle, 4 * kTokens, device.stream, {},
-                                       false, 0, second, std::nullopt, true);
-    CHECK(w2 == 4 * kTokens, "forced two-page recall has wrong window=%u", w2);
+    const auto w2 = store.kvmem_compact(*handle, budget, device.stream, {},
+                                       false, 0, second, std::nullopt, !without_layers,
+                                       false, without_layers);
+    CHECK(w2 == budget, "forced recall has wrong window=%u", w2);
     auto* consumer = store.kvmem_layer_ready_for(*handle);
-    CHECK(consumer != nullptr, "Cold layer producer did not publish a consumer ticket");
-    if (!consumer) { throw std::runtime_error("missing Cold layer consumer"); }
+    CHECK(bulk || consumer != nullptr, "Cold layer producer did not publish a consumer ticket");
+    if (bulk) { CHECK(store.kvmem_cold_copy_pages() > 2, "bulk Cold route did not execute"); }
     const auto selected = store.window_page_handles(*handle);
-    CHECK(selected.size() == 4, "Cold layer window should have four pages");
+    CHECK(selected.size() == second.size(), "wrong Cold window page count");
     for (std::uint32_t layer = 0; layer < kLayers; ++layer) {
-        consumer->wait_before_layer(layer, device.stream);
-        for (std::size_t slot = 1; slot <= 2; ++slot) {
+        if (consumer) { consumer->wait_before_layer(layer, device.stream); }
+        for (std::size_t slot = 1; slot <= (bulk ? 5U : 2U); ++slot) {
             const auto physical = pool.physical_index_of(pages.physical(selected.at(slot)));
             const auto plane = pool.plane(layer * 4 + 1);
             const std::size_t bytes = static_cast<std::size_t>(plane.nb[3]);
@@ -169,14 +192,16 @@ void forced_cold_layer_recall(Case test_case) {
             // pageable allocations need explicit completion before inspection
             CUDA_CHECK(cudaStreamSynchronize(device.stream));
             const auto expected = static_cast<std::uint8_t>(second[slot] * 17 + layer * 3 + 7);
-            CHECK(!values.empty() && values.front() == expected && values.back() == expected,
+            CHECK(std::all_of(values.begin(), values.end(), [expected](auto x) { return x == expected; }),
                   "Cold layer V payload changed block=%u layer=%u", second[slot], layer);
         }
-        consumer->release_after_layer(layer, device.stream);
+        if (consumer) { consumer->release_after_layer(layer, device.stream); }
     }
     CUDA_CHECK(cudaStreamSynchronize(device.stream));
     CHECK(store.kvmem_inflight_pages() == 0, "Cold restore left a page in flight");
     CHECK(store.release(*handle), "Cold layer address release failed");
+    CHECK(pool.allocated_pages() == 0,
+          "successful Cold recall leaked physical pages after address release");
     CHECK(store.kvmem_layer_ready_for(*handle) == nullptr,
           "released Cold window exposed a stale generation ticket");
 }
@@ -188,6 +213,14 @@ int main(int argc, char** argv) {
         test_case = Case::PreadFailure;
     } else if (argc == 2 && std::strcmp(argv[1], "--partial-h2d-failure") == 0) {
         test_case = Case::PartialH2dFailure;
+    } else if (argc == 2 && std::strcmp(argv[1], "--bulk") == 0) {
+        test_case = Case::Bulk;
+    } else if (argc == 2 && std::strcmp(argv[1], "--bulk-failure") == 0) {
+        test_case = Case::BulkFailure;
+    } else if (argc == 2 && std::strcmp(argv[1], "--bulk-no-layer") == 0) {
+        test_case = Case::BulkNoLayer;
+    } else if (argc == 2 && std::strcmp(argv[1], "--bulk-no-layer-failure") == 0) {
+        test_case = Case::BulkNoLayerFailure;
     } else if (argc != 1) {
         std::fprintf(stderr, "usage: kvmem_layer_cold_test [--pread-failure|--partial-h2d-failure]\n");
         return 2;

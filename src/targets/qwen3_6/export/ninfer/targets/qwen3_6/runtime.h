@@ -932,6 +932,8 @@ public:
     [[nodiscard]] ReleaseResult<Variant>
     release_shared_prefix(SharedPrefixHandle<Variant>&& shared) noexcept;
     void fail_all_cleanup() noexcept;
+    // Consumes a fully drained original-position failure and retires its old epoch.
+    [[nodiscard]] PreparedPrompt recover_canonical_request();
 
     [[nodiscard]] bool
     isolated_request_feasible(const RequestBasePlan<Variant>& base) const noexcept;

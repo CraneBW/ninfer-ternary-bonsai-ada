@@ -465,6 +465,18 @@ Cancellation 不修改 in-flight mapping，也不从未完成的 active state �
 - prompt 或 generation request 无法表示；
 - 即使采用 root source 并释放全部 inactive cache，单请求仍不可行。
 
+### 7.3.1 已排空原位置恢复的有界重启
+
+原位置压缩历史还受选页条件约束。词法候选从历史prefill开始参与选页，因此相同文本前缀
+可对应不同native KV/GDN轨迹。Program在请求规划时计算确切lexical/older页集合，随
+SequenceState保存；超出未压缩预算的checkpoint只有条件也匹配才能作为复用候选，
+mutation前再次核对。不匹配时使用合法早期checkpoint或Root，不发布旧状态与新条件的混合。
+该资格补充现有owner/epoch、完整前缀与query边界校验，不替代它们。
+
+Program仅在原位置q0恢复失败后确认设备已同步、旧Main/MTP与StateImage完全退休且无context transaction，才能返回DrainedRequestFailure。Engine仅允许C1、非TP、未取消、尚未发布token的同一请求重启一次：退休全部原位置catalogue，建立新的canonical archive epoch并重建Graph，然后沿原FIFO准入路径重新materialize原始输入。请求身份、TTFT起点与唯一终态保留，公开进度不能倒退。
+
+这不允许重试未验证的CUDA错误、混合checkpoint或已输出请求；不改变下节的Engine-wide failure合同。具体收据见[同请求canonical重启](2026-10-23-canonical-failure-retry.md)。
+
 ### 7.4 Engine-wide failure
 
 以下情况说明共享物理状态已无法安全解释，必须使整个 Engine 失败：

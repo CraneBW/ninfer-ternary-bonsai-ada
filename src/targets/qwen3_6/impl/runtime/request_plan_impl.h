@@ -274,6 +274,19 @@ RequestBasePlan ProgramImplCore::plan_request(const PreparedPromptData& prompt,
                                                : FinishReason::ContextCapacity;
     base->sampling                       = translate_sampling(options.sampling);
     base->allow_prefix_reuse             = options.allow_prefix_reuse;
+    if (original_kv_positions && original_causal_prefill) {
+        base->original_selection_condition.prefill_policy = original_content_prefill ? 2 : 1;
+        if (original_content_prefill) {
+            base->original_selection_condition.lexical = ninfer::kvmem::kvmem_content_anchor_pages(
+                prompt.token_ids, prompt.query_begin, text_kv_addresses->kvmem_budget_tokens());
+        }
+    } else if (original_kv_positions) {
+        base->original_selection_condition.lexical = ninfer::kvmem::kvmem_lexical_recall_pages(
+            prompt.token_ids, prompt.query_begin,
+            std::span<const TokenId>(prompt.lexical_query_token_ids),
+            static_cast<std::uint32_t>(kPagedKVPageSize),
+            &base->original_selection_condition.older, 4);
+    }
     base->summary.publish_continuation =
         options.allow_prefix_reuse && prompt.identity.reusable && context_cache.enabled;
     const std::uint32_t reserved_context_tokens =
@@ -511,6 +524,7 @@ std::optional<AdmissionCandidate> ProgramImplCore::inspect_lane(
     plan->backend_kv_page_entitlement = base.backend_kv_page_entitlement;
     plan->root_rebuild_work           = base.root_rebuild_work;
     plan->root_rebuild_tail_begin     = base.root_rebuild_tail_begin;
+    plan->original_selection_condition = base.original_selection_condition;
 
     if ((source != nullptr && shared_source != nullptr) ||
         ((source == nullptr && shared_source == nullptr) != !checkpoint.has_value())) {
@@ -615,6 +629,15 @@ std::optional<AdmissionCandidate> ProgramImplCore::inspect_lane(
     if (original_kv_positions) {
         if (prompt.has_media() || prompt.rope_delta != 0) {
             throw std::invalid_argument("original-position KVMem currently requires plain text with zero RoPE delta");
+        }
+        if (plan->reuse_base > text_kv_addresses->kvmem_budget_tokens() &&
+            (source == nullptr || source->original_selection_condition !=
+                                  base.original_selection_condition)) {
+            // Reuse KVMem/ActKV's complete-boundary rule: the StateImage and
+            // native K/V must describe the SAME selected-history trajectory.
+            // A changed lexical policy can affect history long before q0.
+            // Keep exact uncompressed anchors eligible; otherwise rebuild.
+            return std::nullopt;
         }
         if (prompt.query_begin < plan->reuse_base && prompt.query_end > prompt.query_begin &&
             (source == nullptr || source->last_query_begin != prompt.query_begin ||

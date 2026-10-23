@@ -3,6 +3,7 @@
 #include "ops/op_tester.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -32,6 +33,7 @@ struct Geometry {
     int axes;
     int tokens;
     float theta;
+    const float* frequencies = nullptr;
 };
 
 std::size_t dense_elements(int head_dim, int heads, int tokens) {
@@ -93,7 +95,9 @@ std::vector<double> rope_oracle(const std::vector<float>& input, const std::vect
                     axis     = geometry.axes == 3 ? pair % 3 : 0;
                     exponent = -2.0 * static_cast<double>(pair) / geometry.rotary_dim;
                 }
-                const double frequency = std::pow(static_cast<double>(geometry.theta), exponent);
+                const double frequency = geometry.frequencies != nullptr
+                    ? static_cast<double>(geometry.frequencies[pair])
+                    : std::pow(static_cast<double>(geometry.theta), exponent);
                 const double phase =
                     static_cast<double>(
                         positions[static_cast<std::size_t>(axis) * geometry.tokens + token]) *
@@ -441,7 +445,33 @@ int run_vision_packed_case() {
 
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    if (argc == 2 && std::string(argv[1]) == "--long-text") {
+        ops::set_text_rope_frequencies(nullptr);
+        int failures=0;
+        for (const int pos : {212275,261411}) {
+            const Geometry main{"long original Main24Q4K",256,64,1,28,kTextTheta};
+            const Geometry mtp{"long original MTP16Q2K",256,64,1,1,kTextTheta};
+            failures+=run_pair_case(main,24,4,pos,0,0,0,true);
+            failures+=run_pair_case(mtp,16,2,pos,0,0,0,true);
+        }
+        std::array<float,32> divisors;
+        for (int pair=0;pair<32;++pair) {
+            const double raw=std::pow(1.0e7,-double(pair)/32.0);
+            const double wavelength=2.0*std::acos(-1.0)/raw;
+            const double interpolation=std::clamp((wavelength-8192.0)/(262144.0-8192.0),0.0,1.0);
+            divisors[pair]=float(raw*((1.0-interpolation)+interpolation/4.0));
+        }
+        ops::set_text_rope_frequencies(divisors.data());
+        for (const int pos : {212275,261411}) {
+            const Geometry main{"long fixed4 Main24Q4K",256,64,1,28,kTextTheta,divisors.data()};
+            const Geometry mtp{"long fixed4 MTP16Q2K",256,64,1,1,kTextTheta,divisors.data()};
+            failures+=run_pair_case(main,24,4,pos,0,0,0,true);
+            failures+=run_pair_case(mtp,16,2,pos,0,0,0,true);
+        }
+        ops::set_text_rope_frequencies(nullptr);
+        return failures ? 1 : 0;
+    }
     if (cuda_unavailable()) {
         std::cout << "SKIP: no usable CUDA device\n";
         return 77;

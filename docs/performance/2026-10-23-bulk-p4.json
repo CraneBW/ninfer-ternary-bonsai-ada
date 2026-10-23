@@ -1,0 +1,113 @@
+{
+  "state": "PASS",
+  "binary": {
+    "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/apps/ninfer-serve",
+    "size": 402729896,
+    "mtime_ns": 1792733297429052838
+  },
+  "power_w": 200,
+  "adopt_async": false,
+  "paired_session_reductions": [
+    0.008488030338426267,
+    0.0038617441059959345,
+    -0.0067236583270253725
+  ],
+  "median_session_reduction": 0.0038617441059959345,
+  "receipt": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-cold-prefill-goal-20261023/p4",
+  "arms": [
+    {
+      "pair": 0,
+      "mode": "async",
+      "session_s": 186.5485500930008,
+      "first_ttft_s": 184.019031021,
+      "continuation_ttft_median_s": 0.400164743,
+      "logical_cold_bytes": 546889728,
+      "physical_process_read_bytes": 5845860352,
+      "staging_bytes": 9191424,
+      "cold_copy_pages": 238,
+      "worker_reads": [
+        238,
+        17062,
+        238,
+        17062
+      ],
+      "host_peak_bytes": 17327206400
+    },
+    {
+      "pair": 0,
+      "mode": "sync",
+      "session_s": 188.14553510299447,
+      "first_ttft_s": 185.621736557,
+      "continuation_ttft_median_s": 0.396167008,
+      "logical_cold_bytes": 544591872,
+      "physical_process_read_bytes": 3674570752,
+      "staging_bytes": 9191424,
+      "cold_copy_pages": 0,
+      "worker_reads": [],
+      "host_peak_bytes": 17027403776
+    },
+    {
+      "pair": 1,
+      "mode": "sync",
+      "session_s": 188.39007557999867,
+      "first_ttft_s": 185.868704951,
+      "continuation_ttft_median_s": 0.398422548,
+      "logical_cold_bytes": 544591872,
+      "physical_process_read_bytes": 6855319552,
+      "staging_bytes": 9191424,
+      "cold_copy_pages": 0,
+      "worker_reads": [],
+      "host_peak_bytes": 17030770688
+    },
+    {
+      "pair": 1,
+      "mode": "async",
+      "session_s": 187.66256131599948,
+      "first_ttft_s": 185.138440263,
+      "continuation_ttft_median_s": 0.399870437,
+      "logical_cold_bytes": 544591872,
+      "physical_process_read_bytes": 7723929600,
+      "staging_bytes": 9191424,
+      "cold_copy_pages": 237,
+      "worker_reads": [
+        237,
+        17061,
+        237,
+        17061
+      ],
+      "host_peak_bytes": 17326288896
+    },
+    {
+      "pair": 2,
+      "mode": "async",
+      "session_s": 188.9277604979943,
+      "first_ttft_s": 186.392894127,
+      "continuation_ttft_median_s": 0.396398829,
+      "logical_cold_bytes": 544591872,
+      "physical_process_read_bytes": 8046583808,
+      "staging_bytes": 9191424,
+      "cold_copy_pages": 237,
+      "worker_reads": [
+        237,
+        17061,
+        237,
+        17061
+      ],
+      "host_peak_bytes": 17325379584
+    },
+    {
+      "pair": 2,
+      "mode": "sync",
+      "session_s": 187.66595871200116,
+      "first_ttft_s": 185.145159123,
+      "continuation_ttft_median_s": 0.397423613,
+      "logical_cold_bytes": 544591872,
+      "physical_process_read_bytes": 9073504256,
+      "staging_bytes": 9191424,
+      "cold_copy_pages": 0,
+      "worker_reads": [],
+      "host_peak_bytes": 17032343552
+    }
+  ],
+  "adoption_policy_update": "User 2026-10-23: retain small reproducible gains; 10 percent is not a required adoption threshold. This mixed-sign three-pair result remains pending, not discarded."
+}

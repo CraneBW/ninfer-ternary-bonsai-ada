@@ -33,6 +33,8 @@ flowchart LR
 
 后一点影响 TTFT：逻辑 prompt 已命中公开 prefix cache，仍可能需要内部历史重建。项目分别记录 logical computed/cached、history/query replay、source restore 和搬运指标，不把“缓存命中”视为“完全没有重算”。
 
+2026-10-23 新增显式 **original + causal-history + content-anchors / MTP7 / chunk1024** 资格：200W、32K 总工作集、36K 物理池下，原213K三对 **36/36**、原256K **6/6** 精确正确，history replay均为0。宽批相对chunk512的冷首轮TTFT成对减少中位 **4.68%**（161.36/168.64/161.62 → 153.80/155.58/155.13s）；4K/32K prefill分别改善 **3.21%/3.92%**，decode基本持平。新bulk Cold流水P4也36/36正确，session收益中位0.39%，三对方向混杂，暂保持关闭并保留候选。全局默认不变，配置、逐题延迟与资源边界见[本轮报告](docs/maintainer/2026-10-23-cold-prefill-and-bulk-p4.md)。
+
 ## 运行环境与模型
 
 | 项目 | 本项目当前明确范围 |
@@ -53,11 +55,17 @@ flowchart LR
 
 续问复用进一步减少重复重建：200W同binary原213K三对，六题会话中位 **145.23→36.11s**，后续单题TTFT中位 **22.06→0.404s**，历史回放 **185836→32228 tokens**；36/36及256K6/6精确正确。固定快照工具默认启用，普通Serve显式设 `NINFER_KVMEM_CANONICAL_QUERY_REUSE=1`；状态/证据/容量不满足时沿用原重建。这组ABI1对照的首请求仍约33.5s，R21原位置模式仍关闭。[资格、整体对照与回退](docs/maintainer/2026-10-22-canonical-query-reuse.md)。
 
+2026-10-23修复R21跨轮复用资格：压缩native KV/GDN还必须匹配词法选页条件，不能只凭相同文本前缀复用。200W/C1/MTP7/Graph原213K六题已 **6/6精确**；本次六题都需Root重算、各约159s TTFT，未取得性能收益，原位置仍默认OFF，继续使用上述已验canonical续问路径。[修复、数值缺口与原始收据](docs/maintainer/2026-10-23-r21-conditioning-and-p4.md)。
+
 完整canonical-ready快照继续省掉首次重建：200W同binary原213K三对，首TTFT中位 **32.99→10.35s**，六题会话 **35.54→13.11s**（成对减少68.62%/63.11%），history replay **32228→0**。36/36与256K重启6/6精确正确；后五题TTFT合计2.03→2.31s的小回退保留。固定快照工具现auto优先使用已有ABI2包；首次生成及索引创建另计，原ABI1包保留。[完整结果、生成与回退命令](docs/maintainer/2026-10-22-canonical-ready-checkpoint.md)。
 
 快照加载再做有界流水：双槽H2D、Host直接读取与私有COW首次K区间，200W同binary原213K三对，load中位 **10.886→10.380s**、六题会话 **13.881→13.436s**（成对减少4.64%/3.47%）。36/36及额外raw213K、256K各6/6精确；后续TTFT无改善。固定工具213K默认采用，256K仅显式 `--checkpoint-load-pipeline`；该项不是逐层forward/P4通过。[实现、原值与参考命令](docs/maintainer/2026-10-22-checkpoint-load-pipeline.md)。
 
 投机档位复核：MTP4在200W原213K/256K六题各自生成+独立恢复均6/6精确；额外256K六题会话同SSD三对中位快4.22%，但正式4K/32K tg128三对中，MTP4相对MTP15的decode分别慢14.00%/33.42%，因此维持默认MTP15。另修复显式adaptive MTP的cohort/lane epoch复位：200W新binary下4K/32K固定MTP4与adaptive MTP4各三对输出、usage均一致，session中位反而慢1.13%/0.29%，**仅保留opt-in**，DeepInfer host跨轮队列尚未采用。[S3正式对照](docs/maintainer/2026-10-22-s3-mtp4-long-quality.md) · [S5控制器与host/device实测](docs/maintainer/2026-10-22-s5-deepinfer-host-mtp.md)。
+
+2026-10-23补充200W公平服务对照：相同约4.6K输入下，对话/代码/确定性记录的decode中位分别为普通AR **44.58/44.55/44.46**、MTP4 **80.03/105.90/142.33**、MTP15 **45.71/71.94/217.15**、DFlash2 K3 **92.15/111.18/134.31 tok/s**。DFlash2长213K因runtime容量不足在加载权重前拒绝，256K未运行；仅推荐已验C1短域，默认不变。
+
+普通AR新增共享输入量化候选（`NINFER_SM89_SHARED_VECTOR=1`，默认0）：4K/32K同binary三对decode提升 **2.58%/2.38%**，prefill基本持平，32K整体会话无明显收益。普通AR canonical续接还修复了完成阶段重复选页；原213K/256K真实cold-prefill各 **6/6**，后续TTFT分别 **359–382ms/398–417ms**，不读取MTP快照、不把热续接计为cold-prefill。[完整比较、资源、来源与回退](docs/maintainer/2026-10-23-sm89-spec-ar-concurrency.md)。
 
 ## 构建
 
@@ -166,6 +174,8 @@ Cold目录设在NVMe挂载点时使用该设备上的文件后备；目录和fil
 已实现页事务与解码计算重叠、有界批次拆分、ready/completion事件、pin与owner/generation检查、失败排空和回退。通过 `--kvmem-transfer-mode async` 显式选择；默认仍为 **sync**。
 
 2026-10-20的P4成对测试包含18会话/54请求，全部正确完整；深轮async相对同对sync的session wall缩短中位约 **0.54%**，未达到预设10%的默认采用门槛。它证明当时配置的功能与有界生命周期，不支持“超池完全不减速”或“async已带来10%加速”。后续MMQ/MTP/source改动也没有自动更新这份P4结论。详见 [活跃验证记录](docs/maintainer/2026-10-20-kvmem-actkv-live-validation.md)。
+
+2026-10-23新增当前逐层路径P4：200W、C1/MTP15/Graph、32K工作集、完整cold-prefill原213K三对 **36/36精确**，成对session减少中位 **0.603%**，未达10%，仍保留sync。每个候选351个Main16层epoch实际命中，退出完整排空，staging峰值8.766MiB；长题source/Cold大批量仍在forward前回退等待，不能称作所有搬运均按层重叠。六臂都保留相同canonical续问复用，后续API TTFT约0.4s。本结果没有加载旧快照，与上方快照加载秒数分开解释。[P4表格与支持域](docs/maintainer/2026-10-23-r21-conditioning-and-p4.md) · [逐臂性能数据](docs/performance/2026-10-23-layer-ready-p4.json)。
 
 ## 质量与支持范围
 

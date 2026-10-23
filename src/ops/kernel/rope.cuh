@@ -27,6 +27,25 @@ inline constexpr int kRopeMaxHalf = 128;
 // agree on them: the rope kernel, the KVMem block scorer (un-RoPE before the mean-K cosine) and
 // the KVMem compaction re-phase. A YaRN-extended Program publishes its own table here.
 extern __device__ __constant__ float kTextRopeInvFrequency[32];
+extern __device__ __constant__ double kTextRopeInvFrequencyWide[32];
+extern __device__ __constant__ int kTextRopeLongPrecision;
+
+// Long logical positions can lose several milliradians when position*freq
+// is rounded to FP32 before range reduction. Keep that product and sin/cos
+// reduction wide; the visible coefficients and BF16 output stay unchanged.
+// The compact <=36K KVMem path keeps its established arithmetic.
+__device__ __forceinline__ void text_rope_sincos(std::int32_t position, int pair,
+                                                 float* sine, float* cosine) {
+    if (kTextRopeLongPrecision && (position >= 65536 || position <= -65536)) {
+        double wide_sine, wide_cosine;
+        sincos(static_cast<double>(position) * kTextRopeInvFrequencyWide[pair],
+               &wide_sine, &wide_cosine);
+        *sine=static_cast<float>(wide_sine);
+        *cosine=static_cast<float>(wide_cosine);
+    } else {
+        sincosf(static_cast<float>(position)*kTextRopeInvFrequency[pair],sine,cosine);
+    }
+}
 
 static __device__ __constant__ float kVisionRopeInvFrequency[18] = {
     1.000000000e+00F, 5.994842503e-01F, 3.593813664e-01F, 2.154434690e-01F, 1.291549665e-01F,
@@ -55,6 +74,11 @@ __device__ __forceinline__ void fixed_sincos(const std::int32_t* positions, int 
         int axis = 0;
         float frequency;
         fixed_axis_frequency<Mode>(pair, &axis, &frequency);
+        if constexpr (Mode == RopeKernelMode::Text1D || Mode == RopeKernelMode::TextMrope) {
+            text_rope_sincos(positions[static_cast<std::int64_t>(axis)*tokens+token],
+                             pair,sine,cosine);
+            return;
+        }
         const float angle =
             static_cast<float>(positions[static_cast<std::int64_t>(axis) * tokens + token]) *
             frequency;

@@ -217,7 +217,7 @@ public:
             Record captured;
             void* data = nullptr;
             // Destroy future first on unwind; the store retains both pinned buffers.
-            std::future<void> ready;
+            ColdKVStore::ReadFuture ready;
         };
         std::array<ReadSlot, 2> slots;
         const auto start_read = [&](std::size_t i) {
@@ -500,7 +500,7 @@ private:
             void* data = nullptr;
             CopyBatchDescriptors descriptors;
             bool copied = false;
-            std::future<void> read;
+            ColdKVStore::ReadFuture read;
         };
         std::array<Slot, 2> slots;
         slots[0].data = staging_->data();

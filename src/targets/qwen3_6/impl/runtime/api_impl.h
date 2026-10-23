@@ -559,6 +559,11 @@ void Program<Variant>::fail_all_cleanup() noexcept {
 }
 
 template <>
+PreparedPrompt Program<Variant>::recover_canonical_request() {
+    return impl_->recover_canonical_request();
+}
+
+template <>
 bool Program<Variant>::isolated_request_feasible(
     const RequestBasePlan<Variant>& base) const noexcept {
     return impl_->isolated_request_feasible(base);

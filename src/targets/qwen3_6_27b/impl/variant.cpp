@@ -17,6 +17,7 @@
 #include "ops/linear/gguf/gguf_dispatch.h"
 
 #include <algorithm>
+#include <array>
 #include <cstdlib>
 #include <stdexcept>
 
@@ -147,6 +148,20 @@ void copy_projection_rows(const Tensor& source, Tensor& packed, std::int32_t row
                                  stream));
 }
 
+bool shared_vector_requested() {
+#if defined(NINFER_SM89)
+    static const bool enabled = [] {
+        const char* value = std::getenv("NINFER_SM89_SHARED_VECTOR");
+        if (!value || (value[0] == '0' && value[1] == '\0')) { return false; }
+        if (value[0] == '1' && value[1] == '\0') { return true; }
+        throw std::invalid_argument("NINFER_SM89_SHARED_VECTOR must be 0 or 1");
+    }();
+    return enabled;
+#else
+    return false;
+#endif
+}
+
 void project_individual_gdn(const Tensor& hidden,
                              const IndividualGdnInputProjectionPayload& weights,
                              Tensor& projected, Tensor& z, WorkspaceArena& workspace,
@@ -155,6 +170,43 @@ void project_individual_gdn(const Tensor& hidden,
     const Tensor input = hidden.view({TextConfig::hidden, tokens});
     Tensor packed = projected.view({TextConfig::convolution_dim, tokens});
     Tensor output_gate = z.view({TextConfig::value_dim, tokens});
+    if (shared_vector_requested() && tokens <= ops::gguf::kMaxVectorColumns) {
+        // The registered GSQ parent is [Q;K;V;Z]. Join only contiguous views
+        // with identical encoding/gather. Each output still receives the same
+        // FP32 vector reduction and the original BF16 rounding before conv.
+        Weight qkv = weights.query;
+        const auto block = gguf_block_shape(qkv.qtype);
+        const bool contiguous = is_gguf(qkv.qtype) && block.elements &&
+            qkv.k % block.elements == 0 &&
+            weights.key.qtype == qkv.qtype && weights.value.qtype == qkv.qtype &&
+            weights.key.k == qkv.k && weights.value.k == qkv.k &&
+            weights.key.input_columns == qkv.input_columns &&
+            weights.value.input_columns == qkv.input_columns &&
+            static_cast<const std::byte*>(weights.key.qdata) ==
+                static_cast<const std::byte*>(qkv.qdata) +
+                static_cast<std::int64_t>(qkv.n) * (qkv.k / block.elements) * block.bytes &&
+            static_cast<const std::byte*>(weights.value.qdata) ==
+                static_cast<const std::byte*>(weights.key.qdata) +
+                static_cast<std::int64_t>(weights.key.n) * (qkv.k / block.elements) * block.bytes;
+        if (contiguous) {
+            qkv.n += weights.key.n + weights.value.n;
+            qkv.shape[0] = qkv.padded_shape[0] = qkv.n;
+            qkv.payload_bytes = weights.query.payload_bytes + weights.key.payload_bytes +
+                                weights.value.payload_bytes;
+            const std::array<ops::detail::GgufProduct, 2> products{{
+                {&qkv, &packed}, {&weights.z, &output_gate}}};
+            if (ops::detail::try_gguf_shared_vector_dispatch(
+                    input, products, workspace, stream)) { return; }
+        } else {
+            const std::array<ops::detail::GgufProduct, 4> products{{
+                {&weights.query, &packed, 0},
+                {&weights.key, &packed, TextConfig::key_dim},
+                {&weights.value, &packed, 2 * TextConfig::key_dim},
+                {&weights.z, &output_gate}}};
+            if (ops::detail::try_gguf_shared_vector_dispatch(
+                    input, products, workspace, stream)) { return; }
+        }
+    }
     const auto project = [&](const Weight& weight, std::int32_t offset) {
         static const bool packed_gguf = [] {
             const char* value = std::getenv("NINFER_R28_BUNDLE");
@@ -336,6 +388,13 @@ void Variant::attention_projection(const Tensor& hidden,
         Tensor gate_flat = gate.view({TextConfig::query_size, columns});
         Tensor key_flat = key.view({TextConfig::kv_size, columns});
         Tensor value_flat = value.view({TextConfig::kv_size, columns});
+        if (shared_vector_requested()) {
+            const std::array<ops::detail::GgufProduct, 4> products{{
+                {&individual->query, &query_flat}, {&individual->gate, &gate_flat},
+                {&individual->key, &key_flat}, {&individual->value, &value_flat}}};
+            if (ops::detail::try_gguf_shared_vector_dispatch(
+                    hidden, products, workspace, stream)) { return; }
+        }
         ops::linear(hidden, individual->query, query_flat, text_policy(individual->query),
                     workspace, stream);
         ops::linear(hidden, individual->gate, gate_flat, text_policy(individual->gate),
@@ -535,8 +594,13 @@ void Variant::post_mixer(const Tensor& hidden, const PostMixerWeights& weights, 
     if (weights.gate && weights.up) {
         Tensor gate = workspace.alloc(DType::BF16, {TextConfig::intermediate, hidden.ne[1]});
         Tensor up   = workspace.alloc(DType::BF16, {TextConfig::intermediate, hidden.ne[1]});
-        ops::linear(hidden, *weights.gate, gate, text_policy(*weights.gate), workspace, stream);
-        ops::linear(hidden, *weights.up, up, text_policy(*weights.up), workspace, stream);
+        const std::array<ops::detail::GgufProduct, 2> products{{
+            {&*weights.gate, &gate}, {&*weights.up, &up}}};
+        if (!shared_vector_requested() ||
+            !ops::detail::try_gguf_shared_vector_dispatch(hidden, products, workspace, stream)) {
+            ops::linear(hidden, *weights.gate, gate, text_policy(*weights.gate), workspace, stream);
+            ops::linear(hidden, *weights.up, up, text_policy(*weights.up), workspace, stream);
+        }
 #if defined(NINFER_SM89)
         static const bool fuse_down_quant = [] {
             const char* value = std::getenv("NINFER_R29_BUNDLE");

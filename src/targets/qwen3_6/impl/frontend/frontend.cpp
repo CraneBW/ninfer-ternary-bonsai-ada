@@ -1500,6 +1500,10 @@ PreparedPromptData PreparedPromptAccess::take(PreparedPrompt&& prompt) {
     return std::move(*data);
 }
 
+PreparedPrompt PreparedPromptAccess::restore(PreparedPromptData data) {
+    return PreparedPrompt(std::make_unique<PreparedPromptData>(std::move(data)));
+}
+
 const PreparedPromptData& FrontendTestAccess::inspect(const PreparedPrompt& prompt) {
     return PreparedPromptAccess::view(prompt);
 }

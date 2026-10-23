@@ -6,6 +6,20 @@ target_include_directories(ninfer_prefix_checkpoint_io_test PRIVATE
   ${PROJECT_SOURCE_DIR}/src ${PROJECT_SOURCE_DIR}/third_party)
 add_test(NAME ninfer_prefix_checkpoint_io_test COMMAND ninfer_prefix_checkpoint_io_test)
 
+# Strata's snapshot pairing and mixed-accept planning are CPU-only contracts:
+# no model, CUDA kernel or GPU dependency for negative/partial-terminal cases.
+add_executable(ninfer_strata_checkpoint_pairing_test strata_checkpoint_pairing_test.cpp)
+target_include_directories(ninfer_strata_checkpoint_pairing_test PRIVATE
+  ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/src)
+add_test(NAME ninfer_strata_checkpoint_pairing_test COMMAND ninfer_strata_checkpoint_pairing_test)
+
+# Fail-closed original q0 recovery uses only KV owner/epoch and request
+# capability metadata; the GPU drain remains owned by Program.
+add_executable(ninfer_original_recovery_guard_test original_recovery_guard_test.cpp)
+target_include_directories(ninfer_original_recovery_guard_test PRIVATE
+  ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/src)
+add_test(NAME ninfer_original_recovery_guard_test COMMAND ninfer_original_recovery_guard_test)
+
 # This target deliberately receives no src/, CUDA, artifact, kernel, or target
 # include root. It proves that the installed product headers stand alone.
 add_executable(ninfer_public_api_test test_public_api.cpp)
@@ -263,6 +277,18 @@ set_target_properties(ninfer_kvmem_rerope_test PROPERTIES CUDA_SEPARABLE_COMPILA
 ninfer_add_op_test(ninfer_kvmem_compact_test
   SOURCES kvmem_compact_test.cu
   LIBRARIES ninfer_ops ninfer_core)
+# Retain the donor-derived native q0 rig only for the new two-tier failure
+# boundary: stale draft identity must be rejected before Main is rewound.
+ninfer_add_op_test(ninfer_kvmem_original_pair_preflight_test
+  SOURCES kvmem_original_pair_preflight_test.cu
+  LIBRARIES ninfer_ops ninfer_core)
+# Exercise a real Main mutation followed by a draft/StateImage recovery fault;
+# cleanup must poison both tiers and release them before a fresh generation.
+ninfer_add_op_test(ninfer_kvmem_original_pair_fault_test
+  SOURCES kvmem_original_pair_fault_test.cu
+  LIBRARIES ninfer_engine ninfer_ops ninfer_core)
+target_include_directories(ninfer_kvmem_original_pair_fault_test PRIVATE
+  ${PROJECT_SOURCE_DIR}/src/targets/qwen3_6/export/ninfer)
 ninfer_add_op_test(ninfer_kvmem_layer_source_test
   SOURCES kvmem_layer_source_test.cu
   LIBRARIES ninfer_ops ninfer_core)

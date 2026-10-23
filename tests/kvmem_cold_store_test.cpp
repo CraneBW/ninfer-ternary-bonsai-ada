@@ -132,6 +132,27 @@ void test_cold_priority() {
     check(kvmem_cold_spillable(normal) && kvmem_cold_spillable(closed_think),
           "ordinary and closed-thinking pages are spillable");
 }
+
+void test_prefetch_lifetime(const std::string& directory) {
+    constexpr std::size_t bytes = 1u << 20;
+    ColdKVStore store(bytes, directory);
+    std::vector<std::byte> input(bytes, std::byte{0x65});
+    std::vector<std::byte> output(bytes), second(bytes);
+    const auto handle = store.store(input);
+    {
+        auto first = store.prefetch(handle, output);
+        auto next = store.prefetch(handle, second);
+        // Force metadata growth while workers use already captured extents.
+        std::vector<ColdKVStore::Handle> extras;
+        for (int i = 0; i < 8; ++i) { extras.push_back(store.store(input)); }
+        for (auto extra : extras) { check(store.release(extra), "release unrelated read owner"); }
+        // Move assignment must join its previous destination before replacing
+        // the future. Scope exit must join the replacement without get().
+        first = std::move(next);
+    }
+    check(output == input && second == input, "prefetch lifetime/move must join both reads");
+    check(store.release(handle), "prefetch owner release");
+}
 } // namespace
 
 int main(int argc, char** argv) {
@@ -140,6 +161,7 @@ int main(int argc, char** argv) {
     test_disk_roundtrip(directory);
     test_many_cold_pages(directory);
     test_cold_priority();
+    test_prefetch_lifetime(directory);
     check(std::filesystem::is_empty(directory),
           "anonymous cold file is unlinked even while its store is alive");
     std::printf("kvmem cold store: %s (%d failures)\n", failures == 0 ? "PASS" : "FAIL",

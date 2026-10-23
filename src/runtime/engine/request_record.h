@@ -167,6 +167,8 @@ struct RequestRecord {
     std::optional<Clock::time_point> first_token;
     std::optional<Clock::time_point> last_token;
     bool queue_wait_recorded = false;
+    bool canonical_restarted = false;
+    std::uint32_t published_prompt_frontier = 0;
     std::optional<GenerationBudget> budget;
     std::optional<BeginSummary> admitted_begin;
     std::optional<BeginSummary> begin;

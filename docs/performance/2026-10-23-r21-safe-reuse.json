@@ -1,0 +1,2376 @@
+{
+  "state": "PASS",
+  "power_w": 200,
+  "binary": {
+    "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/apps/ninfer-serve",
+    "size": 402729864,
+    "mtime_ns": 1792731064591048173
+  },
+  "scope": "six-question quality; three pairs of identical frozen ACK->Topaz requests",
+  "qualification": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-r21-safe-reuse-20261023/ttft-pairs/pair-1-content/report.json",
+  "pairs": [
+    {
+      "pair": 1,
+      "root": {
+        "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-r21-safe-reuse-20261023/ttft-pairs/pair-1-root",
+        "first_two": [
+          {
+            "file": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round24/long-213k-source-readahead/212992-0.json",
+            "sha256": "c14fa7420b6e61aa49148be1d9c99d15d6e427461560a687b1a5990cb7fb72e4",
+            "expected": "ACK",
+            "actual": "ACK",
+            "correct": true,
+            "terminal": true,
+            "usage": {
+              "completion_tokens": 2,
+              "completion_tokens_details": {
+                "reasoning_tokens": 0
+              },
+              "prompt_tokens": 212276,
+              "prompt_tokens_details": {
+                "cached_tokens": 0
+              },
+              "total_tokens": 212278
+            },
+            "http_status": 200,
+            "ttft_s": 166.179381426,
+            "wall_s": 166.233989724
+          },
+          {
+            "file": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round24/long-213k-source-readahead/212992-1.json",
+            "sha256": "618bf495937b023627acf16492a99420a1b350cea95e59ced9fd0446cecc9f2f",
+            "expected": "silver-maple-41",
+            "actual": "silver-maple-41",
+            "correct": true,
+            "terminal": true,
+            "usage": {
+              "completion_tokens": 7,
+              "completion_tokens_details": {
+                "reasoning_tokens": 0
+              },
+              "prompt_tokens": 212303,
+              "prompt_tokens_details": {
+                "cached_tokens": 0
+              },
+              "total_tokens": 212310
+            },
+            "http_status": 200,
+            "ttft_s": 160.403266395,
+            "wall_s": 160.443883108
+          }
+        ],
+        "done": [
+          {
+            "completion_tokens": 2,
+            "computed_prefill_tokens": 212276,
+            "finish_reason": "stop_token",
+            "model_thinking_tokens": 0,
+            "prefix_cache_hit_tokens": 0,
+            "prefix_reuse_path": "root",
+            "prompt_tokens": 212276,
+            "thinking_budget": null,
+            "thinking_control_applied": false,
+            "thinking_control_tokens": 0,
+            "tool_call_count": 0,
+            "tool_call_parse": {
+              "empty_arguments_omitted": 0,
+              "fallback_reason": "none",
+              "marker_seen": false,
+              "schema_mismatch_arguments": 0,
+              "structured_call_count": 0
+            }
+          },
+          {
+            "completion_tokens": 7,
+            "computed_prefill_tokens": 212303,
+            "finish_reason": "stop_token",
+            "model_thinking_tokens": 0,
+            "prefix_cache_hit_tokens": 0,
+            "prefix_reuse_path": "root",
+            "prompt_tokens": 212303,
+            "thinking_budget": null,
+            "thinking_control_applied": false,
+            "thinking_control_tokens": 0,
+            "tool_call_count": 0,
+            "tool_call_parse": {
+              "empty_arguments_omitted": 0,
+              "fallback_reason": "none",
+              "marker_seen": false,
+              "schema_mismatch_arguments": 0,
+              "structured_call_count": 0
+            }
+          }
+        ],
+        "summaries": [
+          {
+            "epochs": 0,
+            "waits": 0,
+            "releases": 0,
+            "source_async_pages": 0,
+            "source_sync_pages": 0,
+            "cold_async_pages": 0,
+            "cold_read_pages": 0,
+            "cold_read_bytes": 0,
+            "cold_copy_pages": 0,
+            "cold_copy_batches": 0,
+            "resident_rephase_pages": 0,
+            "staging_peak_bytes": 0,
+            "pending_pinned_pages": 0,
+            "inflight_pages": 0,
+            "producer_active": 0
+          },
+          {
+            "epochs": 0,
+            "waits": 0,
+            "releases": 0,
+            "source_async_pages": 0,
+            "source_sync_pages": 0,
+            "cold_async_pages": 0,
+            "cold_read_pages": 0,
+            "cold_read_bytes": 0,
+            "cold_copy_pages": 0,
+            "cold_copy_batches": 0,
+            "resident_rephase_pages": 0,
+            "staging_peak_bytes": 0,
+            "pending_pinned_pages": 0,
+            "inflight_pages": 0,
+            "producer_active": 0
+          }
+        ],
+        "startup": {
+          "argv": [
+            "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/apps/ninfer-serve",
+            "/home/ran/ninfer-work/real-models/qwen3_8_gsq_rco_iq3_s_v3.ninfer",
+            "--model-id",
+            "qualification",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "18118",
+            "--max-context",
+            "212992",
+            "--kv-device-tokens",
+            "36864",
+            "--prefill-chunk",
+            "512",
+            "--host-kv-mib",
+            "0",
+            "--max-concurrency",
+            "1",
+            "--kv-dtype",
+            "int8",
+            "--greedy",
+            "--no-thinking",
+            "--kvmem",
+            "--kvmem-budget",
+            "32768",
+            "--kvmem-gen-reserve",
+            "512",
+            "--kvmem-action-lrfu",
+            "--kvmem-lrfu-lambda",
+            "0.5",
+            "--kvmem-lrfu-top-frac",
+            "0.3",
+            "--kvmem-transfer-mode",
+            "sync",
+            "--request-log-jsonl",
+            "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-r21-safe-reuse-20261023/ttft-pairs/pair-1-root/requests.jsonl",
+            "--spec",
+            "mtp",
+            "--draft-tokens",
+            "7",
+            "--lm-head-draft"
+          ],
+          "artifact": {
+            "bytes_read": 12494575921,
+            "host_to_device_bytes": 12481723392,
+            "load_seconds": 5.8395459,
+            "path": "/home/ran/ninfer-work/real-models/qwen3_8_gsq_rco_iq3_s_v3.ninfer",
+            "peak_staging_bytes": 268435456,
+            "resource_count": 6,
+            "size_bytes": 15017456896,
+            "target": "qwen3_8_27b",
+            "tensor_count": 844,
+            "upload_seconds": 4.101674527,
+            "weights_id": "groupwise-int"
+          },
+          "artifact_type": "ninfer_serve_request_log",
+          "engine": {
+            "context_cache": {
+              "device_state_slots": 1,
+              "enabled": true,
+              "host_kv_capacity_bytes": 0,
+              "host_state_slots": 8,
+              "max_long_anchors_per_continuation": 2,
+              "max_private_continuations": 2,
+              "max_shared_prefixes": 4,
+              "total_device_state_slots": 2
+            },
+            "context_cost": {
+              "hardware_class": "nvidia-geforce-rtx-4070-ti-super-sm89",
+              "model_id": "qwen3.8-27b",
+              "prefill_source": "generic-default",
+              "preset_path": "",
+              "transfer_source": "generic-default",
+              "weights_id": "groupwise-int"
+            },
+            "cuda_graph": true,
+            "device": 0,
+            "kv_cache": "int8-group64",
+            "kv_capacity": 36864,
+            "kv_capacity_max_page_groups": 3328,
+            "kv_capacity_mode": "explicit",
+            "kv_capacity_page_groups": 576,
+            "log_stats_interval_ms": 5000,
+            "max_concurrency": 1,
+            "max_context": 212992,
+            "max_pending_requests": 16,
+            "pending_timeout_ms": 30000,
+            "prefill_chunk": 512,
+            "prefix_reuse": true,
+            "proposal_head": "optimized",
+            "speculative_backend": "mtp",
+            "speculative_draft_window": 7,
+            "vision": false
+          },
+          "environment": {
+            "compute_capability_major": 8,
+            "compute_capability_minor": 9,
+            "cuda_compile_version": "13.4",
+            "cuda_driver_version": "13.4",
+            "cuda_runtime_version": "13.4",
+            "device": 0,
+            "gpu_name": "NVIDIA GeForce RTX 4070 Ti SUPER",
+            "gpu_uuid": "GPU-40f06487-5ac9-806d-8e2f-b87f18edbef6",
+            "total_device_memory_bytes": 16805068800
+          },
+          "event": "server_start",
+          "memory": {
+            "available_after_startup_bytes": 1870790656,
+            "available_after_weights_bytes": 4032954368,
+            "cuda_graph_allowance_bytes": 85983232,
+            "host_kv_capacity_bytes": 0,
+            "host_kv_occupied_bytes": 0,
+            "host_state_capacity_slots": 8,
+            "host_state_occupied_slots": 0,
+            "kv_capacity_headroom_bytes": 0,
+            "kv_capacity_increment_bytes": 2162688,
+            "kv_payload_bytes": 1695682560,
+            "minimum_runtime_reservation_bytes": 978727680,
+            "planned_slack_bytes": 1810681088,
+            "runtime_reservation_bytes": 2222273280,
+            "sequence": {
+              "capacity_bytes": 2029375232,
+              "peak_used_bytes": 2029375232,
+              "used_bytes": 2029375232
+            },
+            "vision_workspace": null,
+            "weights": {
+              "capacity_bytes": 12481729536,
+              "peak_used_bytes": 12481729536,
+              "used_bytes": 12481729536
+            },
+            "workspace": {
+              "capacity_bytes": 106914816,
+              "peak_used_bytes": 106914816,
+              "used_bytes": 0
+            }
+          },
+          "sampling_defaults": {
+            "greedy": true,
+            "non_thinking": {
+              "frequency_penalty": 0.0,
+              "min_p": 0.0,
+              "presence_penalty": 1.5,
+              "temperature": 0.699999988079071,
+              "top_k": 20,
+              "top_p": 0.800000011920929
+            },
+            "omitted_seed": "random",
+            "server_overrides": {
+              "frequency_penalty": null,
+              "min_p": null,
+              "presence_penalty": null,
+              "seed": null,
+              "temperature": null,
+              "top_k": null,
+              "top_p": null
+            },
+            "thinking": {
+              "frequency_penalty": 0.0,
+              "min_p": 0.0,
+              "presence_penalty": 0.0,
+              "temperature": 1.0,
+              "top_k": 20,
+              "top_p": 0.949999988079071
+            }
+          },
+          "schema_version": 20,
+          "server": {
+            "api_key_configured": false,
+            "cors_enabled": false,
+            "default_output_tokens": 8192,
+            "default_preserve_thinking": false,
+            "default_thinking": false,
+            "default_thinking_budget": null,
+            "host": "127.0.0.1",
+            "max_request_bytes": 402653184,
+            "media_cache_bytes": 1073741824,
+            "media_live_bytes": 2147483648,
+            "media_preprocess_threads": 0,
+            "port": 18118,
+            "public_model_id": "qualification",
+            "request_log_jsonl": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-r21-safe-reuse-20261023/ttft-pairs/pair-1-root/requests.jsonl"
+          },
+          "server_instance_id": "serve-451277-1792731284016528",
+          "timestamp_unix_ms": 1792731290239
+        }
+      },
+      "content": {
+        "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-r21-safe-reuse-20261023/ttft-pairs/pair-1-content",
+        "first_two": [
+          {
+            "file": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round24/long-213k-source-readahead/212992-0.json",
+            "sha256": "c14fa7420b6e61aa49148be1d9c99d15d6e427461560a687b1a5990cb7fb72e4",
+            "expected": "ACK",
+            "actual": "ACK",
+            "correct": true,
+            "terminal": true,
+            "usage": {
+              "completion_tokens": 2,
+              "completion_tokens_details": {
+                "reasoning_tokens": 0
+              },
+              "prompt_tokens": 212276,
+              "prompt_tokens_details": {
+                "cached_tokens": 0
+              },
+              "total_tokens": 212278
+            },
+            "http_status": 200,
+            "ttft_s": 160.039450488,
+            "wall_s": 160.08138842
+          },
+          {
+            "file": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round24/long-213k-source-readahead/212992-1.json",
+            "sha256": "618bf495937b023627acf16492a99420a1b350cea95e59ced9fd0446cecc9f2f",
+            "expected": "silver-maple-41",
+            "actual": "silver-maple-41",
+            "correct": true,
+            "terminal": true,
+            "usage": {
+              "completion_tokens": 7,
+              "completion_tokens_details": {
+                "reasoning_tokens": 0
+              },
+              "prompt_tokens": 212303,
+              "prompt_tokens_details": {
+                "cached_tokens": 212269
+              },
+              "total_tokens": 212310
+            },
+            "http_status": 200,
+            "ttft_s": 0.6646271,
+            "wall_s": 0.7049736
+          }
+        ],
+        "done": [
+          {
+            "completion_tokens": 2,
+            "computed_prefill_tokens": 212276,
+            "finish_reason": "stop_token",
+            "model_thinking_tokens": 0,
+            "prefix_cache_hit_tokens": 0,
+            "prefix_reuse_path": "root",
+            "prompt_tokens": 212276,
+            "thinking_budget": null,
+            "thinking_control_applied": false,
+            "thinking_control_tokens": 0,
+            "tool_call_count": 0,
+            "tool_call_parse": {
+              "empty_arguments_omitted": 0,
+              "fallback_reason": "none",
+              "marker_seen": false,
+              "schema_mismatch_arguments": 0,
+              "structured_call_count": 0
+            }
+          },
+          {
+            "completion_tokens": 7,
+            "computed_prefill_tokens": 34,
+            "finish_reason": "stop_token",
+            "model_thinking_tokens": 0,
+            "prefix_cache_hit_tokens": 212269,
+            "prefix_reuse_path": "private_turn_closure",
+            "prompt_tokens": 212303,
+            "thinking_budget": null,
+            "thinking_control_applied": false,
+            "thinking_control_tokens": 0,
+            "tool_call_count": 0,
+            "tool_call_parse": {
+              "empty_arguments_omitted": 0,
+              "fallback_reason": "none",
+              "marker_seen": false,
+              "schema_mismatch_arguments": 0,
+              "structured_call_count": 0
+            }
+          }
+        ],
+        "summaries": [
+          {
+            "epochs": 0,
+            "waits": 0,
+            "releases": 0,
+            "source_async_pages": 0,
+            "source_sync_pages": 0,
+            "cold_async_pages": 0,
+            "cold_read_pages": 35,
+            "cold_read_bytes": 4730880,
+            "cold_copy_pages": 0,
+            "cold_copy_batches": 0,
+            "resident_rephase_pages": 0,
+            "staging_peak_bytes": 405504,
+            "pending_pinned_pages": 0,
+            "inflight_pages": 0,
+            "producer_active": 0
+          },
+          {
+            "epochs": 0,
+            "waits": 0,
+            "releases": 0,
+            "source_async_pages": 0,
+            "source_sync_pages": 0,
+            "cold_async_pages": 0,
+            "cold_read_pages": 0,
+            "cold_read_bytes": 0,
+            "cold_copy_pages": 0,
+            "cold_copy_batches": 0,
+            "resident_rephase_pages": 0,
+            "staging_peak_bytes": 0,
+            "pending_pinned_pages": 0,
+            "inflight_pages": 0,
+            "producer_active": 0
+          }
+        ],
+        "startup": {
+          "argv": [
+            "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/apps/ninfer-serve",
+            "/home/ran/ninfer-work/real-models/qwen3_8_gsq_rco_iq3_s_v3.ninfer",
+            "--model-id",
+            "qualification",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "18118",
+            "--max-context",
+            "212992",
+            "--kv-device-tokens",
+            "36864",
+            "--prefill-chunk",
+            "512",
+            "--host-kv-mib",
+            "0",
+            "--max-concurrency",
+            "1",
+            "--kv-dtype",
+            "int8",
+            "--greedy",
+            "--no-thinking",
+            "--kvmem",
+            "--kvmem-budget",
+            "32768",
+            "--kvmem-gen-reserve",
+            "512",
+            "--kvmem-action-lrfu",
+            "--kvmem-lrfu-lambda",
+            "0.5",
+            "--kvmem-lrfu-top-frac",
+            "0.3",
+            "--kvmem-transfer-mode",
+            "sync",
+            "--request-log-jsonl",
+            "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-r21-safe-reuse-20261023/ttft-pairs/pair-1-content/requests.jsonl",
+            "--spec",
+            "mtp",
+            "--draft-tokens",
+            "7",
+            "--lm-head-draft"
+          ],
+          "artifact": {
+            "bytes_read": 12494575921,
+            "host_to_device_bytes": 12481723392,
+            "load_seconds": 5.03945359,
+            "path": "/home/ran/ninfer-work/real-models/qwen3_8_gsq_rco_iq3_s_v3.ninfer",
+            "peak_staging_bytes": 268435456,
+            "resource_count": 6,
+            "size_bytes": 15017456896,
+            "target": "qwen3_8_27b",
+            "tensor_count": 844,
+            "upload_seconds": 3.782708388,
+            "weights_id": "groupwise-int"
+          },
+          "artifact_type": "ninfer_serve_request_log",
+          "engine": {
+            "context_cache": {
+              "device_state_slots": 1,
+              "enabled": true,
+              "host_kv_capacity_bytes": 0,
+              "host_state_slots": 8,
+              "max_long_anchors_per_continuation": 2,
+              "max_private_continuations": 2,
+              "max_shared_prefixes": 4,
+              "total_device_state_slots": 2
+            },
+            "context_cost": {
+              "hardware_class": "nvidia-geforce-rtx-4070-ti-super-sm89",
+              "model_id": "qwen3.8-27b",
+              "prefill_source": "generic-default",
+              "preset_path": "",
+              "transfer_source": "generic-default",
+              "weights_id": "groupwise-int"
+            },
+            "cuda_graph": true,
+            "device": 0,
+            "kv_cache": "int8-group64",
+            "kv_capacity": 36864,
+            "kv_capacity_max_page_groups": 3328,
+            "kv_capacity_mode": "explicit",
+            "kv_capacity_page_groups": 576,
+            "log_stats_interval_ms": 5000,
+            "max_concurrency": 1,
+            "max_context": 212992,
+            "max_pending_requests": 16,
+            "pending_timeout_ms": 30000,
+            "prefill_chunk": 512,
+            "prefix_reuse": true,
+            "proposal_head": "optimized",
+            "speculative_backend": "mtp",
+            "speculative_draft_window": 7,
+            "vision": false
+          },
+          "environment": {
+            "compute_capability_major": 8,
+            "compute_capability_minor": 9,
+            "cuda_compile_version": "13.4",
+            "cuda_driver_version": "13.4",
+            "cuda_runtime_version": "13.4",
+            "device": 0,
+            "gpu_name": "NVIDIA GeForce RTX 4070 Ti SUPER",
+            "gpu_uuid": "GPU-40f06487-5ac9-806d-8e2f-b87f18edbef6",
+            "total_device_memory_bytes": 16805068800
+          },
+          "event": "server_start",
+          "memory": {
+            "available_after_startup_bytes": 1870790656,
+            "available_after_weights_bytes": 4032954368,
+            "cuda_graph_allowance_bytes": 85983232,
+            "host_kv_capacity_bytes": 0,
+            "host_kv_occupied_bytes": 0,
+            "host_state_capacity_slots": 8,
+            "host_state_occupied_slots": 0,
+            "kv_capacity_headroom_bytes": 0,
+            "kv_capacity_increment_bytes": 2162688,
+            "kv_payload_bytes": 1695682560,
+            "minimum_runtime_reservation_bytes": 978727680,
+            "planned_slack_bytes": 1810681088,
+            "runtime_reservation_bytes": 2222273280,
+            "sequence": {
+              "capacity_bytes": 2029375232,
+              "peak_used_bytes": 2029375232,
+              "used_bytes": 2029375232
+            },
+            "vision_workspace": null,
+            "weights": {
+              "capacity_bytes": 12481729536,
+              "peak_used_bytes": 12481729536,
+              "used_bytes": 12481729536
+            },
+            "workspace": {
+              "capacity_bytes": 106914816,
+              "peak_used_bytes": 106914816,
+              "used_bytes": 0
+            }
+          },
+          "sampling_defaults": {
+            "greedy": true,
+            "non_thinking": {
+              "frequency_penalty": 0.0,
+              "min_p": 0.0,
+              "presence_penalty": 1.5,
+              "temperature": 0.699999988079071,
+              "top_k": 20,
+              "top_p": 0.800000011920929
+            },
+            "omitted_seed": "random",
+            "server_overrides": {
+              "frequency_penalty": null,
+              "min_p": null,
+              "presence_penalty": null,
+              "seed": null,
+              "temperature": null,
+              "top_k": null,
+              "top_p": null
+            },
+            "thinking": {
+              "frequency_penalty": 0.0,
+              "min_p": 0.0,
+              "presence_penalty": 0.0,
+              "temperature": 1.0,
+              "top_k": 20,
+              "top_p": 0.949999988079071
+            }
+          },
+          "schema_version": 20,
+          "server": {
+            "api_key_configured": false,
+            "cors_enabled": false,
+            "default_output_tokens": 8192,
+            "default_preserve_thinking": false,
+            "default_thinking": false,
+            "default_thinking_budget": null,
+            "host": "127.0.0.1",
+            "max_request_bytes": 402653184,
+            "media_cache_bytes": 1073741824,
+            "media_live_bytes": 2147483648,
+            "media_preprocess_threads": 0,
+            "port": 18118,
+            "public_model_id": "qualification",
+            "request_log_jsonl": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-r21-safe-reuse-20261023/ttft-pairs/pair-1-content/requests.jsonl"
+          },
+          "server_instance_id": "serve-450733-1792731103042397",
+          "timestamp_unix_ms": 1792731108504
+        }
+      },
+      "continuation_ttft_reduction": 0.9958565239041746,
+      "two_request_wall_sum_reduction": 0.5078137352060962
+    },
+    {
+      "pair": 2,
+      "root": {
+        "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-r21-safe-reuse-20261023/ttft-pairs/pair-2-root",
+        "first_two": [
+          {
+            "file": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round24/long-213k-source-readahead/212992-0.json",
+            "sha256": "c14fa7420b6e61aa49148be1d9c99d15d6e427461560a687b1a5990cb7fb72e4",
+            "expected": "ACK",
+            "actual": "ACK",
+            "correct": true,
+            "terminal": true,
+            "usage": {
+              "completion_tokens": 2,
+              "completion_tokens_details": {
+                "reasoning_tokens": 0
+              },
+              "prompt_tokens": 212276,
+              "prompt_tokens_details": {
+                "cached_tokens": 0
+              },
+              "total_tokens": 212278
+            },
+            "http_status": 200,
+            "ttft_s": 161.695649034,
+            "wall_s": 161.737220154
+          },
+          {
+            "file": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round24/long-213k-source-readahead/212992-1.json",
+            "sha256": "618bf495937b023627acf16492a99420a1b350cea95e59ced9fd0446cecc9f2f",
+            "expected": "silver-maple-41",
+            "actual": "silver-maple-41",
+            "correct": true,
+            "terminal": true,
+            "usage": {
+              "completion_tokens": 7,
+              "completion_tokens_details": {
+                "reasoning_tokens": 0
+              },
+              "prompt_tokens": 212303,
+              "prompt_tokens_details": {
+                "cached_tokens": 0
+              },
+              "total_tokens": 212310
+            },
+            "http_status": 200,
+            "ttft_s": 160.411514977,
+            "wall_s": 160.451694847
+          }
+        ],
+        "done": [
+          {
+            "completion_tokens": 2,
+            "computed_prefill_tokens": 212276,
+            "finish_reason": "stop_token",
+            "model_thinking_tokens": 0,
+            "prefix_cache_hit_tokens": 0,
+            "prefix_reuse_path": "root",
+            "prompt_tokens": 212276,
+            "thinking_budget": null,
+            "thinking_control_applied": false,
+            "thinking_control_tokens": 0,
+            "tool_call_count": 0,
+            "tool_call_parse": {
+              "empty_arguments_omitted": 0,
+              "fallback_reason": "none",
+              "marker_seen": false,
+              "schema_mismatch_arguments": 0,
+              "structured_call_count": 0
+            }
+          },
+          {
+            "completion_tokens": 7,
+            "computed_prefill_tokens": 212303,
+            "finish_reason": "stop_token",
+            "model_thinking_tokens": 0,
+            "prefix_cache_hit_tokens": 0,
+            "prefix_reuse_path": "root",
+            "prompt_tokens": 212303,
+            "thinking_budget": null,
+            "thinking_control_applied": false,
+            "thinking_control_tokens": 0,
+            "tool_call_count": 0,
+            "tool_call_parse": {
+              "empty_arguments_omitted": 0,
+              "fallback_reason": "none",
+              "marker_seen": false,
+              "schema_mismatch_arguments": 0,
+              "structured_call_count": 0
+            }
+          }
+        ],
+        "summaries": [
+          {
+            "epochs": 0,
+            "waits": 0,
+            "releases": 0,
+            "source_async_pages": 0,
+            "source_sync_pages": 0,
+            "cold_async_pages": 0,
+            "cold_read_pages": 0,
+            "cold_read_bytes": 0,
+            "cold_copy_pages": 0,
+            "cold_copy_batches": 0,
+            "resident_rephase_pages": 0,
+            "staging_peak_bytes": 0,
+            "pending_pinned_pages": 0,
+            "inflight_pages": 0,
+            "producer_active": 0
+          },
+          {
+            "epochs": 0,
+            "waits": 0,
+            "releases": 0,
+            "source_async_pages": 0,
+            "source_sync_pages": 0,
+            "cold_async_pages": 0,
+            "cold_read_pages": 0,
+            "cold_read_bytes": 0,
+            "cold_copy_pages": 0,
+            "cold_copy_batches": 0,
+            "resident_rephase_pages": 0,
+            "staging_peak_bytes": 0,
+            "pending_pinned_pages": 0,
+            "inflight_pages": 0,
+            "producer_active": 0
+          }
+        ],
+        "startup": {
+          "argv": [
+            "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/apps/ninfer-serve",
+            "/home/ran/ninfer-work/real-models/qwen3_8_gsq_rco_iq3_s_v3.ninfer",
+            "--model-id",
+            "qualification",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "18118",
+            "--max-context",
+            "212992",
+            "--kv-device-tokens",
+            "36864",
+            "--prefill-chunk",
+            "512",
+            "--host-kv-mib",
+            "0",
+            "--max-concurrency",
+            "1",
+            "--kv-dtype",
+            "int8",
+            "--greedy",
+            "--no-thinking",
+            "--kvmem",
+            "--kvmem-budget",
+            "32768",
+            "--kvmem-gen-reserve",
+            "512",
+            "--kvmem-action-lrfu",
+            "--kvmem-lrfu-lambda",
+            "0.5",
+            "--kvmem-lrfu-top-frac",
+            "0.3",
+            "--kvmem-transfer-mode",
+            "sync",
+            "--request-log-jsonl",
+            "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-r21-safe-reuse-20261023/ttft-pairs/pair-2-root/requests.jsonl",
+            "--spec",
+            "mtp",
+            "--draft-tokens",
+            "7",
+            "--lm-head-draft"
+          ],
+          "artifact": {
+            "bytes_read": 12494575921,
+            "host_to_device_bytes": 12481723392,
+            "load_seconds": 3.293859158,
+            "path": "/home/ran/ninfer-work/real-models/qwen3_8_gsq_rco_iq3_s_v3.ninfer",
+            "peak_staging_bytes": 268435456,
+            "resource_count": 6,
+            "size_bytes": 15017456896,
+            "target": "qwen3_8_27b",
+            "tensor_count": 844,
+            "upload_seconds": 2.014815779,
+            "weights_id": "groupwise-int"
+          },
+          "artifact_type": "ninfer_serve_request_log",
+          "engine": {
+            "context_cache": {
+              "device_state_slots": 1,
+              "enabled": true,
+              "host_kv_capacity_bytes": 0,
+              "host_state_slots": 8,
+              "max_long_anchors_per_continuation": 2,
+              "max_private_continuations": 2,
+              "max_shared_prefixes": 4,
+              "total_device_state_slots": 2
+            },
+            "context_cost": {
+              "hardware_class": "nvidia-geforce-rtx-4070-ti-super-sm89",
+              "model_id": "qwen3.8-27b",
+              "prefill_source": "generic-default",
+              "preset_path": "",
+              "transfer_source": "generic-default",
+              "weights_id": "groupwise-int"
+            },
+            "cuda_graph": true,
+            "device": 0,
+            "kv_cache": "int8-group64",
+            "kv_capacity": 36864,
+            "kv_capacity_max_page_groups": 3328,
+            "kv_capacity_mode": "explicit",
+            "kv_capacity_page_groups": 576,
+            "log_stats_interval_ms": 5000,
+            "max_concurrency": 1,
+            "max_context": 212992,
+            "max_pending_requests": 16,
+            "pending_timeout_ms": 30000,
+            "prefill_chunk": 512,
+            "prefix_reuse": true,
+            "proposal_head": "optimized",
+            "speculative_backend": "mtp",
+            "speculative_draft_window": 7,
+            "vision": false
+          },
+          "environment": {
+            "compute_capability_major": 8,
+            "compute_capability_minor": 9,
+            "cuda_compile_version": "13.4",
+            "cuda_driver_version": "13.4",
+            "cuda_runtime_version": "13.4",
+            "device": 0,
+            "gpu_name": "NVIDIA GeForce RTX 4070 Ti SUPER",
+            "gpu_uuid": "GPU-40f06487-5ac9-806d-8e2f-b87f18edbef6",
+            "total_device_memory_bytes": 16805068800
+          },
+          "event": "server_start",
+          "memory": {
+            "available_after_startup_bytes": 1870790656,
+            "available_after_weights_bytes": 4032954368,
+            "cuda_graph_allowance_bytes": 85983232,
+            "host_kv_capacity_bytes": 0,
+            "host_kv_occupied_bytes": 0,
+            "host_state_capacity_slots": 8,
+            "host_state_occupied_slots": 0,
+            "kv_capacity_headroom_bytes": 0,
+            "kv_capacity_increment_bytes": 2162688,
+            "kv_payload_bytes": 1695682560,
+            "minimum_runtime_reservation_bytes": 978727680,
+            "planned_slack_bytes": 1810681088,
+            "runtime_reservation_bytes": 2222273280,
+            "sequence": {
+              "capacity_bytes": 2029375232,
+              "peak_used_bytes": 2029375232,
+              "used_bytes": 2029375232
+            },
+            "vision_workspace": null,
+            "weights": {
+              "capacity_bytes": 12481729536,
+              "peak_used_bytes": 12481729536,
+              "used_bytes": 12481729536
+            },
+            "workspace": {
+              "capacity_bytes": 106914816,
+              "peak_used_bytes": 106914816,
+              "used_bytes": 0
+            }
+          },
+          "sampling_defaults": {
+            "greedy": true,
+            "non_thinking": {
+              "frequency_penalty": 0.0,
+              "min_p": 0.0,
+              "presence_penalty": 1.5,
+              "temperature": 0.699999988079071,
+              "top_k": 20,
+              "top_p": 0.800000011920929
+            },
+            "omitted_seed": "random",
+            "server_overrides": {
+              "frequency_penalty": null,
+              "min_p": null,
+              "presence_penalty": null,
+              "seed": null,
+              "temperature": null,
+              "top_k": null,
+              "top_p": null
+            },
+            "thinking": {
+              "frequency_penalty": 0.0,
+              "min_p": 0.0,
+              "presence_penalty": 0.0,
+              "temperature": 1.0,
+              "top_k": 20,
+              "top_p": 0.949999988079071
+            }
+          },
+          "schema_version": 20,
+          "server": {
+            "api_key_configured": false,
+            "cors_enabled": false,
+            "default_output_tokens": 8192,
+            "default_preserve_thinking": false,
+            "default_thinking": false,
+            "default_thinking_budget": null,
+            "host": "127.0.0.1",
+            "max_request_bytes": 402653184,
+            "media_cache_bytes": 1073741824,
+            "media_live_bytes": 2147483648,
+            "media_preprocess_threads": 0,
+            "port": 18118,
+            "public_model_id": "qualification",
+            "request_log_jsonl": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-r21-safe-reuse-20261023/ttft-pairs/pair-2-root/requests.jsonl"
+          },
+          "server_instance_id": "serve-452654-1792731618220858",
+          "timestamp_unix_ms": 1792731621924
+        }
+      },
+      "content": {
+        "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-r21-safe-reuse-20261023/ttft-pairs/pair-2-content",
+        "first_two": [
+          {
+            "file": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round24/long-213k-source-readahead/212992-0.json",
+            "sha256": "c14fa7420b6e61aa49148be1d9c99d15d6e427461560a687b1a5990cb7fb72e4",
+            "expected": "ACK",
+            "actual": "ACK",
+            "correct": true,
+            "terminal": true,
+            "usage": {
+              "completion_tokens": 2,
+              "completion_tokens_details": {
+                "reasoning_tokens": 0
+              },
+              "prompt_tokens": 212276,
+              "prompt_tokens_details": {
+                "cached_tokens": 0
+              },
+              "total_tokens": 212278
+            },
+            "http_status": 200,
+            "ttft_s": 162.359104342,
+            "wall_s": 162.40118685
+          },
+          {
+            "file": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round24/long-213k-source-readahead/212992-1.json",
+            "sha256": "618bf495937b023627acf16492a99420a1b350cea95e59ced9fd0446cecc9f2f",
+            "expected": "silver-maple-41",
+            "actual": "silver-maple-41",
+            "correct": true,
+            "terminal": true,
+            "usage": {
+              "completion_tokens": 7,
+              "completion_tokens_details": {
+                "reasoning_tokens": 0
+              },
+              "prompt_tokens": 212303,
+              "prompt_tokens_details": {
+                "cached_tokens": 212269
+              },
+              "total_tokens": 212310
+            },
+            "http_status": 200,
+            "ttft_s": 0.670235409,
+            "wall_s": 0.711170646
+          }
+        ],
+        "done": [
+          {
+            "completion_tokens": 2,
+            "computed_prefill_tokens": 212276,
+            "finish_reason": "stop_token",
+            "model_thinking_tokens": 0,
+            "prefix_cache_hit_tokens": 0,
+            "prefix_reuse_path": "root",
+            "prompt_tokens": 212276,
+            "thinking_budget": null,
+            "thinking_control_applied": false,
+            "thinking_control_tokens": 0,
+            "tool_call_count": 0,
+            "tool_call_parse": {
+              "empty_arguments_omitted": 0,
+              "fallback_reason": "none",
+              "marker_seen": false,
+              "schema_mismatch_arguments": 0,
+              "structured_call_count": 0
+            }
+          },
+          {
+            "completion_tokens": 7,
+            "computed_prefill_tokens": 34,
+            "finish_reason": "stop_token",
+            "model_thinking_tokens": 0,
+            "prefix_cache_hit_tokens": 212269,
+            "prefix_reuse_path": "private_turn_closure",
+            "prompt_tokens": 212303,
+            "thinking_budget": null,
+            "thinking_control_applied": false,
+            "thinking_control_tokens": 0,
+            "tool_call_count": 0,
+            "tool_call_parse": {
+              "empty_arguments_omitted": 0,
+              "fallback_reason": "none",
+              "marker_seen": false,
+              "schema_mismatch_arguments": 0,
+              "structured_call_count": 0
+            }
+          }
+        ],
+        "summaries": [
+          {
+            "epochs": 0,
+            "waits": 0,
+            "releases": 0,
+            "source_async_pages": 0,
+            "source_sync_pages": 0,
+            "cold_async_pages": 0,
+            "cold_read_pages": 0,
+            "cold_read_bytes": 0,
+            "cold_copy_pages": 0,
+            "cold_copy_batches": 0,
+            "resident_rephase_pages": 0,
+            "staging_peak_bytes": 0,
+            "pending_pinned_pages": 0,
+            "inflight_pages": 0,
+            "producer_active": 0
+          },
+          {
+            "epochs": 0,
+            "waits": 0,
+            "releases": 0,
+            "source_async_pages": 0,
+            "source_sync_pages": 0,
+            "cold_async_pages": 0,
+            "cold_read_pages": 0,
+            "cold_read_bytes": 0,
+            "cold_copy_pages": 0,
+            "cold_copy_batches": 0,
+            "resident_rephase_pages": 0,
+            "staging_peak_bytes": 0,
+            "pending_pinned_pages": 0,
+            "inflight_pages": 0,
+            "producer_active": 0
+          }
+        ],
+        "startup": {
+          "argv": [
+            "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/apps/ninfer-serve",
+            "/home/ran/ninfer-work/real-models/qwen3_8_gsq_rco_iq3_s_v3.ninfer",
+            "--model-id",
+            "qualification",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "18118",
+            "--max-context",
+            "212992",
+            "--kv-device-tokens",
+            "36864",
+            "--prefill-chunk",
+            "512",
+            "--host-kv-mib",
+            "0",
+            "--max-concurrency",
+            "1",
+            "--kv-dtype",
+            "int8",
+            "--greedy",
+            "--no-thinking",
+            "--kvmem",
+            "--kvmem-budget",
+            "32768",
+            "--kvmem-gen-reserve",
+            "512",
+            "--kvmem-action-lrfu",
+            "--kvmem-lrfu-lambda",
+            "0.5",
+            "--kvmem-lrfu-top-frac",
+            "0.3",
+            "--kvmem-transfer-mode",
+            "sync",
+            "--request-log-jsonl",
+            "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-r21-safe-reuse-20261023/ttft-pairs/pair-2-content/requests.jsonl",
+            "--spec",
+            "mtp",
+            "--draft-tokens",
+            "7",
+            "--lm-head-draft"
+          ],
+          "artifact": {
+            "bytes_read": 12494575921,
+            "host_to_device_bytes": 12481723392,
+            "load_seconds": 3.691934267,
+            "path": "/home/ran/ninfer-work/real-models/qwen3_8_gsq_rco_iq3_s_v3.ninfer",
+            "peak_staging_bytes": 268435456,
+            "resource_count": 6,
+            "size_bytes": 15017456896,
+            "target": "qwen3_8_27b",
+            "tensor_count": 844,
+            "upload_seconds": 2.441511236,
+            "weights_id": "groupwise-int"
+          },
+          "artifact_type": "ninfer_serve_request_log",
+          "engine": {
+            "context_cache": {
+              "device_state_slots": 1,
+              "enabled": true,
+              "host_kv_capacity_bytes": 0,
+              "host_state_slots": 8,
+              "max_long_anchors_per_continuation": 2,
+              "max_private_continuations": 2,
+              "max_shared_prefixes": 4,
+              "total_device_state_slots": 2
+            },
+            "context_cost": {
+              "hardware_class": "nvidia-geforce-rtx-4070-ti-super-sm89",
+              "model_id": "qwen3.8-27b",
+              "prefill_source": "generic-default",
+              "preset_path": "",
+              "transfer_source": "generic-default",
+              "weights_id": "groupwise-int"
+            },
+            "cuda_graph": true,
+            "device": 0,
+            "kv_cache": "int8-group64",
+            "kv_capacity": 36864,
+            "kv_capacity_max_page_groups": 3328,
+            "kv_capacity_mode": "explicit",
+            "kv_capacity_page_groups": 576,
+            "log_stats_interval_ms": 5000,
+            "max_concurrency": 1,
+            "max_context": 212992,
+            "max_pending_requests": 16,
+            "pending_timeout_ms": 30000,
+            "prefill_chunk": 512,
+            "prefix_reuse": true,
+            "proposal_head": "optimized",
+            "speculative_backend": "mtp",
+            "speculative_draft_window": 7,
+            "vision": false
+          },
+          "environment": {
+            "compute_capability_major": 8,
+            "compute_capability_minor": 9,
+            "cuda_compile_version": "13.4",
+            "cuda_driver_version": "13.4",
+            "cuda_runtime_version": "13.4",
+            "device": 0,
+            "gpu_name": "NVIDIA GeForce RTX 4070 Ti SUPER",
+            "gpu_uuid": "GPU-40f06487-5ac9-806d-8e2f-b87f18edbef6",
+            "total_device_memory_bytes": 16805068800
+          },
+          "event": "server_start",
+          "memory": {
+            "available_after_startup_bytes": 1870790656,
+            "available_after_weights_bytes": 4032954368,
+            "cuda_graph_allowance_bytes": 85983232,
+            "host_kv_capacity_bytes": 0,
+            "host_kv_occupied_bytes": 0,
+            "host_state_capacity_slots": 8,
+            "host_state_occupied_slots": 0,
+            "kv_capacity_headroom_bytes": 0,
+            "kv_capacity_increment_bytes": 2162688,
+            "kv_payload_bytes": 1695682560,
+            "minimum_runtime_reservation_bytes": 978727680,
+            "planned_slack_bytes": 1810681088,
+            "runtime_reservation_bytes": 2222273280,
+            "sequence": {
+              "capacity_bytes": 2029375232,
+              "peak_used_bytes": 2029375232,
+              "used_bytes": 2029375232
+            },
+            "vision_workspace": null,
+            "weights": {
+              "capacity_bytes": 12481729536,
+              "peak_used_bytes": 12481729536,
+              "used_bytes": 12481729536
+            },
+            "workspace": {
+              "capacity_bytes": 106914816,
+              "peak_used_bytes": 106914816,
+              "used_bytes": 0
+            }
+          },
+          "sampling_defaults": {
+            "greedy": true,
+            "non_thinking": {
+              "frequency_penalty": 0.0,
+              "min_p": 0.0,
+              "presence_penalty": 1.5,
+              "temperature": 0.699999988079071,
+              "top_k": 20,
+              "top_p": 0.800000011920929
+            },
+            "omitted_seed": "random",
+            "server_overrides": {
+              "frequency_penalty": null,
+              "min_p": null,
+              "presence_penalty": null,
+              "seed": null,
+              "temperature": null,
+              "top_k": null,
+              "top_p": null
+            },
+            "thinking": {
+              "frequency_penalty": 0.0,
+              "min_p": 0.0,
+              "presence_penalty": 0.0,
+              "temperature": 1.0,
+              "top_k": 20,
+              "top_p": 0.949999988079071
+            }
+          },
+          "schema_version": 20,
+          "server": {
+            "api_key_configured": false,
+            "cors_enabled": false,
+            "default_output_tokens": 8192,
+            "default_preserve_thinking": false,
+            "default_thinking": false,
+            "default_thinking_budget": null,
+            "host": "127.0.0.1",
+            "max_request_bytes": 402653184,
+            "media_cache_bytes": 1073741824,
+            "media_live_bytes": 2147483648,
+            "media_preprocess_threads": 0,
+            "port": 18118,
+            "public_model_id": "qualification",
+            "request_log_jsonl": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-r21-safe-reuse-20261023/ttft-pairs/pair-2-content/requests.jsonl"
+          },
+          "server_instance_id": "serve-454287-1792731944925378",
+          "timestamp_unix_ms": 1792731949022
+        }
+      },
+      "continuation_ttft_reduction": 0.9958217749573894,
+      "two_request_wall_sum_reduction": 0.4937369043392019
+    },
+    {
+      "pair": 3,
+      "root": {
+        "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-r21-safe-reuse-20261023/ttft-pairs/pair-3-root",
+        "first_two": [
+          {
+            "file": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round24/long-213k-source-readahead/212992-0.json",
+            "sha256": "c14fa7420b6e61aa49148be1d9c99d15d6e427461560a687b1a5990cb7fb72e4",
+            "expected": "ACK",
+            "actual": "ACK",
+            "correct": true,
+            "terminal": true,
+            "usage": {
+              "completion_tokens": 2,
+              "completion_tokens_details": {
+                "reasoning_tokens": 0
+              },
+              "prompt_tokens": 212276,
+              "prompt_tokens_details": {
+                "cached_tokens": 0
+              },
+              "total_tokens": 212278
+            },
+            "http_status": 200,
+            "ttft_s": 163.004298609,
+            "wall_s": 163.045987885
+          },
+          {
+            "file": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round24/long-213k-source-readahead/212992-1.json",
+            "sha256": "618bf495937b023627acf16492a99420a1b350cea95e59ced9fd0446cecc9f2f",
+            "expected": "silver-maple-41",
+            "actual": "silver-maple-41",
+            "correct": true,
+            "terminal": true,
+            "usage": {
+              "completion_tokens": 7,
+              "completion_tokens_details": {
+                "reasoning_tokens": 0
+              },
+              "prompt_tokens": 212303,
+              "prompt_tokens_details": {
+                "cached_tokens": 0
+              },
+              "total_tokens": 212310
+            },
+            "http_status": 200,
+            "ttft_s": 160.649552504,
+            "wall_s": 160.690285657
+          }
+        ],
+        "done": [
+          {
+            "completion_tokens": 2,
+            "computed_prefill_tokens": 212276,
+            "finish_reason": "stop_token",
+            "model_thinking_tokens": 0,
+            "prefix_cache_hit_tokens": 0,
+            "prefix_reuse_path": "root",
+            "prompt_tokens": 212276,
+            "thinking_budget": null,
+            "thinking_control_applied": false,
+            "thinking_control_tokens": 0,
+            "tool_call_count": 0,
+            "tool_call_parse": {
+              "empty_arguments_omitted": 0,
+              "fallback_reason": "none",
+              "marker_seen": false,
+              "schema_mismatch_arguments": 0,
+              "structured_call_count": 0
+            }
+          },
+          {
+            "completion_tokens": 7,
+            "computed_prefill_tokens": 212303,
+            "finish_reason": "stop_token",
+            "model_thinking_tokens": 0,
+            "prefix_cache_hit_tokens": 0,
+            "prefix_reuse_path": "root",
+            "prompt_tokens": 212303,
+            "thinking_budget": null,
+            "thinking_control_applied": false,
+            "thinking_control_tokens": 0,
+            "tool_call_count": 0,
+            "tool_call_parse": {
+              "empty_arguments_omitted": 0,
+              "fallback_reason": "none",
+              "marker_seen": false,
+              "schema_mismatch_arguments": 0,
+              "structured_call_count": 0
+            }
+          }
+        ],
+        "summaries": [
+          {
+            "epochs": 0,
+            "waits": 0,
+            "releases": 0,
+            "source_async_pages": 0,
+            "source_sync_pages": 0,
+            "cold_async_pages": 0,
+            "cold_read_pages": 0,
+            "cold_read_bytes": 0,
+            "cold_copy_pages": 0,
+            "cold_copy_batches": 0,
+            "resident_rephase_pages": 0,
+            "staging_peak_bytes": 0,
+            "pending_pinned_pages": 0,
+            "inflight_pages": 0,
+            "producer_active": 0
+          },
+          {
+            "epochs": 0,
+            "waits": 0,
+            "releases": 0,
+            "source_async_pages": 0,
+            "source_sync_pages": 0,
+            "cold_async_pages": 0,
+            "cold_read_pages": 0,
+            "cold_read_bytes": 0,
+            "cold_copy_pages": 0,
+            "cold_copy_batches": 0,
+            "resident_rephase_pages": 0,
+            "staging_peak_bytes": 0,
+            "pending_pinned_pages": 0,
+            "inflight_pages": 0,
+            "producer_active": 0
+          }
+        ],
+        "startup": {
+          "argv": [
+            "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/apps/ninfer-serve",
+            "/home/ran/ninfer-work/real-models/qwen3_8_gsq_rco_iq3_s_v3.ninfer",
+            "--model-id",
+            "qualification",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "18118",
+            "--max-context",
+            "212992",
+            "--kv-device-tokens",
+            "36864",
+            "--prefill-chunk",
+            "512",
+            "--host-kv-mib",
+            "0",
+            "--max-concurrency",
+            "1",
+            "--kv-dtype",
+            "int8",
+            "--greedy",
+            "--no-thinking",
+            "--kvmem",
+            "--kvmem-budget",
+            "32768",
+            "--kvmem-gen-reserve",
+            "512",
+            "--kvmem-action-lrfu",
+            "--kvmem-lrfu-lambda",
+            "0.5",
+            "--kvmem-lrfu-top-frac",
+            "0.3",
+            "--kvmem-transfer-mode",
+            "sync",
+            "--request-log-jsonl",
+            "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-r21-safe-reuse-20261023/ttft-pairs/pair-3-root/requests.jsonl",
+            "--spec",
+            "mtp",
+            "--draft-tokens",
+            "7",
+            "--lm-head-draft"
+          ],
+          "artifact": {
+            "bytes_read": 12494575921,
+            "host_to_device_bytes": 12481723392,
+            "load_seconds": 3.776071083,
+            "path": "/home/ran/ninfer-work/real-models/qwen3_8_gsq_rco_iq3_s_v3.ninfer",
+            "peak_staging_bytes": 268435456,
+            "resource_count": 6,
+            "size_bytes": 15017456896,
+            "target": "qwen3_8_27b",
+            "tensor_count": 844,
+            "upload_seconds": 2.517725121,
+            "weights_id": "groupwise-int"
+          },
+          "artifact_type": "ninfer_serve_request_log",
+          "engine": {
+            "context_cache": {
+              "device_state_slots": 1,
+              "enabled": true,
+              "host_kv_capacity_bytes": 0,
+              "host_state_slots": 8,
+              "max_long_anchors_per_continuation": 2,
+              "max_private_continuations": 2,
+              "max_shared_prefixes": 4,
+              "total_device_state_slots": 2
+            },
+            "context_cost": {
+              "hardware_class": "nvidia-geforce-rtx-4070-ti-super-sm89",
+              "model_id": "qwen3.8-27b",
+              "prefill_source": "generic-default",
+              "preset_path": "",
+              "transfer_source": "generic-default",
+              "weights_id": "groupwise-int"
+            },
+            "cuda_graph": true,
+            "device": 0,
+            "kv_cache": "int8-group64",
+            "kv_capacity": 36864,
+            "kv_capacity_max_page_groups": 3328,
+            "kv_capacity_mode": "explicit",
+            "kv_capacity_page_groups": 576,
+            "log_stats_interval_ms": 5000,
+            "max_concurrency": 1,
+            "max_context": 212992,
+            "max_pending_requests": 16,
+            "pending_timeout_ms": 30000,
+            "prefill_chunk": 512,
+            "prefix_reuse": true,
+            "proposal_head": "optimized",
+            "speculative_backend": "mtp",
+            "speculative_draft_window": 7,
+            "vision": false
+          },
+          "environment": {
+            "compute_capability_major": 8,
+            "compute_capability_minor": 9,
+            "cuda_compile_version": "13.4",
+            "cuda_driver_version": "13.4",
+            "cuda_runtime_version": "13.4",
+            "device": 0,
+            "gpu_name": "NVIDIA GeForce RTX 4070 Ti SUPER",
+            "gpu_uuid": "GPU-40f06487-5ac9-806d-8e2f-b87f18edbef6",
+            "total_device_memory_bytes": 16805068800
+          },
+          "event": "server_start",
+          "memory": {
+            "available_after_startup_bytes": 1870790656,
+            "available_after_weights_bytes": 4032954368,
+            "cuda_graph_allowance_bytes": 85983232,
+            "host_kv_capacity_bytes": 0,
+            "host_kv_occupied_bytes": 0,
+            "host_state_capacity_slots": 8,
+            "host_state_occupied_slots": 0,
+            "kv_capacity_headroom_bytes": 0,
+            "kv_capacity_increment_bytes": 2162688,
+            "kv_payload_bytes": 1695682560,
+            "minimum_runtime_reservation_bytes": 978727680,
+            "planned_slack_bytes": 1810681088,
+            "runtime_reservation_bytes": 2222273280,
+            "sequence": {
+              "capacity_bytes": 2029375232,
+              "peak_used_bytes": 2029375232,
+              "used_bytes": 2029375232
+            },
+            "vision_workspace": null,
+            "weights": {
+              "capacity_bytes": 12481729536,
+              "peak_used_bytes": 12481729536,
+              "used_bytes": 12481729536
+            },
+            "workspace": {
+              "capacity_bytes": 106914816,
+              "peak_used_bytes": 106914816,
+              "used_bytes": 0
+            }
+          },
+          "sampling_defaults": {
+            "greedy": true,
+            "non_thinking": {
+              "frequency_penalty": 0.0,
+              "min_p": 0.0,
+              "presence_penalty": 1.5,
+              "temperature": 0.699999988079071,
+              "top_k": 20,
+              "top_p": 0.800000011920929
+            },
+            "omitted_seed": "random",
+            "server_overrides": {
+              "frequency_penalty": null,
+              "min_p": null,
+              "presence_penalty": null,
+              "seed": null,
+              "temperature": null,
+              "top_k": null,
+              "top_p": null
+            },
+            "thinking": {
+              "frequency_penalty": 0.0,
+              "min_p": 0.0,
+              "presence_penalty": 0.0,
+              "temperature": 1.0,
+              "top_k": 20,
+              "top_p": 0.949999988079071
+            }
+          },
+          "schema_version": 20,
+          "server": {
+            "api_key_configured": false,
+            "cors_enabled": false,
+            "default_output_tokens": 8192,
+            "default_preserve_thinking": false,
+            "default_thinking": false,
+            "default_thinking_budget": null,
+            "host": "127.0.0.1",
+            "max_request_bytes": 402653184,
+            "media_cache_bytes": 1073741824,
+            "media_live_bytes": 2147483648,
+            "media_preprocess_threads": 0,
+            "port": 18118,
+            "public_model_id": "qualification",
+            "request_log_jsonl": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-r21-safe-reuse-20261023/ttft-pairs/pair-3-root/requests.jsonl"
+          },
+          "server_instance_id": "serve-455299-1792732281274667",
+          "timestamp_unix_ms": 1792732285458
+        }
+      },
+      "content": {
+        "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-r21-safe-reuse-20261023/ttft-pairs/pair-3-content",
+        "first_two": [
+          {
+            "file": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round24/long-213k-source-readahead/212992-0.json",
+            "sha256": "c14fa7420b6e61aa49148be1d9c99d15d6e427461560a687b1a5990cb7fb72e4",
+            "expected": "ACK",
+            "actual": "ACK",
+            "correct": true,
+            "terminal": true,
+            "usage": {
+              "completion_tokens": 2,
+              "completion_tokens_details": {
+                "reasoning_tokens": 0
+              },
+              "prompt_tokens": 212276,
+              "prompt_tokens_details": {
+                "cached_tokens": 0
+              },
+              "total_tokens": 212278
+            },
+            "http_status": 200,
+            "ttft_s": 161.825791209,
+            "wall_s": 161.867387926
+          },
+          {
+            "file": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round24/long-213k-source-readahead/212992-1.json",
+            "sha256": "618bf495937b023627acf16492a99420a1b350cea95e59ced9fd0446cecc9f2f",
+            "expected": "silver-maple-41",
+            "actual": "silver-maple-41",
+            "correct": true,
+            "terminal": true,
+            "usage": {
+              "completion_tokens": 7,
+              "completion_tokens_details": {
+                "reasoning_tokens": 0
+              },
+              "prompt_tokens": 212303,
+              "prompt_tokens_details": {
+                "cached_tokens": 212269
+              },
+              "total_tokens": 212310
+            },
+            "http_status": 200,
+            "ttft_s": 0.667445221,
+            "wall_s": 0.708001649
+          }
+        ],
+        "done": [
+          {
+            "completion_tokens": 2,
+            "computed_prefill_tokens": 212276,
+            "finish_reason": "stop_token",
+            "model_thinking_tokens": 0,
+            "prefix_cache_hit_tokens": 0,
+            "prefix_reuse_path": "root",
+            "prompt_tokens": 212276,
+            "thinking_budget": null,
+            "thinking_control_applied": false,
+            "thinking_control_tokens": 0,
+            "tool_call_count": 0,
+            "tool_call_parse": {
+              "empty_arguments_omitted": 0,
+              "fallback_reason": "none",
+              "marker_seen": false,
+              "schema_mismatch_arguments": 0,
+              "structured_call_count": 0
+            }
+          },
+          {
+            "completion_tokens": 7,
+            "computed_prefill_tokens": 34,
+            "finish_reason": "stop_token",
+            "model_thinking_tokens": 0,
+            "prefix_cache_hit_tokens": 212269,
+            "prefix_reuse_path": "private_turn_closure",
+            "prompt_tokens": 212303,
+            "thinking_budget": null,
+            "thinking_control_applied": false,
+            "thinking_control_tokens": 0,
+            "tool_call_count": 0,
+            "tool_call_parse": {
+              "empty_arguments_omitted": 0,
+              "fallback_reason": "none",
+              "marker_seen": false,
+              "schema_mismatch_arguments": 0,
+              "structured_call_count": 0
+            }
+          }
+        ],
+        "summaries": [
+          {
+            "epochs": 0,
+            "waits": 0,
+            "releases": 0,
+            "source_async_pages": 0,
+            "source_sync_pages": 0,
+            "cold_async_pages": 0,
+            "cold_read_pages": 0,
+            "cold_read_bytes": 0,
+            "cold_copy_pages": 0,
+            "cold_copy_batches": 0,
+            "resident_rephase_pages": 0,
+            "staging_peak_bytes": 0,
+            "pending_pinned_pages": 0,
+            "inflight_pages": 0,
+            "producer_active": 0
+          },
+          {
+            "epochs": 0,
+            "waits": 0,
+            "releases": 0,
+            "source_async_pages": 0,
+            "source_sync_pages": 0,
+            "cold_async_pages": 0,
+            "cold_read_pages": 0,
+            "cold_read_bytes": 0,
+            "cold_copy_pages": 0,
+            "cold_copy_batches": 0,
+            "resident_rephase_pages": 0,
+            "staging_peak_bytes": 0,
+            "pending_pinned_pages": 0,
+            "inflight_pages": 0,
+            "producer_active": 0
+          }
+        ],
+        "startup": {
+          "argv": [
+            "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/apps/ninfer-serve",
+            "/home/ran/ninfer-work/real-models/qwen3_8_gsq_rco_iq3_s_v3.ninfer",
+            "--model-id",
+            "qualification",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "18118",
+            "--max-context",
+            "212992",
+            "--kv-device-tokens",
+            "36864",
+            "--prefill-chunk",
+            "512",
+            "--host-kv-mib",
+            "0",
+            "--max-concurrency",
+            "1",
+            "--kv-dtype",
+            "int8",
+            "--greedy",
+            "--no-thinking",
+            "--kvmem",
+            "--kvmem-budget",
+            "32768",
+            "--kvmem-gen-reserve",
+            "512",
+            "--kvmem-action-lrfu",
+            "--kvmem-lrfu-lambda",
+            "0.5",
+            "--kvmem-lrfu-top-frac",
+            "0.3",
+            "--kvmem-transfer-mode",
+            "sync",
+            "--request-log-jsonl",
+            "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-r21-safe-reuse-20261023/ttft-pairs/pair-3-content/requests.jsonl",
+            "--spec",
+            "mtp",
+            "--draft-tokens",
+            "7",
+            "--lm-head-draft"
+          ],
+          "artifact": {
+            "bytes_read": 12494575921,
+            "host_to_device_bytes": 12481723392,
+            "load_seconds": 3.966694351,
+            "path": "/home/ran/ninfer-work/real-models/qwen3_8_gsq_rco_iq3_s_v3.ninfer",
+            "peak_staging_bytes": 268435456,
+            "resource_count": 6,
+            "size_bytes": 15017456896,
+            "target": "qwen3_8_27b",
+            "tensor_count": 844,
+            "upload_seconds": 2.713710673,
+            "weights_id": "groupwise-int"
+          },
+          "artifact_type": "ninfer_serve_request_log",
+          "engine": {
+            "context_cache": {
+              "device_state_slots": 1,
+              "enabled": true,
+              "host_kv_capacity_bytes": 0,
+              "host_state_slots": 8,
+              "max_long_anchors_per_continuation": 2,
+              "max_private_continuations": 2,
+              "max_shared_prefixes": 4,
+              "total_device_state_slots": 2
+            },
+            "context_cost": {
+              "hardware_class": "nvidia-geforce-rtx-4070-ti-super-sm89",
+              "model_id": "qwen3.8-27b",
+              "prefill_source": "generic-default",
+              "preset_path": "",
+              "transfer_source": "generic-default",
+              "weights_id": "groupwise-int"
+            },
+            "cuda_graph": true,
+            "device": 0,
+            "kv_cache": "int8-group64",
+            "kv_capacity": 36864,
+            "kv_capacity_max_page_groups": 3328,
+            "kv_capacity_mode": "explicit",
+            "kv_capacity_page_groups": 576,
+            "log_stats_interval_ms": 5000,
+            "max_concurrency": 1,
+            "max_context": 212992,
+            "max_pending_requests": 16,
+            "pending_timeout_ms": 30000,
+            "prefill_chunk": 512,
+            "prefix_reuse": true,
+            "proposal_head": "optimized",
+            "speculative_backend": "mtp",
+            "speculative_draft_window": 7,
+            "vision": false
+          },
+          "environment": {
+            "compute_capability_major": 8,
+            "compute_capability_minor": 9,
+            "cuda_compile_version": "13.4",
+            "cuda_driver_version": "13.4",
+            "cuda_runtime_version": "13.4",
+            "device": 0,
+            "gpu_name": "NVIDIA GeForce RTX 4070 Ti SUPER",
+            "gpu_uuid": "GPU-40f06487-5ac9-806d-8e2f-b87f18edbef6",
+            "total_device_memory_bytes": 16805068800
+          },
+          "event": "server_start",
+          "memory": {
+            "available_after_startup_bytes": 1870790656,
+            "available_after_weights_bytes": 4032954368,
+            "cuda_graph_allowance_bytes": 85983232,
+            "host_kv_capacity_bytes": 0,
+            "host_kv_occupied_bytes": 0,
+            "host_state_capacity_slots": 8,
+            "host_state_occupied_slots": 0,
+            "kv_capacity_headroom_bytes": 0,
+            "kv_capacity_increment_bytes": 2162688,
+            "kv_payload_bytes": 1695682560,
+            "minimum_runtime_reservation_bytes": 978727680,
+            "planned_slack_bytes": 1810681088,
+            "runtime_reservation_bytes": 2222273280,
+            "sequence": {
+              "capacity_bytes": 2029375232,
+              "peak_used_bytes": 2029375232,
+              "used_bytes": 2029375232
+            },
+            "vision_workspace": null,
+            "weights": {
+              "capacity_bytes": 12481729536,
+              "peak_used_bytes": 12481729536,
+              "used_bytes": 12481729536
+            },
+            "workspace": {
+              "capacity_bytes": 106914816,
+              "peak_used_bytes": 106914816,
+              "used_bytes": 0
+            }
+          },
+          "sampling_defaults": {
+            "greedy": true,
+            "non_thinking": {
+              "frequency_penalty": 0.0,
+              "min_p": 0.0,
+              "presence_penalty": 1.5,
+              "temperature": 0.699999988079071,
+              "top_k": 20,
+              "top_p": 0.800000011920929
+            },
+            "omitted_seed": "random",
+            "server_overrides": {
+              "frequency_penalty": null,
+              "min_p": null,
+              "presence_penalty": null,
+              "seed": null,
+              "temperature": null,
+              "top_k": null,
+              "top_p": null
+            },
+            "thinking": {
+              "frequency_penalty": 0.0,
+              "min_p": 0.0,
+              "presence_penalty": 0.0,
+              "temperature": 1.0,
+              "top_k": 20,
+              "top_p": 0.949999988079071
+            }
+          },
+          "schema_version": 20,
+          "server": {
+            "api_key_configured": false,
+            "cors_enabled": false,
+            "default_output_tokens": 8192,
+            "default_preserve_thinking": false,
+            "default_thinking": false,
+            "default_thinking_budget": null,
+            "host": "127.0.0.1",
+            "max_request_bytes": 402653184,
+            "media_cache_bytes": 1073741824,
+            "media_live_bytes": 2147483648,
+            "media_preprocess_threads": 0,
+            "port": 18118,
+            "public_model_id": "qualification",
+            "request_log_jsonl": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-r21-safe-reuse-20261023/ttft-pairs/pair-3-content/requests.jsonl"
+          },
+          "server_instance_id": "serve-454693-1792732113385558",
+          "timestamp_unix_ms": 1792732117763
+        }
+      },
+      "continuation_ttft_reduction": 0.9958453340790764,
+      "two_request_wall_sum_reduction": 0.49781534272862926
+    }
+  ],
+  "median_continuation_ttft_reduction": 0.9958453340790764,
+  "median_two_request_wall_sum_reduction": 0.49781534272862926,
+  "six_question_quality": {
+    "state": "PASS",
+    "requests": [
+      {
+        "file": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round24/long-213k-source-readahead/212992-0.json",
+        "sha256": "c14fa7420b6e61aa49148be1d9c99d15d6e427461560a687b1a5990cb7fb72e4",
+        "expected": "ACK",
+        "actual": "ACK",
+        "correct": true,
+        "terminal": true,
+        "usage": {
+          "completion_tokens": 2,
+          "completion_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "prompt_tokens": 212276,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "total_tokens": 212278
+        },
+        "http_status": 200,
+        "ttft_s": 160.039450488,
+        "wall_s": 160.08138842
+      },
+      {
+        "file": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round24/long-213k-source-readahead/212992-1.json",
+        "sha256": "618bf495937b023627acf16492a99420a1b350cea95e59ced9fd0446cecc9f2f",
+        "expected": "silver-maple-41",
+        "actual": "silver-maple-41",
+        "correct": true,
+        "terminal": true,
+        "usage": {
+          "completion_tokens": 7,
+          "completion_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "prompt_tokens": 212303,
+          "prompt_tokens_details": {
+            "cached_tokens": 212269
+          },
+          "total_tokens": 212310
+        },
+        "http_status": 200,
+        "ttft_s": 0.6646271,
+        "wall_s": 0.7049736
+      },
+      {
+        "file": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round24/long-213k-source-readahead/212992-2.json",
+        "sha256": "7730fde4393970cfaaa1fd1e9777d9056e6f6ab901411d6c2b32dde7c2e9c00c",
+        "expected": "amber-willow-92",
+        "actual": "amber-willow-92",
+        "correct": true,
+        "terminal": true,
+        "usage": {
+          "completion_tokens": 7,
+          "completion_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "prompt_tokens": 212335,
+          "prompt_tokens_details": {
+            "cached_tokens": 212296
+          },
+          "total_tokens": 212342
+        },
+        "http_status": 200,
+        "ttft_s": 10.451779565,
+        "wall_s": 10.492306392
+      },
+      {
+        "file": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round24/long-213k-source-readahead/212992-3.json",
+        "sha256": "e9d1329ba4a589f199dbe4b5f47939afae7a65707a3b20576af14d20e5f857d5",
+        "expected": "copper-lotus-35",
+        "actual": "copper-lotus-35",
+        "correct": true,
+        "terminal": true,
+        "usage": {
+          "completion_tokens": 9,
+          "completion_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "prompt_tokens": 212368,
+          "prompt_tokens_details": {
+            "cached_tokens": 212328
+          },
+          "total_tokens": 212377
+        },
+        "http_status": 200,
+        "ttft_s": 0.846484603,
+        "wall_s": 0.88703625
+      },
+      {
+        "file": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round24/long-213k-source-readahead/212992-4.json",
+        "sha256": "d93ca7b366286eb8b3d8cbb0c57d0bbe927593db783d63176c89528246b4d73b",
+        "expected": "copper-lilac-28",
+        "actual": "copper-lilac-28",
+        "correct": true,
+        "terminal": true,
+        "usage": {
+          "completion_tokens": 9,
+          "completion_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "prompt_tokens": 212403,
+          "prompt_tokens_details": {
+            "cached_tokens": 212361
+          },
+          "total_tokens": 212412
+        },
+        "http_status": 200,
+        "ttft_s": 0.865089071,
+        "wall_s": 0.905602198
+      },
+      {
+        "file": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/perf-ada-round24/long-213k-source-readahead/212992-5.json",
+        "sha256": "edad0bcf6e958e6ca8daa3840f78e1ff60828b26e8fb4ef2d89cb3cb90c6b0d8",
+        "expected": "teal-jasmine-61",
+        "actual": "teal-jasmine-61",
+        "correct": true,
+        "terminal": true,
+        "usage": {
+          "completion_tokens": 8,
+          "completion_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "prompt_tokens": 212441,
+          "prompt_tokens_details": {
+            "cached_tokens": 212396
+          },
+          "total_tokens": 212449
+        },
+        "http_status": 200,
+        "ttft_s": 0.796283777,
+        "wall_s": 0.83667865
+      }
+    ],
+    "computed_prefill_tokens": 212476,
+    "computed_if_every_prompt_root": 1274126,
+    "per_request_work": [
+      {
+        "completion_tokens": 2,
+        "computed_prefill_tokens": 212276,
+        "finish_reason": "stop_token",
+        "model_thinking_tokens": 0,
+        "prefix_cache_hit_tokens": 0,
+        "prefix_reuse_path": "root",
+        "prompt_tokens": 212276,
+        "thinking_budget": null,
+        "thinking_control_applied": false,
+        "thinking_control_tokens": 0,
+        "tool_call_count": 0,
+        "tool_call_parse": {
+          "empty_arguments_omitted": 0,
+          "fallback_reason": "none",
+          "marker_seen": false,
+          "schema_mismatch_arguments": 0,
+          "structured_call_count": 0
+        }
+      },
+      {
+        "completion_tokens": 7,
+        "computed_prefill_tokens": 34,
+        "finish_reason": "stop_token",
+        "model_thinking_tokens": 0,
+        "prefix_cache_hit_tokens": 212269,
+        "prefix_reuse_path": "private_turn_closure",
+        "prompt_tokens": 212303,
+        "thinking_budget": null,
+        "thinking_control_applied": false,
+        "thinking_control_tokens": 0,
+        "tool_call_count": 0,
+        "tool_call_parse": {
+          "empty_arguments_omitted": 0,
+          "fallback_reason": "none",
+          "marker_seen": false,
+          "schema_mismatch_arguments": 0,
+          "structured_call_count": 0
+        }
+      },
+      {
+        "completion_tokens": 7,
+        "computed_prefill_tokens": 39,
+        "finish_reason": "stop_token",
+        "model_thinking_tokens": 0,
+        "prefix_cache_hit_tokens": 212296,
+        "prefix_reuse_path": "private_turn_closure",
+        "prompt_tokens": 212335,
+        "thinking_budget": null,
+        "thinking_control_applied": false,
+        "thinking_control_tokens": 0,
+        "tool_call_count": 0,
+        "tool_call_parse": {
+          "empty_arguments_omitted": 0,
+          "fallback_reason": "none",
+          "marker_seen": false,
+          "schema_mismatch_arguments": 0,
+          "structured_call_count": 0
+        }
+      },
+      {
+        "completion_tokens": 9,
+        "computed_prefill_tokens": 40,
+        "finish_reason": "stop_token",
+        "model_thinking_tokens": 0,
+        "prefix_cache_hit_tokens": 212328,
+        "prefix_reuse_path": "private_turn_closure",
+        "prompt_tokens": 212368,
+        "thinking_budget": null,
+        "thinking_control_applied": false,
+        "thinking_control_tokens": 0,
+        "tool_call_count": 0,
+        "tool_call_parse": {
+          "empty_arguments_omitted": 0,
+          "fallback_reason": "none",
+          "marker_seen": false,
+          "schema_mismatch_arguments": 0,
+          "structured_call_count": 0
+        }
+      },
+      {
+        "completion_tokens": 9,
+        "computed_prefill_tokens": 42,
+        "finish_reason": "stop_token",
+        "model_thinking_tokens": 0,
+        "prefix_cache_hit_tokens": 212361,
+        "prefix_reuse_path": "private_turn_closure",
+        "prompt_tokens": 212403,
+        "thinking_budget": null,
+        "thinking_control_applied": false,
+        "thinking_control_tokens": 0,
+        "tool_call_count": 0,
+        "tool_call_parse": {
+          "empty_arguments_omitted": 0,
+          "fallback_reason": "none",
+          "marker_seen": false,
+          "schema_mismatch_arguments": 0,
+          "structured_call_count": 0
+        }
+      },
+      {
+        "completion_tokens": 8,
+        "computed_prefill_tokens": 45,
+        "finish_reason": "stop_token",
+        "model_thinking_tokens": 0,
+        "prefix_cache_hit_tokens": 212396,
+        "prefix_reuse_path": "private_turn_closure",
+        "prompt_tokens": 212441,
+        "thinking_budget": null,
+        "thinking_control_applied": false,
+        "thinking_control_tokens": 0,
+        "tool_call_count": 0,
+        "tool_call_parse": {
+          "empty_arguments_omitted": 0,
+          "fallback_reason": "none",
+          "marker_seen": false,
+          "schema_mismatch_arguments": 0,
+          "structured_call_count": 0
+        }
+      }
+    ],
+    "metrics": {
+      "llamacpp:prompt_tokens_total": 212476.0,
+      "llamacpp:prompt_seconds_total": 173.519,
+      "llamacpp:tokens_predicted_total": 42.0,
+      "llamacpp:tokens_predicted_seconds_total": 0.242663,
+      "llamacpp:requests_processing": 0.0,
+      "llamacpp:requests_deferred": 0.0,
+      "ninfer:requests_total": 6.0,
+      "ninfer:requests_completed_total": 6.0,
+      "ninfer:requests_active": 0.0,
+      "ninfer:ttft_seconds_total": 173.644,
+      "ninfer:prefix_cache_hit_tokens_total": 1061650.0,
+      "ninfer:draft_tokens_total": 42.0,
+      "ninfer:draft_accepted_tokens_total": 38.0,
+      "ninfer:computed_prefill_tokens_total": 212489.0,
+      "ninfer:restored_prefill_tokens_total": 0.0,
+      "ninfer:committed_decode_tokens_total": 39.0,
+      "ninfer:reused_prompt_tokens_total": 1061650.0,
+      "ninfer:decode_rounds_total": 8.0,
+      "ninfer:running_requests": 0.0,
+      "ninfer:prefilling_requests": 0.0,
+      "ninfer:waiting_requests": 0.0,
+      "ninfer:materializing_requests": 0.0,
+      "ninfer:capture_pending_requests": 0.0,
+      "ninfer:device_state_occupied_slots": 2.0,
+      "ninfer:host_state_occupied_slots": 0.0,
+      "ninfer:device_main_kv_occupied_pages": 512.0,
+      "ninfer:device_backend_kv_occupied_pages": 512.0,
+      "ninfer:host_kv_occupied_bytes": 0.0,
+      "ninfer:kvmem_enabled": 1.0,
+      "ninfer:kvmem_budget_tokens": 32768.0,
+      "ninfer:kvmem_gen_reserve_tokens": 512.0,
+      "ninfer:kvmem_plans_total": 949.0,
+      "ninfer:kvmem_compactions_total": 722.0,
+      "ninfer:kvmem_compact_skips_total": 0.0,
+      "ninfer:kvmem_stage_in_blocks_total": 6636.0,
+      "ninfer:kvmem_stage_out_blocks_total": 12252.0,
+      "ninfer:kvmem_transfer_runs_total": 1884.0,
+      "ninfer:kvmem_transfer_us_total": 10720515.0,
+      "ninfer:kvmem_async_enabled": 0.0,
+      "ninfer:kvmem_async_submitted_total": 0.0,
+      "ninfer:kvmem_async_completed_total": 0.0,
+      "ninfer:kvmem_async_discarded_total": 0.0,
+      "ninfer:kvmem_async_submit_us_total": 0.0,
+      "ninfer:kvmem_async_wait_us_total": 0.0,
+      "ninfer:kvmem_async_bytes_total": 0.0,
+      "ninfer:kvmem_async_fallbacks_total": 0.0,
+      "ninfer:kvmem_async_restore_submitted_total": 0.0,
+      "ninfer:kvmem_async_restore_us_total": 0.0,
+      "ninfer:kvmem_inflight_pages": 0.0,
+      "ninfer:kvmem_inflight_bytes": 0.0,
+      "ninfer:kvmem_scoreable_blocks_total": 724206.0,
+      "ninfer:kvmem_zero_score_blocks_total": 684386.0,
+      "ninfer:kvmem_window_tokens": 32697.0,
+      "ninfer:kvmem_host_bytes": 1132572672.0,
+      "ninfer:kvmem_host_capacity_bytes": 7649361920.0,
+      "ninfer:kvmem_cold_bytes": 5319806976.0,
+      "ninfer:kvmem_host_to_cold_spills_total": 3377.0,
+      "ninfer:kvmem_source_k_bytes": 0.0,
+      "ninfer:kvmem_source_k_file_capacity_bytes": 0.0,
+      "ninfer:kvmem_source_k_staging_bytes": 0.0,
+      "ninfer:kvmem_source_k_captures_total": 0.0,
+      "ninfer:kvmem_source_k_rebuilds_total": 0.0,
+      "ninfer:kvmem_history_replay_tokens_total": 0.0,
+      "ninfer:kvmem_query_replay_tokens_total": 162.0,
+      "ninfer:kvmem_history_replay_rounds_total": 0.0,
+      "ninfer:kvmem_history_reused_tokens_total": 0.0,
+      "ninfer:kvmem_replay_checkpoint_capacity_bytes": 615817216.0,
+      "ninfer:kvmem_async_split_batches_total": 0.0,
+      "ninfer:kvmem_nvme_prefetch_submitted_total": 0.0,
+      "ninfer:kvmem_nvme_prefetch_completed_total": 0.0,
+      "ninfer:kvmem_nvme_prefetch_wait_us_total": 0.0,
+      "ninfer:physical_prefill_tokens_total": 212651.0,
+      "ninfer:host_kv_capacity_bytes": 0.0,
+      "ninfer:managed_runtime_budget_limit_bytes": 0.0,
+      "ninfer:capture_skips_total": 6.0,
+      "ninfer:capture_skips{reason=\"cancelled\"}": 0.0,
+      "ninfer:capture_skips{reason=\"nothing_to_publish\"}": 0.0,
+      "ninfer:capture_skips{reason=\"invalid_pressure\"}": 0.0,
+      "ninfer:capture_skips{reason=\"physical_peak\"}": 0.0,
+      "ninfer:capture_skips{reason=\"transaction_busy\"}": 0.0,
+      "ninfer:capture_skips{reason=\"private_baseline_unavailable\"}": 0.0,
+      "ninfer:capture_skips{reason=\"no_admissible_plan\"}": 6.0,
+      "ninfer:capture_skips{reason=\"terminal\"}": 0.0,
+      "ninfer:capture_skips{reason=\"unspecified\"}": 0.0
+    },
+    "session_wall_s": 173.94120369900338,
+    "session_client_gap_s": 0.03321818900337803
+  },
+  "retained_measured_binary": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-r21-safe-reuse-20261023/r21-paired-serve",
+  "post_measurement_changes": "E retains normal R21 arithmetic/control with bulk flag OFF. Added canonical-restart lexical gating, separate plain-prefill bulk capability including canonical replay preparation, failed-compaction owner disposal for that capability. C TTFT pairs retained; D restart smoke and E real-GPU plus full original-six bulk qualification recorded separately.",
+  "paired_usage_equal_fields": [
+    "prompt_tokens",
+    "completion_tokens",
+    "total_tokens"
+  ],
+  "cached_tokens": "intentionally different: real prefix reuse, not required equal",
+  "measured_binary_sha256": "1ea6f704f8177d5c70b143944973c374eeaa1a009c0c81f28a76c0a8b0adda22",
+  "final_binary": {
+    "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/apps/ninfer-serve",
+    "size": 402729896,
+    "mtime_ns": 1792733297429052838
+  },
+  "bulk_pipeline_functional": {
+    "state": "PASS",
+    "binary": {
+      "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/apps/ninfer-serve",
+      "size": 402729896,
+      "mtime_ns": 1792733297429052838
+    },
+    "power_w": 200,
+    "session_wall_s": 184.7752272600046,
+    "session_client_gap_s": 0.029408818004611703,
+    "process_io_delta": {
+      "rchar": 20146452520,
+      "wchar": 10525454971,
+      "syscr": 34604,
+      "syscw": 12579,
+      "read_bytes": 1481199616,
+      "write_bytes": 10525573120,
+      "cancelled_write_bytes": 0
+    },
+    "process_memory_bytes": {
+      "VmHWM": 17328128000,
+      "VmRSS": 5903687680
+    },
+    "layer_summaries": [
+      {
+        "epochs": 0,
+        "waits": 0,
+        "releases": 0,
+        "source_async_pages": 0,
+        "source_sync_pages": 17061,
+        "cold_async_pages": 0,
+        "cold_read_pages": 237,
+        "cold_read_bytes": 32034816,
+        "cold_copy_pages": 0,
+        "cold_copy_batches": 0,
+        "resident_rephase_pages": 0,
+        "staging_peak_bytes": 540672,
+        "pending_pinned_pages": 0,
+        "inflight_pages": 0,
+        "producer_active": 0
+      },
+      {
+        "epochs": 351,
+        "waits": 5664,
+        "releases": 5664,
+        "source_async_pages": 0,
+        "source_sync_pages": 17061,
+        "cold_async_pages": 0,
+        "cold_read_pages": 237,
+        "cold_read_bytes": 512557056,
+        "cold_copy_pages": 237,
+        "cold_copy_batches": 1,
+        "resident_rephase_pages": 154491,
+        "staging_peak_bytes": 8650752,
+        "pending_pinned_pages": 0,
+        "inflight_pages": 0,
+        "producer_active": 0
+      }
+    ],
+    "io_worker_summaries": [
+      {
+        "reads": 237,
+        "workers": 2,
+        "queue_capacity": 2,
+        "page_bytes": 135168,
+        "pending": 0
+      },
+      {
+        "reads": 17061,
+        "workers": 2,
+        "queue_capacity": 2,
+        "page_bytes": 67584,
+        "pending": 0
+      },
+      {
+        "reads": 237,
+        "workers": 2,
+        "queue_capacity": 2,
+        "page_bytes": 2162688,
+        "pending": 0
+      },
+      {
+        "reads": 17061,
+        "workers": 2,
+        "queue_capacity": 2,
+        "page_bytes": 1081344,
+        "pending": 0
+      }
+    ],
+    "receipt": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-r21-safe-reuse-20261023/bulk-cold-hit-213k/report.json",
+    "quality_correct": 6,
+    "performance_pairs": "NOT_RUN; no adoption or speedup claim"
+  }
+}

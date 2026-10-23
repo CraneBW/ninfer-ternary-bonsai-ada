@@ -1,6 +1,7 @@
 #include "ops/linear/q4/q4_dispatch.h"
 
 #include <stdexcept>
+#include <string>
 
 namespace ninfer::ops::detail {
 
@@ -85,7 +86,9 @@ Q4Launch select_q4_a16_launch(std::int32_t n, std::int32_t k, std::int32_t t) {
         break;
     }
 
-    throw std::invalid_argument("q4 linear: unsupported shape or T");
+    throw std::invalid_argument("q4 linear: unsupported shape or T (n=" +
+                                std::to_string(n) + ", k=" + std::to_string(k) +
+                                ", t=" + std::to_string(t) + ")");
 }
 
 Q4Launch select_q4_launch(std::int32_t n, std::int32_t k, std::int32_t t, LinearPolicy policy) {

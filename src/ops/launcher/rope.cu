@@ -5,6 +5,10 @@
 #include "ops/kernel/rope.cuh"
 
 #include <cstdint>
+#include <cmath>
+#include <cstdlib>
+#include <cstring>
+#include <stdexcept>
 
 namespace ninfer::ops {
 
@@ -18,6 +22,18 @@ __device__ __constant__ float kTextRopeInvFrequency[32] = {
     4.216965034e-05F, 2.548296748e-05F, 1.539926526e-05F, 9.305720409e-06F, 5.623413252e-06F,
     3.398208329e-06F, 2.053525026e-06F, 1.240937761e-06F, 7.498942093e-07F, 4.531583638e-07F,
     2.738419634e-07F, 1.654817100e-07F,
+};
+
+__device__ __constant__ int kTextRopeLongPrecision = 1;
+__device__ __constant__ double kTextRopeInvFrequencyWide[32] = {
+    1, 0.60429639023813286, 0.36517412725483772, 0.22067340690845899,
+    0.1333521432163324, 0.080584218776148187, 0.048696752516586311, 0.029427271762092817,
+    0.017782794100389229, 0.010746078283213174, 0.006493816315762113, 0.0039241897584845363,
+    0.0023713737056616554, 0.0014330125702369627, 0.00086596432336006539, 0.00052329911468149473,
+    0.00031622776601683794, 0.00019109529749704405, 0.00011547819846894582, 6.9783058485986635e-05,
+    4.2169650342858222e-05, 2.5482967479793464e-05, 1.5399265260594919e-05, 9.3057204092969904e-06,
+    5.6234132519034912e-06, 3.3982083289425593e-06, 2.0535250264571461e-06, 1.2409377607517195e-06,
+    7.4989420933245585e-07, 4.5315836376008179e-07, 2.7384196342643614e-07, 1.6548170999431814e-07
 };
 
 } // namespace ninfer::ops
@@ -215,6 +231,18 @@ constexpr float kDefaultTextRopeInvFrequency[32] = {
 void set_text_rope_frequencies_symbol(const float* inv_freq_32) {
     const float* source = inv_freq_32 != nullptr ? inv_freq_32 : kDefaultTextRopeInvFrequency;
     CUDA_CHECK(cudaMemcpyToSymbol(kTextRopeInvFrequency, source, sizeof(float) * 32));
+    double wide[32];
+    for (int pair=0;pair<32;++pair) {
+        wide[pair] = inv_freq_32 ? static_cast<double>(inv_freq_32[pair])
+            : std::pow(1.0e7,-static_cast<double>(pair)/32.0);
+    }
+    const char* requested=std::getenv("NINFER_TEXT_ROPE_LONG_PRECISION");
+    if (requested && std::strcmp(requested,"0") && std::strcmp(requested,"1")) {
+        throw std::invalid_argument("NINFER_TEXT_ROPE_LONG_PRECISION must be 0 or 1");
+    }
+    const int precise=(!requested || std::strcmp(requested,"0")) ? 1 : 0;
+    CUDA_CHECK(cudaMemcpyToSymbol(kTextRopeInvFrequencyWide,wide,sizeof(wide)));
+    CUDA_CHECK(cudaMemcpyToSymbol(kTextRopeLongPrecision,&precise,sizeof(precise)));
 }
 
 void rope_launch(const Tensor& positions, int rotary_dim, float theta, Tensor& q, Tensor& k,

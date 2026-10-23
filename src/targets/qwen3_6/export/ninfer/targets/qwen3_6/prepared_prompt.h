@@ -186,6 +186,8 @@ class PreparedPromptAccess {
 public:
     [[nodiscard]] static const PreparedPromptData& view(const PreparedPrompt& prompt);
     [[nodiscard]] static PreparedPromptData take(PreparedPrompt&& prompt);
+    // Rewrap the original owning input after a drained, pre-output restart.
+    [[nodiscard]] static PreparedPrompt restore(PreparedPromptData data);
 };
 
 } // namespace ninfer::targets::qwen3_6

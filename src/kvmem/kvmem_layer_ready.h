@@ -88,6 +88,7 @@ public:
         }
         CUDA_CHECK(cudaStreamWaitEvent(compute, ready_[layer], 0));
         consumer_waited_[layer] = true;
+        ++waits_;
     }
 
     void release_after_layer(std::uint32_t layer, cudaStream_t compute) override {
@@ -99,6 +100,7 @@ public:
         }
         CUDA_CHECK(cudaEventRecord(released_[layer], compute));
         reader_released_[layer] = true;
+        ++releases_;
     }
 
     // Called at the next compaction/error boundary before any physical targets,
@@ -120,6 +122,8 @@ public:
 
     [[nodiscard]] bool active() const noexcept { return active_; }
     [[nodiscard]] std::uint64_t epoch() const noexcept { return epoch_; }
+    [[nodiscard]] std::uint64_t waits() const noexcept { return waits_; }
+    [[nodiscard]] std::uint64_t releases() const noexcept { return releases_; }
 
 private:
     void destroy() noexcept {
@@ -143,6 +147,8 @@ private:
     std::array<bool, kLayers> reader_released_{};
     bool active_ = false;
     std::uint64_t epoch_ = 0;
+    std::uint64_t waits_ = 0;
+    std::uint64_t releases_ = 0;
 };
 
 } // namespace ninfer::kvmem

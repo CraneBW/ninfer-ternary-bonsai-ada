@@ -151,6 +151,54 @@ struct KvWindowPlan {
     return {sink_blocks, recent_blocks};
 }
 
+// KVMem faf3c225, kvmem/src/host/kvmem_store.cpp::pick_prefill_ungrouped:
+// history pressure is sink + newest rows, independent of the future query.
+// Adapted to local dense IDs and the same fixed budget. PinnedSink is the
+// static system/tool prefix; action/query strata and scores are not inputs.
+[[nodiscard]] inline KvSelection kvmem_select_prefill_blocks(
+    std::span<const KvBlockMeta> blocks, const KvSelectConfig& cfg,
+    std::span<const std::uint32_t> content_anchors = {}) {
+    KvSelection out;
+    const auto n = static_cast<std::uint32_t>(blocks.size());
+    const auto budget = cfg.budget_tokens / cfg.block_tokens;
+    if (n == 0) { return out; }
+    if (budget == 0 || n <= budget) {
+        for (std::uint32_t i = 0; i < n; ++i) { out.block_ids.push_back(i); }
+        return out;
+    }
+    const auto [sink, unused_recent] = kvmem_resolve_bands(cfg);
+    (void)unused_recent;
+    std::vector<bool> kept(n, false);
+    std::uint32_t count = 0;
+    const auto keep = [&](std::uint32_t i) {
+        if (!kept[i]) {
+            if (count == budget) {
+                throw std::invalid_argument("causal prefill budget cannot hold system prefix");
+            }
+            kept[i] = true;
+            ++count;
+        }
+    };
+    for (std::uint32_t i = 0; i < n; ++i) {
+        if (blocks[i].stratum == BlockStratum::PinnedSink) { keep(i); }
+    }
+    for (std::uint32_t i = 0; i < sink && count < budget; ++i) { keep(i); }
+    // These are history-content anchors, never future question hints. Reserve
+    // at most a quarter of the budget so this cannot consume the recent band.
+    std::uint32_t anchors = 0;
+    for (const auto id : content_anchors) {
+        if (id < n && !kept[id] && count < budget && anchors < budget / 4) {
+            keep(id);
+            ++anchors;
+        }
+    }
+    for (std::uint32_t i = n; i > 0 && count < budget; --i) { keep(i - 1); }
+    for (std::uint32_t i = 0; i < n; ++i) {
+        if (kept[i]) { out.block_ids.push_back(i); }
+    }
+    return out;
+}
+
 // Working-set selection: sink + mandatory + recent bands, then the middle filled
 // by the retrieval/profile quota top-k (nth_element), leftover by merged score.
 [[nodiscard]] inline KvSelection kvmem_select_blocks(std::span<const KvBlockMeta> blocks,

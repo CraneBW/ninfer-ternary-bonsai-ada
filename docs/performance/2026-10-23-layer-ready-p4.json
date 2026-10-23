@@ -1,0 +1,282 @@
+{
+  "state": "QUALIFIED_OPT_IN_DEFAULT_SYNC",
+  "model": {
+    "path": "/home/ran/ninfer-work/real-models/qwen3_8_gsq_rco_iq3_s_v3.ninfer",
+    "size": 15017456896,
+    "mtime_ns": 1792427370146524551
+  },
+  "binary": {
+    "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/apps/ninfer-serve",
+    "size": 402705904,
+    "mtime_ns": 1792700850506665117
+  },
+  "power_w": 200,
+  "configuration": "C1, GSQ v3, MTP15/Graph, INT8, 32K working set/36K physical KV, chunk512, Host128 pages, canonical-query-reuse1",
+  "source_scope": "same binary; sync versus existing source-event/async-D2H/NVMe-prefetch + Main16 layer-ready bundle",
+  "cold_start": "full frozen 213K prefill in fresh process; no saved KV/archive; NVMe0n1p4 Btrfs backing; OS cache uncontrolled and recorded",
+  "quality": {
+    "requests": 36,
+    "correct": 36,
+    "paired_full_text_and_usage_equal": 18,
+    "all_exit_zero": true,
+    "all_drained": true
+  },
+  "per_pair_session_reduction": [
+    0.009979036906878624,
+    0.0005297473893830507,
+    0.00602965787929699
+  ],
+  "paired_median_session_reduction": 0.00602965787929699,
+  "adoption_gate": 0.1,
+  "adopt_async": false,
+  "summary": {
+    "sync": {
+      "session_wall_median_s": 186.54333363399928,
+      "first_ttft_median_s": 184.013348644,
+      "continuation_ttft_median_s": 0.399745361
+    },
+    "async": {
+      "session_wall_median_s": 186.44451278999986,
+      "first_ttft_median_s": 183.985929184,
+      "continuation_ttft_median_s": 0.399250847
+    }
+  },
+  "arms": [
+    {
+      "pair": 0,
+      "mode": "async",
+      "session_wall_s": 184.57489043600071,
+      "first_ttft_s": 182.117759546,
+      "continuation_ttft_s": [
+        0.39169046,
+        0.394619885,
+        0.397668148,
+        0.407527995,
+        0.409269319
+      ],
+      "request_wall_sum_s": 184.537068477,
+      "client_gap_s": 0.03782195900072338,
+      "physical_process_read_bytes": 3538976768,
+      "logical_process_read_bytes": 20149899304,
+      "cold_logical_read_bytes": 546889728,
+      "cold_read_pages": 476,
+      "staging_peak_bytes": 9191424,
+      "epochs": 351,
+      "waits": 5664,
+      "releases": 5664,
+      "source_layer_async_pages": 0,
+      "cold_layer_async_pages": 0,
+      "source_whole_batch_pages_per_tier": [
+        17062,
+        17062
+      ],
+      "resident_rephase_pages": 154491,
+      "history_replay_tokens": 32228.0,
+      "history_replay_rounds": 1.0,
+      "nvme_prefetch_completed": 476.0,
+      "async_demote_completed": 1052.0,
+      "async_split_batches": 350.0,
+      "available_gpu_after_startup_bytes": 1795293184,
+      "correct": 6,
+      "server_exit": 0
+    },
+    {
+      "pair": 0,
+      "mode": "sync",
+      "session_wall_s": 186.43533553000088,
+      "first_ttft_s": 183.909247343,
+      "continuation_ttft_s": [
+        0.388760744,
+        0.395783126,
+        0.398483052,
+        0.405809363,
+        0.411865633
+      ],
+      "request_wall_sum_s": 186.39731043499998,
+      "client_gap_s": 0.03802509500090423,
+      "physical_process_read_bytes": 1611223040,
+      "logical_process_read_bytes": 20146452520,
+      "cold_logical_read_bytes": 544591872,
+      "cold_read_pages": 474,
+      "staging_peak_bytes": 9191424,
+      "epochs": 0,
+      "waits": 0,
+      "releases": 0,
+      "source_layer_async_pages": 0,
+      "cold_layer_async_pages": 0,
+      "source_whole_batch_pages_per_tier": [
+        17061,
+        17061
+      ],
+      "resident_rephase_pages": 0,
+      "history_replay_tokens": 32228.0,
+      "history_replay_rounds": 1.0,
+      "nvme_prefetch_completed": 0.0,
+      "async_demote_completed": 0.0,
+      "async_split_batches": 0.0,
+      "available_gpu_after_startup_bytes": 1797390336,
+      "correct": 6,
+      "server_exit": 0
+    },
+    {
+      "pair": 1,
+      "mode": "sync",
+      "session_wall_s": 186.54333363399928,
+      "first_ttft_s": 184.013348644,
+      "continuation_ttft_s": [
+        0.391961871,
+        0.397843454,
+        0.400320057,
+        0.40941695,
+        0.411126197
+      ],
+      "request_wall_sum_s": 186.510852795,
+      "client_gap_s": 0.032480838999276784,
+      "physical_process_read_bytes": 1223057408,
+      "logical_process_read_bytes": 20146452520,
+      "cold_logical_read_bytes": 544591872,
+      "cold_read_pages": 474,
+      "staging_peak_bytes": 9191424,
+      "epochs": 0,
+      "waits": 0,
+      "releases": 0,
+      "source_layer_async_pages": 0,
+      "cold_layer_async_pages": 0,
+      "source_whole_batch_pages_per_tier": [
+        17061,
+        17061
+      ],
+      "resident_rephase_pages": 0,
+      "history_replay_tokens": 32228.0,
+      "history_replay_rounds": 1.0,
+      "nvme_prefetch_completed": 0.0,
+      "async_demote_completed": 0.0,
+      "async_split_batches": 0.0,
+      "available_gpu_after_startup_bytes": 1797390336,
+      "correct": 6,
+      "server_exit": 0
+    },
+    {
+      "pair": 1,
+      "mode": "async",
+      "session_wall_s": 186.44451278999986,
+      "first_ttft_s": 183.985929184,
+      "continuation_ttft_s": [
+        0.391990304,
+        0.399250847,
+        0.402229691,
+        0.408547948,
+        0.411378307
+      ],
+      "request_wall_sum_s": 186.417442647,
+      "client_gap_s": 0.02707014299986099,
+      "physical_process_read_bytes": 3985219584,
+      "logical_process_read_bytes": 20143005736,
+      "cold_logical_read_bytes": 542294016,
+      "cold_read_pages": 472,
+      "staging_peak_bytes": 9191424,
+      "epochs": 351,
+      "waits": 5664,
+      "releases": 5664,
+      "source_layer_async_pages": 0,
+      "cold_layer_async_pages": 0,
+      "source_whole_batch_pages_per_tier": [
+        17060,
+        17060
+      ],
+      "resident_rephase_pages": 154491,
+      "history_replay_tokens": 32228.0,
+      "history_replay_rounds": 1.0,
+      "nvme_prefetch_completed": 472.0,
+      "async_demote_completed": 1052.0,
+      "async_split_batches": 350.0,
+      "available_gpu_after_startup_bytes": 1795293184,
+      "correct": 6,
+      "server_exit": 0
+    },
+    {
+      "pair": 2,
+      "mode": "async",
+      "session_wall_s": 186.7790395910015,
+      "first_ttft_s": 184.263337775,
+      "continuation_ttft_s": [
+        0.392493647,
+        0.395876866,
+        0.39369717,
+        0.407392714,
+        0.412185491
+      ],
+      "request_wall_sum_s": 186.751393314,
+      "client_gap_s": 0.027646277001480257,
+      "physical_process_read_bytes": 5925310464,
+      "logical_process_read_bytes": 20149899304,
+      "cold_logical_read_bytes": 546889728,
+      "cold_read_pages": 476,
+      "staging_peak_bytes": 9191424,
+      "epochs": 351,
+      "waits": 5664,
+      "releases": 5664,
+      "source_layer_async_pages": 0,
+      "cold_layer_async_pages": 0,
+      "source_whole_batch_pages_per_tier": [
+        17062,
+        17062
+      ],
+      "resident_rephase_pages": 154491,
+      "history_replay_tokens": 32228.0,
+      "history_replay_rounds": 1.0,
+      "nvme_prefetch_completed": 476.0,
+      "async_demote_completed": 1052.0,
+      "async_split_batches": 350.0,
+      "available_gpu_after_startup_bytes": 1795293184,
+      "correct": 6,
+      "server_exit": 0
+    },
+    {
+      "pair": 2,
+      "mode": "sync",
+      "session_wall_s": 187.91208517599807,
+      "first_ttft_s": 185.391615172,
+      "continuation_ttft_s": [
+        0.391701368,
+        0.398567289,
+        0.399745361,
+        0.407851041,
+        0.409143316
+      ],
+      "request_wall_sum_s": 187.886203215,
+      "client_gap_s": 0.025881960998077602,
+      "physical_process_read_bytes": 7047245824,
+      "logical_process_read_bytes": 20146452520,
+      "cold_logical_read_bytes": 544591872,
+      "cold_read_pages": 474,
+      "staging_peak_bytes": 9191424,
+      "epochs": 0,
+      "waits": 0,
+      "releases": 0,
+      "source_layer_async_pages": 0,
+      "cold_layer_async_pages": 0,
+      "source_whole_batch_pages_per_tier": [
+        17061,
+        17061
+      ],
+      "resident_rephase_pages": 0,
+      "history_replay_tokens": 32228.0,
+      "history_replay_rounds": 1.0,
+      "nvme_prefetch_completed": 0.0,
+      "async_demote_completed": 0.0,
+      "async_split_batches": 0.0,
+      "available_gpu_after_startup_bytes": 1797390336,
+      "correct": 6,
+      "server_exit": 0
+    }
+  ],
+  "limits": [
+    "Real layer consumer hits cover resident K rephase on this long input; source/Cold layer-async pages are zero due multi-page fallback.",
+    "Physical process read_bytes includes source-K, Cold and other demand paging; not a Cold-device bandwidth measurement.",
+    "Source restore/Cold counts vary by one or two pages across arms; selection/paging work is reported, not normalized away.",
+    "Mode-wise medians are separate from median of paired reductions; do not divide mode medians to reproduce paired result.",
+    "Not a 256K, media, multi-concurrency, Graph-internal layer-event, or 300W qualification."
+  ],
+  "raw_results": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-r21-p4-20261023/p4/results.json"
+}

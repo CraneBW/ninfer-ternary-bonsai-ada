@@ -8,12 +8,70 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <functional>
 #include <span>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
 namespace ninfer::kvmem {
+
+// Query-conditioned selection changes the attention inputs of later history
+// tokens, and therefore their native KV and recurrent StateImage. Equal text
+// prefixes alone do not certify reuse of a compressed original-position run.
+struct KvmemSelectionCondition {
+    std::uint32_t prefill_policy = 0;
+    std::vector<std::uint32_t> lexical;
+    std::vector<std::uint32_t> older;
+    bool operator==(const KvmemSelectionCondition&) const = default;
+};
+
+// Query-independent extension of the donor sink/recent prefill policy. Keep
+// a bounded set of rare-content pages outside the recent band, so a repeated
+// boilerplate history need not erase its distinct records before retrieval.
+// Only history tokens are inputs; no question tokens, expected labels or
+// model outputs enter this score. The exact resulting IDs bind cache reuse.
+[[nodiscard]] inline std::vector<std::uint32_t> kvmem_content_anchor_pages(
+    std::span<const std::int32_t> tokens, std::uint32_t history_end,
+    std::uint32_t recent_tokens, std::uint32_t page_tokens = 64) {
+    if (page_tokens == 0 || history_end > tokens.size() || history_end <= recent_tokens) {
+        return {};
+    }
+    const auto pages = (history_end - recent_tokens) / page_tokens;
+    std::unordered_map<std::int32_t, std::uint32_t> df;
+    for (std::uint32_t page = 0; page < pages; ++page) {
+        std::unordered_set<std::int32_t> seen;
+        for (const auto token : tokens.subspan(page * page_tokens, page_tokens)) {
+            if (token >= 0 && seen.insert(token).second) { ++df[token]; }
+        }
+    }
+    std::vector<std::pair<std::uint32_t, std::uint32_t>> ranked;
+    for (std::uint32_t page = 0; page < pages; ++page) {
+        std::unordered_set<std::int32_t> seen;
+        std::uint32_t score = 0, rare = 0;
+        for (const auto token : tokens.subspan(page * page_tokens, page_tokens)) {
+            const auto it = df.find(token);
+            if (it != df.end() && it->second <= 4 && seen.insert(token).second) {
+                score += 5 - it->second;
+                ++rare;
+            }
+        }
+        if (rare >= 2) { ranked.emplace_back(score, page); }
+    }
+    std::sort(ranked.begin(), ranked.end(), std::greater<>());
+    std::vector<std::uint32_t> result;
+    for (const auto [score, page] : ranked) {
+        (void)score;
+        // Include the following page for a record crossing the page boundary.
+        for (auto id = page; id < std::min(page + 2, pages); ++id) {
+            if (result.size() < 32 && std::find(result.begin(), result.end(), id) == result.end()) {
+                result.push_back(id);
+            }
+        }
+        if (result.size() == 32) { break; }
+    }
+    return result;
+}
 
 [[nodiscard]] inline std::vector<std::uint32_t> kvmem_lexical_recall_pages(
     std::span<const std::int32_t> tokens, std::uint32_t query_begin,

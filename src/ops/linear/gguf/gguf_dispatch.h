@@ -3,6 +3,7 @@
 #include "core/arena.h"
 #include "core/tensor.h"
 #include "ops/linear/gguf/ggml_bridge.h"
+#include "ops/linear/gguf/gguf_linear.h"
 
 #include <cuda_runtime.h>
 
@@ -21,6 +22,13 @@ namespace ninfer::ops::detail {
 // Direct GGUF block products, byte-for-byte weights and BF16 activation.
 void gguf_linear_dispatch(const Tensor& x, const Weight& weight, Tensor& out,
                           WorkspaceArena& workspace, cudaStream_t stream);
+
+// Reuse gguf_project's shared q8_1 activation contract for 2..4 products,
+// restricted to the same gather and T=1..8. No extra scratch or arithmetic.
+// Returns false BEFORE any enqueue for unsupported products.
+[[nodiscard]] bool try_gguf_shared_vector_dispatch(
+    const Tensor& x, std::span<const GgufProduct> products,
+    WorkspaceArena& workspace, cudaStream_t stream);
 
 // IndividualGdn-only packed BF16 rows: K=5120, Q/K N=2048 at rows
 // 0/2048 or V N=6144 at row 4096, in contiguous [10240,T]. The caller

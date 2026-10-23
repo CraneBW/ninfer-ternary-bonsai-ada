@@ -147,11 +147,8 @@ __global__ void kvmem_export_mean_k_kernel(const std::int8_t* const* __restrict_
             normalized_hadamard_d256_inplace(row, lane);
             // Undo RoPE: the rotary pairs live in the first group, and in this
             // lane layout a pair is (row[0], row[1]) at pair index = lane.
-            const float phi =
-                static_cast<float>(baked + static_cast<std::int32_t>(token)) *
-                kTextRopeInvFrequency[lane];
-            const float sine = sinf(phi);
-            const float cosi = cosf(phi);
+            float sine, cosi;
+            text_rope_sincos(baked + static_cast<std::int32_t>(token),lane,&sine,&cosi);
             const float raw0 = row[0] * cosi + row[1] * sine;
             const float raw1 = row[1] * cosi - row[0] * sine;
             const std::uint32_t sub = token / kMeanKeyTokensPerSubblock;

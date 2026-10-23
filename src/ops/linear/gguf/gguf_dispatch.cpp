@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <stdexcept>
 
 namespace ninfer::ops::gguf {
@@ -44,6 +45,16 @@ namespace {
 
 constexpr std::size_t kWorkspaceAlignmentBudget = 4 * 256;
 
+bool large_prefill_enabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("NINFER_GGUF_LARGE_PREFILL");
+        if (!value || std::strcmp(value, "0") == 0) { return false; }
+        if (std::strcmp(value, "1") == 0) { return true; }
+        throw std::invalid_argument("NINFER_GGUF_LARGE_PREFILL must be 0 or 1");
+    }();
+    return enabled;
+}
+
 std::int32_t matrix_batch_columns() {
     // Reuse the wide MMQ route already used by gguf_project. Ada's 48MiB L2
     // benefits from issuing adjacent column tiles together instead of reading
@@ -61,7 +72,9 @@ std::int32_t matrix_batch_columns() {
             cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, device) != cudaSuccess) {
             throw std::runtime_error("GGUF batch policy: cannot query compute capability");
         }
-        columns = major == 8 && minor == 9 ? 512 : 128;
+        // The same cap sizes workspace and slices execution. Raising only
+        // the public prefill chunk would otherwise still issue two T512 Ops.
+        columns = major == 8 && minor == 9 ? (large_prefill_enabled() ? 1024 : 512) : 128;
         previous_device = device;
     }
     return columns;
@@ -139,7 +152,8 @@ void gguf_linear_dispatch_impl(const Tensor& x, const Weight& w, Tensor& out,
         (fp32_out || gdn_rows || w.k != 17408 || w.n != 5120 || x.ne[1] != 512 ||
          w.input_columns != nullptr || !silu_up->data || silu_up->dtype != DType::BF16 ||
          !silu_up->is_contiguous() || silu_up->ne[0] != w.k || silu_up->ne[1] != 512 ||
-         !gguf::has_matrix_kernel(type) || matrix_batch_columns() != 512)) {
+         !gguf::has_matrix_kernel(type) ||
+         std::min(matrix_batch_columns(), static_cast<std::int32_t>(x.ne[1])) != 512)) {
         throw std::invalid_argument("R29 SiLU/down: expected contiguous main GGUF K17408 N5120 T512 without gather");
     }
     const auto block = gguf_block_shape(w.qtype);
@@ -240,6 +254,67 @@ void gguf_linear_dispatch_impl(const Tensor& x, const Weight& w, Tensor& out,
             selected, int(type), w.n, w.k, matrix_calls ? "mmq" : "vector",
             matrix_calls, vector_calls, vector_columns[0], vector_columns[1]);
     }
+}
+
+bool try_gguf_shared_vector_dispatch(
+    const Tensor& x, std::span<const GgufProduct> products,
+    WorkspaceArena& workspace, cudaStream_t stream) {
+    // Adapted from gguf_linear.cpp::gguf_project, itself using the vendored
+    // llama.cpp q8_1/DP4A path. The same-gather restriction keeps the scratch
+    // bound equal to ONE ordinary product; validate all destinations first.
+    if (products.size() < 2 || products.size() > 4 ||
+        x.dtype != DType::BF16 || !x.data || !x.is_contiguous() ||
+        x.ne[1] < 1 || x.ne[1] > gguf::kMaxVectorColumns || x.ne[2] != 1) {
+        return false;
+    }
+    const auto* first_weight = products.front().weight;
+    if (!first_weight) { return false; }
+    for (const auto& product : products) {
+        const auto* w = product.weight;
+        const auto* y = product.out;
+        if (!w || !is_gguf(w->qtype) || w->layout != QuantLayout::GgufBlocks ||
+            !w->qdata || w->n <= 0 || w->k != x.ne[0] || w->k % 32 != 0 ||
+            w->input_columns != first_weight->input_columns ||
+            product.epilogue != GgufEpilogue::Store || product.f32 ||
+            !y || !y->data || y->dtype != DType::BF16 || !y->is_contiguous() ||
+            y->ne[1] != x.ne[1] || y->ne[2] != 1 || product.row < 0 ||
+            static_cast<std::int64_t>(product.row) + w->n > y->ne[0]) {
+            return false;
+        }
+        const auto block = gguf_block_shape(w->qtype);
+        if (!block.elements || w->k % block.elements != 0) { return false; }
+    }
+    auto scope = workspace.scope();
+    void* codes = workspace.alloc_bytes(
+        gguf::vector_activation_bytes(x.ne[0], x.ne[1])).data;
+    gguf::quantize_vector_activation(static_cast<const __nv_bfloat16*>(x.data),
+        x.ne[0], x.ne[1], first_weight->input_columns, codes, stream);
+    for (const auto& product : products) {
+        const Weight& w = *product.weight;
+        const auto block = gguf_block_shape(w.qtype);
+        gguf::VectorOutput output;
+        output.bf16 = static_cast<__nv_bfloat16*>(product.out->data) + product.row;
+        output.column_stride = product.out->ne[0];
+        gguf::vector_product(gguf_type(w.qtype), w.qdata,
+            static_cast<std::int64_t>(w.k / block.elements) * block.bytes,
+            w.n, w.k, codes, x.ne[1], output, stream);
+    }
+    static const bool trace = [] {
+        const char* value = std::getenv("NINFER_SM89_SHARED_VECTOR_TRACE");
+        return value && value[0] == '1' && value[1] == '\0';
+    }();
+    if (trace) {
+        static std::atomic<unsigned> emitted{0};
+        const unsigned shape = first_weight->n == 10240 ? 0 :
+                               first_weight->n == 17408 ? 1 : 2;
+        const unsigned bit = 1u << ((x.ne[1] - 1) * 3 + shape);
+        if (!(emitted.fetch_or(bit, std::memory_order_relaxed) & bit)) {
+            std::fprintf(stderr,
+                "SM89_SHARED_VECTOR T=%d K=%d products=%zu first_rows=%d quantizers=1 bf16_boundary=1\n",
+                x.ne[1], x.ne[0], products.size(), first_weight->n);
+        }
+    }
+    return true;
 }
 
 void gguf_linear_dispatch(const Tensor& x, const Weight& w, Tensor& out,

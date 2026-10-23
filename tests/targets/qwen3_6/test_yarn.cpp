@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <limits>
 
 namespace {
 
@@ -80,6 +81,30 @@ int main() {
                 "a barely extended window never raises a divisor");
         require(just_past.inv_freq[pair] >= native_pair / 1.001F,
                 "a barely extended window keeps the native divisors");
+    }
+
+    // Fixed-factor policy from the KVMem native backend applies even inside
+    // the nominal context. Native/default calculations above remain unchanged.
+    for (const float factor : {1.0F, 2.0F, 4.0F}) {
+        const auto fixed = compute_yarn_config(kNative, 212992, factor);
+        require(fixed.scale_factor == factor, "fixed factor does not follow capacity");
+        require(close_to(fixed.attn_temperature_multiplier,
+                         static_cast<float>(1.0 + std::log(double(factor)) / 10.0), 1e-6F),
+                "fixed factor temperature matches independent double expression");
+        if (factor == 1) {
+            for (const float divisor : fixed.inv_freq) require(divisor == 0, "fixed one uses baked table");
+        } else {
+            require(fixed.inv_freq[0] == 1.0F, "fixed factor preserves shortest wavelength");
+            require(close_to(fixed.inv_freq[31], native_divisor(31) / factor, 1e-7F),
+                    "fixed factor scales longest wavelength");
+        }
+    }
+    for (const float bad : {0.5F, 5.0F, std::numeric_limits<float>::infinity(),
+                             std::numeric_limits<float>::quiet_NaN()}) {
+        bool rejected=false;
+        try { (void)compute_yarn_config(kNative, 212992, bad); }
+        catch (const std::invalid_argument&) { rejected=true; }
+        require(rejected,"invalid fixed factor rejected");
     }
 
     std::puts("yarn tests passed");
