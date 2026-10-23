@@ -1018,13 +1018,13 @@ void TextContext::gdn_mix(const GdnLayerW& w, Tensor& x, int gidx, Phase ph) {
             GdnReplayRecordLayer records =
                 replay_records_->layer(gidx, active_sequence_batch_, width);
             ops::gated_delta_net_replay_record(q_batch, k_batch, v_batch, g_batch, beta_batch,
-                                               kGdnScale, recurrent_states, valid,
+                                               kGdnScale, work_, recurrent_states, valid,
                                                *active_linear_state_source_slots_, records.key,
                                                records.value, records.gate, out_batch, s);
         } else {
             ops::gated_delta_net_batch_update(
                 q_batch, k_batch, v_batch, g_batch, beta_batch, kGdnScale,
-                /*normalize_qk=*/true, recurrent_states, *active_linear_state_source_slots_,
+                /*normalize_qk=*/true, work_, recurrent_states, *active_linear_state_source_slots_,
                 *active_linear_state_destination_slots_, out_batch, s);
         }
     } else {

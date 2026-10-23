@@ -2067,6 +2067,7 @@ int run_batch_case(const Geometry& geometry, KvCacheStorage storage,
                                   cache_name(storage) + " W=" + std::to_string(width) +
                                   " B=" + std::to_string(batch) + " phase=" + std::to_string(phase);
         const auto output = copy_from_guarded<std::uint16_t>(dout, q.size());
+        dump_attention_test_output(output);
         failures += verify_attention(label, bf16_bits_to_double(output), reference,
                                      attention_criterion(storage));
         failures += verify_invalid_columns_zero(label, output, geometry, width, valid);
@@ -2499,6 +2500,44 @@ int run_softmax_attention_int8_prompt_tests() {
     }
     std::cout << (failures == 0 ? "PASS" : "FAIL")
               << " causal_softmax_attention int8 prompt independent correctness\n";
+    return failures == 0 ? 0 : 1;
+}
+
+int run_softmax_attention_split_vector_tests() {
+    if (cuda_unavailable()) {
+        std::cout << "SKIP: no usable CUDA device\n";
+        return 77;
+    }
+    int failures = 0;
+    // Public A1/A3 routes against the independent represented-cache FP64 oracle.
+    // All main24 cases select small-T (BF16 prompt is bypassed above its limit).
+    // Windows cross partial key tiles and split-policy tiers, including the real
+    // 32K working set. No private reducer result serves as the oracle.
+    for (const auto storage : {KvCacheStorage::BFloat16, KvCacheStorage::Int8Group64}) {
+        failures += run_a3_case(kGeometries[0], storage, {1, 128, 129, 2001u},
+                                MappingPattern::Fragmented);
+        failures += run_a1_case(kGeometries[0], storage, {3, 126, 129, 2002u},
+                                MappingPattern::Fragmented);
+        failures += run_a3_case(kGeometries[0], storage, {7, 4088, 4095, 2003u},
+                                MappingPattern::Fragmented);
+        failures += run_a1_case(kGeometries[0], storage,
+                                {8, 8189, 8197, 2004u, false, true},
+                                MappingPattern::Fragmented);
+        failures += run_a3_case(kGeometries[0], storage,
+                                {8, 32759, 32767, 2005u, false, true},
+                                MappingPattern::Fragmented);
+        // Width16 splits into two calls: the latter has nonzero column_begin.
+        // Graph phases change masks and lane owners, including zero valid columns.
+        failures += run_batch_case(
+            kGeometries[0], storage,
+            {16, {641, 698, 767}, {16, 9, 0}, {2, 0, 1}, MappingPattern::Fragmented,
+             2006u, true});
+        // The other registered geometry remains on the original DChunk64 reducer.
+        failures += run_a3_case(kGeometries[1], storage, {6, 6994, 7000, 2007u},
+                                MappingPattern::Fragmented);
+    }
+    std::cout << (failures == 0 ? "PASS" : "FAIL")
+              << " causal_softmax_attention split-vector independent correctness\n";
     return failures == 0 ? 0 : 1;
 }
 

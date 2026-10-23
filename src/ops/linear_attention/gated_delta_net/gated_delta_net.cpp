@@ -7,12 +7,30 @@
 #include "ops/common/math.h"
 #include "ops/linear_attention/gated_delta_net/common.h"
 #include "ops/linear_attention/gated_delta_net/launch.h"
+#include "ops/linear_attention/gated_delta_net/prepared_qk.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
 #include <stdexcept>
 #include <string>
+
+namespace ninfer::ops::detail::gated_delta_net {
+
+bool recurrent_qk_prepared_enabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("NINFER_SM89_GDN_PRENORM");
+        if (value == nullptr || std::strcmp(value, "0") == 0) { return false; }
+        if (std::strcmp(value, "1") == 0) { return true; }
+        throw std::invalid_argument("NINFER_SM89_GDN_PRENORM must be 0 or 1");
+    }();
+    return enabled;
+}
+
+} // namespace ninfer::ops::detail::gated_delta_net
 
 namespace ninfer::ops {
 namespace {
@@ -196,6 +214,18 @@ ChunkedWorkspace allocate_chunked_workspace(Allocator& allocator, std::int32_t q
 
 } // namespace
 
+std::size_t gated_delta_net_recurrent_workspace_capacity_bytes(
+    std::int32_t qk_heads, std::int32_t value_heads, bool normalize_qk,
+    std::int32_t max_tokens) {
+    if (!detail::gated_delta_net::are_head_counts_valid(qk_heads, value_heads) || max_tokens <= 0) {
+        throw std::invalid_argument("gated_delta_net recurrent workspace: invalid profile");
+    }
+    if (!normalize_qk || !detail::gated_delta_net::recurrent_qk_prepared_enabled()) { return 0; }
+    WorkspaceLayoutBuilder layout;
+    (void)detail::gated_delta_net::allocate_recurrent_qk(layout, qk_heads, max_tokens);
+    return layout.peak_bytes(1);
+}
+
 std::size_t gated_delta_net_workspace_capacity_bytes(std::int32_t qk_heads,
                                                      std::int32_t value_heads, bool normalize_qk,
                                                      std::int32_t min_tokens,
@@ -206,7 +236,13 @@ std::size_t gated_delta_net_workspace_capacity_bytes(std::int32_t qk_heads,
     }
     WorkspaceLayoutBuilder layout;
     (void)allocate_chunked_workspace(layout, qk_heads, value_heads, max_tokens, normalize_qk);
-    return layout.peak_bytes(1);
+    // The interval may cross the recurrent/chunked boundary; their scratch is not monotonic.
+    const auto recurrent = min_tokens < detail::gated_delta_net::kChunkSize
+        ? gated_delta_net_recurrent_workspace_capacity_bytes(
+              qk_heads, value_heads, normalize_qk,
+              std::min(max_tokens, detail::gated_delta_net::kChunkSize - 1))
+        : 0;
+    return std::max(layout.peak_bytes(1), recurrent);
 }
 
 void gated_delta_net(const Tensor& q, const Tensor& k, const Tensor& v, const Tensor& g,
@@ -219,23 +255,39 @@ void gated_delta_net(const Tensor& q, const Tensor& k, const Tensor& v, const Te
     }
     validate_recurrent(q, k, v, g, beta, scale, ssm_state, out);
 
-    (void)ws;
+    if (normalize_qk && detail::gated_delta_net::recurrent_qk_prepared_enabled()) {
+        auto scope = ws.scope();
+        auto scratch = detail::gated_delta_net::allocate_recurrent_qk(ws, q.ne[1], 1);
+        detail::gated_delta_net::launch_prepare_recurrent_qk(q, k, scratch.q, scratch.k, stream);
+        detail::gated_delta_net::launch_recurrent_inout(
+            q, k, v, g, beta, scale, false, ssm_state, ssm_state, out, stream,
+            static_cast<const float*>(scratch.q.data), static_cast<const float*>(scratch.k.data));
+        return;
+    }
     detail::gated_delta_net::launch_recurrent(q, k, v, g, beta, scale, normalize_qk, ssm_state, out,
                                               stream);
 }
 
 void gated_delta_net_batch_update(const Tensor& q, const Tensor& k, const Tensor& v,
                                   const Tensor& g, const Tensor& beta, float scale,
-                                  bool normalize_qk, Tensor& ssm_states,
+                                  bool normalize_qk, WorkspaceArena& ws, Tensor& ssm_states,
                                   const Tensor& source_state_slots,
                                   const Tensor& destination_state_slots, Tensor& out,
                                   cudaStream_t stream) {
     validate_recurrent_batch_update(q, k, v, g, beta, scale, ssm_states, source_state_slots,
                                     destination_state_slots, out);
 
+    auto scope = ws.scope();
+    detail::gated_delta_net::RecurrentQkScratch scratch;
+    if (normalize_qk && detail::gated_delta_net::recurrent_qk_prepared_enabled()) {
+        scratch = detail::gated_delta_net::allocate_recurrent_qk(ws, q.ne[1], q.ne[3]);
+        detail::gated_delta_net::launch_prepare_recurrent_qk(q, k, scratch.q, scratch.k, stream);
+    }
     detail::gated_delta_net::launch_recurrent_batch_update(q, k, v, g, beta, scale, normalize_qk,
                                                            ssm_states, source_state_slots,
-                                                           destination_state_slots, out, stream);
+                                                           destination_state_slots, out, stream,
+                                                           static_cast<const float*>(scratch.q.data),
+                                                           static_cast<const float*>(scratch.k.data));
 }
 
 void gated_delta_net(const Tensor& q, const Tensor& k, const Tensor& v, const Tensor& g,
@@ -249,6 +301,14 @@ void gated_delta_net(const Tensor& q, const Tensor& k, const Tensor& v, const Te
     const std::int32_t T_full =
         (T / detail::gated_delta_net::kChunkSize) * detail::gated_delta_net::kChunkSize;
     ChunkedWorkspace scratch = allocate_chunked_workspace(ws, q.ne[1], v.ne[1], T, normalize_qk);
+    if (normalize_qk && T_full == 0 && detail::gated_delta_net::recurrent_qk_prepared_enabled()) {
+        auto prepared = detail::gated_delta_net::allocate_recurrent_qk(ws, q.ne[1], T);
+        detail::gated_delta_net::launch_prepare_recurrent_qk(q, k, prepared.q, prepared.k, stream);
+        detail::gated_delta_net::launch_recurrent_inout(
+            q, k, v, g, beta, scale, false, ssm_state_in, ssm_state_out, out, stream,
+            static_cast<const float*>(prepared.q.data), static_cast<const float*>(prepared.k.data));
+        return;
+    }
     Tensor q_compute         = q;
     Tensor k_compute         = k;
     bool recurrent_normalize = normalize_qk;

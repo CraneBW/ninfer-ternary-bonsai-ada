@@ -270,7 +270,8 @@ int run_case(const FoldProfile profile, std::int32_t width, std::int32_t rows,
     Tensor output(out.p, DType::BF16, {kStateDim, profile.value_heads, width, 1});
     // Compat MSVC: std::sqrt no es constexpr en C++20 (C2131).
     const float kScale = 1.0F / std::sqrt(128.0F);
-    WorkspaceArena reference_workspace(256);
+    WorkspaceArena reference_workspace(std::max<std::size_t>(
+        256, ops::gated_delta_net_workspace_capacity_bytes(kQkHeads, profile.value_heads, true, 1, 1)));
 
     for (std::int32_t layer = 0; layer < profile.layers; ++layer) {
         const GdnReplayRecordLayer layer_records = records.layer(layer, rows, width);
@@ -611,8 +612,16 @@ int run_record_fold_rounds() {
     const std::size_t record_workspace_bytes =
         ops::gdn_input_proj_conv_record_workspace_capacity_bytes(2048, 2048, kValueRows, 1, kWidth,
                                                                  kWidth);
-    WorkspaceArena snapshot_workspace(std::max<std::size_t>(256, snapshot_workspace_bytes));
-    WorkspaceArena record_workspace(std::max<std::size_t>(256, record_workspace_bytes));
+    const std::size_t snapshot_recurrent_workspace_bytes =
+        ops::gated_delta_net_recurrent_workspace_capacity_bytes(kQkHeads, kProfile.value_heads,
+                                                               true, 1);
+    const std::size_t record_recurrent_workspace_bytes =
+        ops::gated_delta_net_recurrent_workspace_capacity_bytes(kQkHeads, kProfile.value_heads,
+                                                               true, kWidth);
+    WorkspaceArena snapshot_workspace(
+        std::max({std::size_t{256}, snapshot_workspace_bytes, snapshot_recurrent_workspace_bytes}));
+    WorkspaceArena record_workspace(
+        std::max({std::size_t{256}, record_workspace_bytes, record_recurrent_workspace_bytes}));
 
     std::vector<std::int32_t> source_steps(kWidth), destination_steps(kWidth);
     for (int token = 0; token < kWidth; ++token) {
@@ -665,10 +674,12 @@ int run_record_fold_rounds() {
                 Tensor source(static_cast<std::int32_t*>(device_sources.p) + token, DType::I32, {1});
                 Tensor destination(static_cast<std::int32_t*>(device_destinations.p) + token, DType::I32, {1});
                 ops::gated_delta_net_batch_update(q_step, k_step, v_step, g_step, beta_step, kScale,
-                    true, recurrent_states, source, destination, out_step, nullptr);
+                    true, snapshot_workspace, recurrent_states, source, destination, out_step,
+                    nullptr);
             }
             ops::gated_delta_net_replay_record(record_q_view, record_k_view, record_v_view, g, beta,
-                                               kScale, recurrent_states, valid, initial_selector,
+                                               kScale, record_workspace, recurrent_states, valid,
+                                               initial_selector,
                                                layer_records.key, layer_records.value,
                                                layer_records.gate, record_output, nullptr);
             cuda_synchronize();

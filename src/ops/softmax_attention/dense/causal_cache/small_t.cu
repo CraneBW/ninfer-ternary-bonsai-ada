@@ -11,11 +11,25 @@
 #include "ninfer/ops/softmax_attention.h"
 
 #include <cstdint>
+#include <cstdlib>
 #include <algorithm>
 #include <stdexcept>
 
 namespace ninfer::ops::detail {
 namespace {
+
+bool split_vector_enabled() {
+#if defined(NINFER_SM89)
+    // Resolve once before graph capture; replay cannot change its kernel or resources.
+    static const bool enabled = [] {
+        const char* value = std::getenv("NINFER_SM89_ATTN_SPLIT_VECTOR");
+        return value != nullptr && value[0] == '1' && value[1] == '\0';
+    }();
+    return enabled;
+#else
+    return false;
+#endif
+}
 
 // Supplies an upper bound for the device-side active-split policy over one explicit execution
 // envelope. Eager calls normally pass an exact window; graph calls pass their target-private
@@ -514,15 +528,27 @@ void causal_attention_small_t_launch_for(const Tensor& q, CacheInput input, cons
     const auto launch_reduce   = [&]<bool Int8, bool MultiBatch, bool Masked, bool Offset>() {
         const dim3 grid(Geometry::QHeads, div_up(kCausalHeadDim, kDChunk),
                           invocation.width * invocation.batch_size);
-        causal_attention_small_t_reduce_output_kernel<Geometry, kDChunk, Int8, MultiBatch, Masked,
-                                                        Offset><<<grid, kReduceBlock, 0, stream>>>(
-            static_cast<const float*>(partial_acc.data), static_cast<const float*>(partial_m.data),
-            static_cast<const float*>(partial_l.data), static_cast<const std::int32_t*>(pos.data),
-            invocation.valid_columns
-                  ? static_cast<const std::int32_t*>(invocation.valid_columns->data)
-                  : nullptr,
-            invocation.width, invocation.full_width, invocation.column_begin, invocation.batch_size,
-            splits, static_cast<__nv_bfloat16*>(out.data));
+        const auto launch = [&]<bool VectorLoads>() {
+            causal_attention_small_t_reduce_output_kernel<Geometry, kDChunk, Int8, MultiBatch,
+                                                            Masked, Offset, VectorLoads>
+                <<<grid, kReduceBlock, 0, stream>>>(
+                    static_cast<const float*>(partial_acc.data),
+                    static_cast<const float*>(partial_m.data),
+                    static_cast<const float*>(partial_l.data),
+                    static_cast<const std::int32_t*>(pos.data),
+                    invocation.valid_columns
+                        ? static_cast<const std::int32_t*>(invocation.valid_columns->data)
+                        : nullptr,
+                    invocation.width, invocation.full_width, invocation.column_begin,
+                    invocation.batch_size, splits, static_cast<__nv_bfloat16*>(out.data));
+        };
+        if constexpr (Geometry::QHeads == 24) {
+            if (split_vector_enabled()) {
+                launch.template operator()<true>();
+                return;
+            }
+        }
+        launch.template operator()<false>();
     };
     const auto launch_profile = [&]<bool Int8, bool MultiBatch, bool Masked>() {
         if (invocation.column_begin == 0)

@@ -197,7 +197,8 @@ causal_merge_split_statistics(const float* partial_m, const float* partial_l, in
     return total;
 }
 
-template <typename Geometry, int DChunk, bool Int8, bool MultiBatch, bool Masked, bool Offset>
+template <typename Geometry, int DChunk, bool Int8, bool MultiBatch, bool Masked, bool Offset,
+          bool VectorLoads = false>
 __launch_bounds__(256) __global__ void causal_attention_small_t_reduce_output_kernel(
     const float* partial_acc, const float* partial_m, const float* partial_l,
     const std::int32_t* positions, const std::int32_t* valid_columns, std::int32_t tokens,
@@ -255,6 +256,38 @@ __launch_bounds__(256) __global__ void causal_attention_small_t_reduce_output_ke
     const float head_l =
         causal_merge_split_statistics<Geometry>(partial_m, partial_l, q_head, token, tokens,
                                                 active_split_count, weights, warp_sums, scalars);
+    if constexpr (VectorLoads) {
+        static_assert(DChunk % 4 == 0 && kCausalHeadDim % 4 == 0);
+        // Adapt the consecutive split-vector reads from tuxKOH/ninfer-V100X2
+        // 5c515130, src/ops/kernel/gqa_attention_decode.cuh
+        // (third_party/ninfer_v100x2/LICENSE).
+        // Its DChunk=64 shared staging recruits otherwise idle output groups. Here
+        // DChunk=256 already uses every output thread, so keep the existing shared
+        // statistics and load four adjacent FP32 elements per active thread instead.
+        // All four sums retain ascending split order, with no new materialization,
+        // shared-memory barrier, or BF16 rounding boundary.
+        const int d = d_start + 4 * tid;
+        if (tid >= DChunk / 4 || d >= kCausalHeadDim) return;
+        float4 numerator = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+        for (int split = 0; split < active_split_count; ++split) {
+            const float weight = weights[split];
+            if (weight != 0.0f) {
+                const auto index =
+                    causal_partial_acc_index<Geometry>(q_head, d, token, split, tokens);
+                const float4 value = *reinterpret_cast<const float4*>(partial_acc + index);
+                numerator.x += value.x * weight;
+                numerator.y += value.y * weight;
+                numerator.z += value.z * weight;
+                numerator.w += value.w * weight;
+            }
+        }
+        const auto output = causal_q_index<Geometry>(q_head, d, output_column);
+        out[output]     = __float2bfloat16(head_l > 0.0f ? numerator.x / head_l : 0.0f);
+        out[output + 1] = __float2bfloat16(head_l > 0.0f ? numerator.y / head_l : 0.0f);
+        out[output + 2] = __float2bfloat16(head_l > 0.0f ? numerator.z / head_l : 0.0f);
+        out[output + 3] = __float2bfloat16(head_l > 0.0f ? numerator.w / head_l : 0.0f);
+        return;
+    }
     const int d = d_start + tid;
     if (tid >= DChunk || d >= kCausalHeadDim) return;
     float numerator = 0.0f;

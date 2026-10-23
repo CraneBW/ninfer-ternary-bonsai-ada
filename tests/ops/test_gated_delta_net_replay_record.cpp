@@ -118,7 +118,13 @@ int run_case(std::int32_t value_heads, std::int32_t width, std::int32_t batch,
 
     // Compat MSVC: std::sqrt no es constexpr en C++20 (C2131).
     const float kScale = 1.0F / std::sqrt(128.0F);
-    WorkspaceArena reference_workspace(256);
+    const std::size_t reference_workspace_bytes = ops::gated_delta_net_workspace_capacity_bytes(
+        kQkHeads, value_heads, true, 1, width);
+    const std::size_t record_workspace_bytes =
+        ops::gated_delta_net_recurrent_workspace_capacity_bytes(kQkHeads, value_heads, true,
+                                                               columns);
+    WorkspaceArena reference_workspace(std::max<std::size_t>(256, reference_workspace_bytes));
+    WorkspaceArena record_workspace(std::max<std::size_t>(256, record_workspace_bytes));
     cudaStream_t stream;
     CUDA_CHECK(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
     cuda_synchronize();
@@ -150,8 +156,9 @@ int run_case(std::int32_t value_heads, std::int32_t width, std::int32_t batch,
     }
     };
     const auto launch_record = [&] {
-        ops::gated_delta_net_replay_record(q, k, v, g_tensor, beta_tensor, kScale, record_states,
-            valid, initial, key_record_tensor, value_record_tensor, gate_record_tensor, record_output, stream);
+        ops::gated_delta_net_replay_record(
+            q, k, v, g_tensor, beta_tensor, kScale, record_workspace, record_states, valid, initial,
+            key_record_tensor, value_record_tensor, gate_record_tensor, record_output, stream);
     };
     launch_reference();
     launch_record();
@@ -186,6 +193,10 @@ int run_case(std::int32_t value_heads, std::int32_t width, std::int32_t batch,
     int failures             = 0;
     const std::string suffix = " Hv=" + std::to_string(value_heads) +
                                " T=" + std::to_string(width) + " B=" + std::to_string(batch);
+    if (record_workspace.used() != 0 || record_workspace.peak_used() != record_workspace_bytes) {
+        std::cerr << "replay record workspace query/execution high-water mismatch" << suffix << "\n";
+        ++failures;
+    }
     const std::vector<std::uint16_t> reference_output_bits =
         from_device<std::uint16_t>(reference_out, value_elements);
     const std::vector<std::uint16_t> record_output_bits =
@@ -278,6 +289,8 @@ int main() {
     failures += run_case(32, 2, 1, {}, 1701U);
     failures += run_case(32, 16, 1, {7}, 1711U);
     failures += run_case(32, 6, 8, {6, 5, 4, 3, 2, 1, 6, 2}, 1721U);
+    failures += run_case(32, 8, 8, {8, 7, 6, 5, 4, 3, 2, 1}, 1722U);
+    failures += run_case(32, 16, 8, {}, 1723U);
     for (int width = 2; width <= 16; ++width) {
         failures += run_case(48, width, 1, {}, 1730U + width);
         std::vector<std::int32_t> valid(8);

@@ -118,10 +118,10 @@ __device__ __forceinline__ void apply_gdn_transition(float (&state)[kDvPerWarp][
 
 template <bool Normalize>
 __device__ __forceinline__ void readout_and_store(float (&state)[kDvPerWarp][kQkPerLane],
-                                                  const __nv_bfloat16* query, __nv_bfloat16* output,
+                                                   RawQkLane q, __nv_bfloat16* output,
                                                   std::uint32_t dqk_base, std::uint32_t dv_base,
                                                   int lane, float scale) {
-    RawQkLane q = load_raw_qk_lane(query, dqk_base);
+    (void)dqk_base;
     normalize_qk_lane<Normalize>(q.value, lane);
 
     float attn_val = 0.0f;
@@ -164,6 +164,56 @@ __device__ __forceinline__ RecurrentCoordinates make_coordinates(std::int32_t ba
             qk_head, dv_base,    static_cast<std::uint32_t>(lane * kQkPerLane)};
 }
 
+// FP32 prepared values are private scratch. Keep the raw BF16 pointer/bits for exact
+// records, so later fold still consumes the original represented key and gate values.
+template <class Base>
+struct PreparedAccess : Base {
+    const float* prepared_q;
+    const float* prepared_k;
+};
+
+template <class Access>
+__device__ __forceinline__ RawQkLane query_lane(const Access& access,
+                                                const RecurrentCoordinates& coord,
+                                                std::int32_t token) {
+    return load_raw_qk_lane(access.query_ptr(coord, token), coord.dqk_base);
+}
+
+template <class Base>
+__device__ __forceinline__ RawQkLane query_lane(const PreparedAccess<Base>& access,
+                                                const RecurrentCoordinates& coord,
+                                                std::int32_t token) {
+    const auto raw = access.query_ptr(coord, token);
+    RawQkLane result = load_raw_qk_lane(raw, coord.dqk_base);
+    const float4 prepared = load_vec<float4>(access.prepared_q + (raw - access.q) + coord.dqk_base);
+    result.value[0] = prepared.x;
+    result.value[1] = prepared.y;
+    result.value[2] = prepared.z;
+    result.value[3] = prepared.w;
+    return result;
+}
+
+template <class Access>
+__device__ __forceinline__ RawQkLane key_lane(const Access& access,
+                                              const RecurrentCoordinates& coord,
+                                              std::int32_t token) {
+    return load_raw_qk_lane(access.key_ptr(coord, token), coord.dqk_base);
+}
+
+template <class Base>
+__device__ __forceinline__ RawQkLane key_lane(const PreparedAccess<Base>& access,
+                                              const RecurrentCoordinates& coord,
+                                              std::int32_t token) {
+    const auto raw = access.key_ptr(coord, token);
+    RawQkLane result = load_raw_qk_lane(raw, coord.dqk_base);
+    const float4 prepared = load_vec<float4>(access.prepared_k + (raw - access.k) + coord.dqk_base);
+    result.value[0] = prepared.x;
+    result.value[1] = prepared.y;
+    result.value[2] = prepared.z;
+    result.value[3] = prepared.w;
+    return result;
+}
+
 struct OutputEffects {
     template <class Access>
     __device__ __forceinline__ static void observe_key(const Access&, const RecurrentCoordinates&,
@@ -178,7 +228,7 @@ struct OutputEffects {
     __device__ __forceinline__ static void
     publish_output(float (&state)[kDvPerWarp][kQkPerLane], const Access& access,
                    const RecurrentCoordinates& coord, std::int32_t token) {
-        readout_and_store<NormalizeInputs>(state, access.query_ptr(coord, token),
+        readout_and_store<NormalizeInputs>(state, query_lane(access, coord, token),
                                            access.output_ptr(coord, token), coord.dqk_base,
                                            coord.dv_base, coord.lane, access.scale);
     }
@@ -616,7 +666,7 @@ template <bool NormalizeInputs, class Effects, class Access>
 __device__ __forceinline__ void
 run_recurrent_sequence(float (&state)[kDvPerWarp][kQkPerLane], const Access& access,
                        const RecurrentCoordinates& coord, std::int32_t valid) {
-    RawQkLane key = load_raw_qk_lane(access.key_ptr(coord, 0), coord.dqk_base);
+    RawQkLane key = key_lane(access, coord, 0);
     Effects::observe_key(access, coord, 0, key);
     normalize_qk_lane<NormalizeInputs>(key.value, coord.lane);
 
@@ -629,7 +679,7 @@ run_recurrent_sequence(float (&state)[kDvPerWarp][kQkPerLane], const Access& acc
         apply_gdn_transition(state, key.value, value.value, gate.g, gate.beta);
 
         if (token + 1 < valid) {
-            key = load_raw_qk_lane(access.key_ptr(coord, token + 1), coord.dqk_base);
+            key = key_lane(access, coord, token + 1);
             Effects::observe_key(access, coord, token + 1, key);
             normalize_qk_lane<NormalizeInputs>(key.value, coord.lane);
         }
@@ -664,6 +714,25 @@ __global__ void __launch_bounds__(kWarpSize* kNumWarps, 2)
     load_state_tile(state, access.state_read_base(coord), coord);
     run_recurrent_sequence<NormalizeInputs, OutputEffects>(state, access, coord, width);
     store_state_tile(state, access.state_write_base(coord), coord);
+}
+
+// Same recurrence and publication semantics; only Q/K normalization has moved to an
+// earlier kernel. FP32 staging avoids adding a BF16 rounding boundary.
+template <bool Record, class Base, int MinBlocks = 2>
+__global__ void __launch_bounds__(kWarpSize* kNumWarps, MinBlocks)
+    recurrent_prepared_kernel(PreparedAccess<Base> access, std::int32_t width) {
+    const RecurrentCoordinates coord = access.coordinates();
+    std::int32_t valid = width;
+    if constexpr (Record) { valid = access.active_columns(coord); }
+    __align__(16) float state[kDvPerWarp][kQkPerLane];
+    load_state_tile(state, access.state_read_base(coord), coord);
+    if constexpr (Record) {
+        run_recurrent_sequence<false, RecordEffects>(state, access, coord, valid);
+        zero_output_suffix(access, coord, valid, width);
+    } else {
+        run_recurrent_sequence<false, OutputEffects>(state, access, coord, valid);
+        store_state_tile(state, access.state_write_base(coord), coord);
+    }
 }
 
 template <bool NormalizeInputs>

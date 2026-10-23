@@ -3,6 +3,7 @@
 
 #include "ops/linear_attention/gated_delta_net/common.h"
 #include "ops/linear_attention/gated_delta_net/launch.h"
+#include "ops/linear_attention/gated_delta_net/prepared_qk.h"
 
 #include <algorithm>
 #include <array>
@@ -295,16 +296,24 @@ validate_fold_rows(const GdnReplayRecords& records, LinearAttentionStateAllLayer
 } // namespace
 
 void gated_delta_net_replay_record(const Tensor& q, const Tensor& k, const Tensor& v,
-                                   const Tensor& g, const Tensor& beta, float scale,
+                                   const Tensor& g, const Tensor& beta, float scale, WorkspaceArena& ws,
                                    const Tensor& ssm_states, const Tensor& valid_columns,
                                    const Tensor& initial_state_slots, Tensor& key_record,
                                    Tensor& value_record, Tensor& gate_record, Tensor& out,
                                    cudaStream_t stream) {
     validate_replay_record(q, k, v, g, beta, scale, ssm_states, valid_columns, initial_state_slots,
                            key_record, value_record, gate_record, out);
+    auto scope = ws.scope();
+    detail::gated_delta_net::RecurrentQkScratch scratch;
+    if (detail::gated_delta_net::recurrent_qk_prepared_enabled()) {
+        scratch = detail::gated_delta_net::allocate_recurrent_qk(ws, q.ne[1], q.ne[2] * q.ne[3]);
+        detail::gated_delta_net::launch_prepare_recurrent_qk(q, k, scratch.q, scratch.k, stream);
+    }
     detail::gated_delta_net::launch_recurrent_record(q, k, v, g, beta, scale, ssm_states,
                                                      valid_columns, initial_state_slots, key_record,
-                                                     value_record, gate_record, out, stream);
+                                                     value_record, gate_record, out, stream,
+                                                     static_cast<const float*>(scratch.q.data),
+                                                     static_cast<const float*>(scratch.k.data));
 }
 
 GdnReplayFoldPlan::GdnReplayFoldPlan(const GdnReplayRecords& records,

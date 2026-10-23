@@ -35,6 +35,10 @@ flowchart LR
 
 2026-10-23 新增显式 **original + causal-history + content-anchors / MTP7 / chunk1024** 资格：200W、32K 总工作集、36K 物理池下，原213K三对 **36/36**、原256K **6/6** 精确正确，history replay均为0。宽批相对chunk512的冷首轮TTFT成对减少中位 **4.68%**（161.36/168.64/161.62 → 153.80/155.58/155.13s）；4K/32K prefill分别改善 **3.21%/3.92%**，decode基本持平。新bulk Cold流水P4也36/36正确，session收益中位0.39%，三对方向混杂，暂保持关闭并保留候选。全局默认不变，配置、逐题延迟与资源边界见[本轮报告](docs/maintainer/2026-10-23-cold-prefill-and-bulk-p4.md)。
 
+2026-10-23已适配V100X2的attention split-vector和短序列GDN FP32预归一化，完整数值/record/fold资格通过。200W整包及一次attention-only各三对未确认稳定整体收益，两开关保持0；本机结果、固定来源与许可见[S4报告](docs/maintainer/2026-10-23-sm89-attention-gdn.md)，不直接套用双V100性能。
+
+2026-10-23最终相容profile复核：同binary/200W，MTP7+chunk1024相对MTP7+chunk512，4K/32K prefill成对改善中位 **3.46%/4.23%**，decode **−0.21%/+0.34%**（基本持平），整段耗时减少 **2.55%/3.93%**。完整输出及接受工作量一致；另完成300W一对发布前终验并恢复200W。新S4与bulk异步保持关闭，未叠加历史收益、未发布新版本。[最终配置、绝对速度与证据边界](docs/maintainer/2026-10-23-final-sm89-profile.md)。
+
 ## 运行环境与模型
 
 | 项目 | 本项目当前明确范围 |
@@ -55,7 +59,7 @@ flowchart LR
 
 续问复用进一步减少重复重建：200W同binary原213K三对，六题会话中位 **145.23→36.11s**，后续单题TTFT中位 **22.06→0.404s**，历史回放 **185836→32228 tokens**；36/36及256K6/6精确正确。固定快照工具默认启用，普通Serve显式设 `NINFER_KVMEM_CANONICAL_QUERY_REUSE=1`；状态/证据/容量不满足时沿用原重建。这组ABI1对照的首请求仍约33.5s，R21原位置模式仍关闭。[资格、整体对照与回退](docs/maintainer/2026-10-22-canonical-query-reuse.md)。
 
-2026-10-23修复R21跨轮复用资格：压缩native KV/GDN还必须匹配词法选页条件，不能只凭相同文本前缀复用。200W/C1/MTP7/Graph原213K六题已 **6/6精确**；本次六题都需Root重算、各约159s TTFT，未取得性能收益，原位置仍默认OFF，继续使用上述已验canonical续问路径。[修复、数值缺口与原始收据](docs/maintainer/2026-10-23-r21-conditioning-and-p4.md)。
+2026-10-23早期R21诊断（后续已由causal-history/content-anchors修复，见上方最新结果）：压缩native KV/GDN还必须匹配词法选页条件，不能只凭相同文本前缀复用。200W/C1/MTP7/Graph原213K六题已 **6/6精确**；该早期六题都需Root重算、各约159s TTFT；后续安全复用已消除这组逐题历史重复，原位置仍默认OFF。[修复、数值缺口与原始收据](docs/maintainer/2026-10-23-r21-conditioning-and-p4.md)。
 
 完整canonical-ready快照继续省掉首次重建：200W同binary原213K三对，首TTFT中位 **32.99→10.35s**，六题会话 **35.54→13.11s**（成对减少68.62%/63.11%），history replay **32228→0**。36/36与256K重启6/6精确正确；后五题TTFT合计2.03→2.31s的小回退保留。固定快照工具现auto优先使用已有ABI2包；首次生成及索引创建另计，原ABI1包保留。[完整结果、生成与回退命令](docs/maintainer/2026-10-22-canonical-ready-checkpoint.md)。
 

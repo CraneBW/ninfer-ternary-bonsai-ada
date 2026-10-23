@@ -22,6 +22,12 @@ namespace ninfer::ops {
                                                                    std::int32_t min_tokens,
                                                                    std::int32_t max_tokens);
 
+// Capacity for transient FP32 Q/K preparation in recurrent batch/record calls. max_tokens
+// counts all columns including batch rows. Zero when preparation is disabled or norm is false.
+[[nodiscard]] std::size_t gated_delta_net_recurrent_workspace_capacity_bytes(
+    std::int32_t qk_heads, std::int32_t value_heads, bool normalize_qk,
+    std::int32_t max_tokens);
+
 /**
  * Applies the Gated DeltaNet recurrence independently for each value head h. Let
  * G=value_heads/qk_heads; its Q/K head is qh=floor(h/G). Starting from S_h, for t in increasing
@@ -68,11 +74,12 @@ void gated_delta_net(const Tensor& q, const Tensor& k, const Tensor& v, const Te
  * [128,128,Hv,Slots], and both selector tensors are contiguous device I32 [B]. B is in [1,8].
  * Row b reads source_state_slots[b] and publishes the transition to
  * destination_state_slots[b]; selectors may be equal for an in-place row. Destination slots are
- * distinct across active rows. This form uses no arena allocation.
+ * distinct across active rows. ws supplies transient capacity returned by
+ * gated_delta_net_recurrent_workspace_capacity_bytes for max_tokens=B.
  */
 void gated_delta_net_batch_update(const Tensor& q, const Tensor& k, const Tensor& v,
                                   const Tensor& g, const Tensor& beta, float scale,
-                                  bool normalize_qk, Tensor& ssm_states,
+                                  bool normalize_qk, WorkspaceArena& ws, Tensor& ssm_states,
                                   const Tensor& source_state_slots,
                                   const Tensor& destination_state_slots, Tensor& out,
                                   cudaStream_t stream);
@@ -92,10 +99,12 @@ void gated_delta_net_batch_update(const Tensor& q, const Tensor& k, const Tensor
  * unchanged, while the invalid out suffix is exact BF16 zero. Inputs, state, records, and out are
  * pairwise non-overlapping. Valid outputs must be bit-identical to the normalized recurrent
  * execution from the same FP32 initial state and represented inputs; no independent FP64
- * comparison is needed to establish this record/snapshot equivalence.
+ * comparison is needed to establish this record/snapshot equivalence. ws supplies transient
+ * capacity from gated_delta_net_recurrent_workspace_capacity_bytes(..., true, T*B). Prepared
+ * normalized Q/K remain FP32 scratch; raw BF16 records and their replay ABI do not change.
  */
 void gated_delta_net_replay_record(const Tensor& q, const Tensor& k, const Tensor& v,
-                                   const Tensor& g, const Tensor& beta, float scale,
+                                   const Tensor& g, const Tensor& beta, float scale, WorkspaceArena& ws,
                                    const Tensor& ssm_states, const Tensor& valid_columns,
                                    const Tensor& initial_state_slots, Tensor& key_record,
                                    Tensor& value_record, Tensor& gate_record, Tensor& out,

@@ -337,9 +337,12 @@ int batch_update_case(const Case& test_case, const std::vector<int>& source_slot
     Tensor source_slots_tensor(device_source_slots.p, DType::I32, {batch});
     Tensor destination_slots_tensor(device_destination_slots.p, DType::I32, {batch});
     Tensor out_tensor(out.data(), DType::BF16, {kStateDim, test_case.value_heads, width, batch});
+    const std::size_t workspace_bytes = ops::gated_delta_net_recurrent_workspace_capacity_bytes(
+        test_case.qk_heads, test_case.value_heads, test_case.normalize_qk, width * batch);
+    WorkspaceArena workspace(std::max<std::size_t>(workspace_bytes, 256));
     ops::gated_delta_net_batch_update(q, k, v, g, beta, scale, test_case.normalize_qk,
-                                      states_tensor, source_slots_tensor, destination_slots_tensor,
-                                      out_tensor, nullptr);
+                                      workspace, states_tensor, source_slots_tensor,
+                                      destination_slots_tensor, out_tensor, nullptr);
     cuda_synchronize();
 
     const std::string label =
@@ -379,6 +382,10 @@ int batch_update_case(const Case& test_case, const std::vector<int>& source_slot
     failures += out.verify_guards((label + " out").c_str());
     failures += verify_common_inputs_unchanged(label, aggregate, device.q, device.k, device.v,
                                                device.g, device.beta);
+    if (workspace.used() != 0 || workspace.peak_used() != workspace_bytes) {
+        std::cerr << label << ": workspace query/execution high-water mismatch\n";
+        ++failures;
+    }
     return failures;
 }
 
@@ -461,6 +468,15 @@ int main() {
     failures += inplace_case({"27b decode fused-qk-norm", 16, 48, 1, true}, 12001u);
     failures += distinct_state_case({"27b raw-qk small-T", 16, 48, 7, false}, 12007u);
     failures += distinct_state_case({"35b pre-chunk fused-qk-norm", 16, 32, 63, true}, 12063u);
+    failures += distinct_state_case({"35b decode fused-qk-norm", 16, 32, 1, true}, 12301u);
+    failures += distinct_state_case({"27b pre-chunk fused-qk-norm", 16, 48, 63, true}, 12363u);
+    for (const int value_heads : {32, 48}) {
+        for (const int tokens : {2, 8, 16}) {
+            failures += distinct_state_case(
+                {"short normalized recurrence", 16, value_heads, tokens, true},
+                12400u + static_cast<std::uint32_t>(value_heads * 17 + tokens));
+        }
+    }
     failures += distinct_state_case({"27b exact chunk fused-qk-norm", 16, 48, 64, true}, 12064u);
     failures += distinct_state_case({"27b exact chunk raw-qk", 16, 48, 64, false}, 12164u);
     failures += inplace_case({"35b chunk-tail fused-qk-norm", 16, 32, 65, true}, 12065u);
@@ -477,6 +493,17 @@ int main() {
                                   {8, 9, 10, 11, 12, 13, 14, 15}, 16, 13001u);
     failures += batch_update_case({"35b mixed fork destinations", 16, 32, 1, true}, {0, 2, 4, 6},
                                   {1, 3, 5, 7}, 8, 13101u);
+    // All supported compact batch sizes exercise the normalized FP32 scratch layout.
+    // Existing cases above retain selected-slot aliasing and forked destinations.
+    for (int batch = 2; batch <= 8; ++batch) {
+        std::vector<int> selected(static_cast<std::size_t>(batch));
+        for (int row = 0; row < batch; ++row) selected[static_cast<std::size_t>(row)] = row;
+        for (const int value_heads : {32, 48}) {
+            failures += batch_update_case(
+                {"compact normalized recurrence", 16, value_heads, 1, true}, selected, selected,
+                batch, 13200u + static_cast<std::uint32_t>(value_heads * 17 + batch));
+        }
+    }
 
     std::cout << (failures == 0 ? "OK" : "FAIL") << " gated_delta_net correctness\n";
     return failures == 0 ? 0 : 1;

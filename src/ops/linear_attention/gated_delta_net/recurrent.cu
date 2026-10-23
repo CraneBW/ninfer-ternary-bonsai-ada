@@ -19,6 +19,26 @@ static_assert(sizeof(GdnReplayFoldKernelRows) == 128);
 static_assert(alignof(GdnReplayFoldKernelRows) == 16);
 static_assert(std::is_trivially_copyable_v<GdnReplayFoldKernelRows>);
 
+// Adapted from tuxKOH/ninfer-V100X2 5c515130 prepare_recurrent_qk_kernel (Apache-2.0,
+// third_party/ninfer_v100x2/LICENSE). Extend its FP32 staging to native short/batched
+// recurrence and raw-record verification, not the donor's Volta wide-prefill route.
+__global__ void prepare_recurrent_qk_kernel(const __nv_bfloat16* q, const __nv_bfloat16* k,
+                                            float* normalized_q, float* normalized_k,
+                                            std::int64_t rows) {
+    const auto row = static_cast<std::int64_t>(blockIdx.x) * kNumWarps + threadIdx.y;
+    if (row >= rows) { return; }
+    const int lane = threadIdx.x;
+    const auto d = static_cast<std::uint32_t>(lane * kQkPerLane);
+    RawQkLane qr = load_raw_qk_lane(q + row * kStateDim, d);
+    RawQkLane kr = load_raw_qk_lane(k + row * kStateDim, d);
+    normalize_qk_lane<true>(qr.value, lane);
+    normalize_qk_lane<true>(kr.value, lane);
+    store_vec(normalized_q + row * kStateDim + d,
+              make_float4(qr.value[0], qr.value[1], qr.value[2], qr.value[3]));
+    store_vec(normalized_k + row * kStateDim + d,
+              make_float4(kr.value[0], kr.value[1], kr.value[2], kr.value[3]));
+}
+
 template <bool NormalizeQK>
 void launch_recurrent_direct_fixed(const Tensor& q, const Tensor& k, const Tensor& v,
                                    const Tensor& g, const Tensor& beta, float scale,
@@ -41,7 +61,8 @@ void launch_recurrent_batch_update_fixed(const Tensor& q, const Tensor& k, const
                                          const Tensor& g, const Tensor& beta, float scale,
                                          Tensor& ssm_states, const Tensor& source_state_slots,
                                          const Tensor& destination_state_slots, Tensor& out,
-                                         cudaStream_t stream) {
+                                         cudaStream_t stream, const float* prepared_q,
+                                         const float* prepared_k) {
     const auto heads = head_map::of(q.ne[1], v.ne[1]);
     const dim3 grid(static_cast<unsigned>(v.ne[1]), static_cast<unsigned>(q.ne[3]),
                     static_cast<unsigned>(kStateDim / kBlockDv));
@@ -63,7 +84,12 @@ void launch_recurrent_batch_update_fixed(const Tensor& q, const Tensor& k, const
         state_slot_stride,
         scale,
     };
-    recurrent_batch_update_kernel<NormalizeInputs><<<grid, block, 0, stream>>>(access);
+    if (prepared_q != nullptr) {
+        const PreparedAccess<BatchUpdateAccess> prepared{access, prepared_q, prepared_k};
+        recurrent_prepared_kernel<false><<<grid, block, 0, stream>>>(prepared, 1);
+    } else {
+        recurrent_batch_update_kernel<NormalizeInputs><<<grid, block, 0, stream>>>(access);
+    }
     CUDA_CHECK(cudaGetLastError());
 }
 
@@ -85,7 +111,8 @@ void launch_recurrent_record_fixed(const Tensor& q, const Tensor& k, const Tenso
                                    const Tensor& ssm_states, const Tensor& valid_columns,
                                    const Tensor& initial_state_slots, Tensor& key_record,
                                    Tensor& value_record, Tensor& gate_record, Tensor& out,
-                                   cudaStream_t stream) {
+                                   cudaStream_t stream, const float* prepared_q,
+                                   const float* prepared_k) {
     const auto heads = head_map::of(q.ne[1], v.ne[1]);
     const dim3 grid(static_cast<unsigned>(v.ne[1]), static_cast<unsigned>(q.ne[3]),
                     static_cast<unsigned>(kStateDim / kBlockDv));
@@ -110,10 +137,27 @@ void launch_recurrent_record_fixed(const Tensor& q, const Tensor& k, const Tenso
         state_slot_stride,
         scale,
     };
-    switch (record_min_blocks()) {
-    case 6: recurrent_record_kernel<Masked, 6><<<grid, block, 0, stream>>>(access); break;
-    case 8: recurrent_record_kernel<Masked, 8><<<grid, block, 0, stream>>>(access); break;
-    default: recurrent_record_kernel<Masked><<<grid, block, 0, stream>>>(access); break;
+    if (prepared_q != nullptr) {
+        const PreparedAccess<RecordAccess<Masked>> prepared{access, prepared_q, prepared_k};
+        switch (record_min_blocks()) {
+        case 6:
+            recurrent_prepared_kernel<true, RecordAccess<Masked>, 6>
+                <<<grid, block, 0, stream>>>(prepared, q.ne[2]);
+            break;
+        case 8:
+            recurrent_prepared_kernel<true, RecordAccess<Masked>, 8>
+                <<<grid, block, 0, stream>>>(prepared, q.ne[2]);
+            break;
+        default:
+            recurrent_prepared_kernel<true><<<grid, block, 0, stream>>>(prepared, q.ne[2]);
+            break;
+        }
+    } else {
+        switch (record_min_blocks()) {
+        case 6: recurrent_record_kernel<Masked, 6><<<grid, block, 0, stream>>>(access); break;
+        case 8: recurrent_record_kernel<Masked, 8><<<grid, block, 0, stream>>>(access); break;
+        default: recurrent_record_kernel<Masked><<<grid, block, 0, stream>>>(access); break;
+        }
     }
     CUDA_CHECK(cudaGetLastError());
 }
@@ -146,6 +190,16 @@ void launch_replay_fold_fixed(const GdnReplayRecords& records,
 
 } // namespace
 
+void launch_prepare_recurrent_qk(const Tensor& q, const Tensor& k, Tensor& normalized_q,
+                                  Tensor& normalized_k, cudaStream_t stream) {
+    const auto rows = q.ne[1] * q.ne[2] * q.ne[3];
+    prepare_recurrent_qk_kernel<<<static_cast<unsigned>((rows + kNumWarps - 1) / kNumWarps),
+                                  dim3(kWarpSize, kNumWarps), 0, stream>>>(
+        static_cast<const __nv_bfloat16*>(q.data), static_cast<const __nv_bfloat16*>(k.data),
+        static_cast<float*>(normalized_q.data), static_cast<float*>(normalized_k.data), rows);
+    CUDA_CHECK(cudaGetLastError());
+}
+
 void launch_recurrent(const Tensor& q, const Tensor& k, const Tensor& v, const Tensor& g,
                       const Tensor& beta, float scale, bool normalize_qk, Tensor& ssm_state,
                       Tensor& out, cudaStream_t stream) {
@@ -161,8 +215,22 @@ void launch_recurrent(const Tensor& q, const Tensor& k, const Tensor& v, const T
 void launch_recurrent_inout(const Tensor& q, const Tensor& k, const Tensor& v, const Tensor& g,
                             const Tensor& beta, float scale, bool normalize_qk,
                             const Tensor& ssm_state_in, Tensor& ssm_state_out, Tensor& out,
-                            cudaStream_t stream) {
-    if (normalize_qk) {
+                            cudaStream_t stream, const float* prepared_q, const float* prepared_k) {
+    if (prepared_q != nullptr) {
+        const auto heads = head_map::of(q.ne[1], v.ne[1]);
+        const dim3 grid(static_cast<unsigned>(v.ne[1]), 1,
+                        static_cast<unsigned>(kStateDim / kBlockDv));
+        const DirectAccess access{
+            static_cast<const __nv_bfloat16*>(q.data), static_cast<const __nv_bfloat16*>(k.data),
+            static_cast<const __nv_bfloat16*>(v.data), static_cast<const float*>(g.data),
+            static_cast<const float*>(beta.data), static_cast<const float*>(ssm_state_in.data),
+            static_cast<float*>(ssm_state_out.data), static_cast<__nv_bfloat16*>(out.data), heads,
+            static_cast<std::int32_t>(q.ne[2]), scale};
+        const PreparedAccess<DirectAccess> prepared{access, prepared_q, prepared_k};
+        recurrent_prepared_kernel<false><<<grid, dim3(kWarpSize, kNumWarps), 0, stream>>>(
+            prepared, q.ne[2]);
+        CUDA_CHECK(cudaGetLastError());
+    } else if (normalize_qk) {
         launch_recurrent_direct_fixed<true>(q, k, v, g, beta, scale, ssm_state_in, ssm_state_out,
                                             out, stream);
     } else {
@@ -176,15 +244,16 @@ void launch_recurrent_batch_update(const Tensor& q, const Tensor& k, const Tenso
                                    bool normalize_qk, Tensor& ssm_states,
                                    const Tensor& source_state_slots,
                                    const Tensor& destination_state_slots, Tensor& out,
-                                   cudaStream_t stream) {
+                                   cudaStream_t stream, const float* prepared_q,
+                                   const float* prepared_k) {
     if (normalize_qk) {
         launch_recurrent_batch_update_fixed<true>(q, k, v, g, beta, scale, ssm_states,
                                                   source_state_slots, destination_state_slots, out,
-                                                  stream);
+                                                  stream, prepared_q, prepared_k);
     } else {
         launch_recurrent_batch_update_fixed<false>(q, k, v, g, beta, scale, ssm_states,
                                                    source_state_slots, destination_state_slots, out,
-                                                   stream);
+                                                   stream, prepared_q, prepared_k);
     }
 }
 
@@ -192,15 +261,16 @@ void launch_recurrent_record(const Tensor& q, const Tensor& k, const Tensor& v, 
                              const Tensor& beta, float scale, const Tensor& ssm_states,
                              const Tensor& valid_columns, const Tensor& initial_state_slots,
                              Tensor& key_record, Tensor& value_record, Tensor& gate_record,
-                             Tensor& out, cudaStream_t stream) {
+                             Tensor& out, cudaStream_t stream, const float* prepared_q,
+                             const float* prepared_k) {
     if (valid_columns.data == nullptr) {
         launch_recurrent_record_fixed<false>(q, k, v, g, beta, scale, ssm_states, valid_columns,
                                              initial_state_slots, key_record, value_record,
-                                             gate_record, out, stream);
+                                             gate_record, out, stream, prepared_q, prepared_k);
     } else {
         launch_recurrent_record_fixed<true>(q, k, v, g, beta, scale, ssm_states, valid_columns,
                                             initial_state_slots, key_record, value_record,
-                                            gate_record, out, stream);
+                                            gate_record, out, stream, prepared_q, prepared_k);
     }
 }
 

@@ -547,13 +547,19 @@ BenchRow run_running(const Options& options, std::int32_t tokens, DeviceBuffer& 
                              ssm_out, out, launch_stream);
     };
     const GraphMeasurement measurement = measure_graph(launch, flush, stream, options);
-    const TrafficBytes traffic         = running_traffic(problem);
+    TrafficBytes traffic = running_traffic(problem);
+    const bool fp32_qk_staged = tokens < gated_delta_net_detail::kChunkSize && workspace_bytes != 0;
+    if (fp32_qk_staged) {
+        const double fp32_qk_round_trip = 8.0 * qk_tensor_bytes(problem);
+        traffic.total += fp32_qk_round_trip;
+        traffic.intermediate += fp32_qk_round_trip;
+    }
 
     const std::int32_t full_chunks = tokens / gated_delta_net_detail::kChunkSize;
     return {
         "running",
         "fused",
-        running_implementation(tokens),
+        fp32_qk_staged ? "public.running.fp32_qk_staged" : running_implementation(tokens),
         tokens,
         full_chunks,
         tokens % gated_delta_net_detail::kChunkSize,
@@ -614,6 +620,9 @@ BenchRow run_batch_update(const Options& options, std::int32_t tokens, DeviceBuf
     }
 
     const bool composed = options.qk_norm == "composed";
+    const std::size_t workspace_bytes = ops::gated_delta_net_recurrent_workspace_capacity_bytes(
+        problem.qk_heads, problem.value_heads, !composed, tokens * problem.batch);
+    WorkspaceArena workspace(std::max<std::size_t>(workspace_bytes, 1));
     auto launch         = [&](cudaStream_t launch_stream) {
         if (composed) {
             ops::l2norm(q, kQkNormEpsilon, q_norm, launch_stream);
@@ -622,21 +631,27 @@ BenchRow run_batch_update(const Options& options, std::int32_t tokens, DeviceBuf
         const Tensor& q_input = composed ? q_norm : q;
         const Tensor& k_input = composed ? k_norm : k;
         ops::gated_delta_net_batch_update(q_input, k_input, v, g, beta, gated_delta_net_scale(),
-                                                  !composed, ssm_states, selected_slots, selected_slots,
-                                                  out, launch_stream);
+                                          !composed, workspace, ssm_states, selected_slots,
+                                          selected_slots, out, launch_stream);
     };
     const GraphMeasurement measurement = measure_graph(launch, flush, stream, options);
-    const TrafficBytes traffic         = batch_update_traffic(problem, composed);
+    TrafficBytes traffic = batch_update_traffic(problem, composed);
+    if (workspace_bytes != 0) {
+        const double fp32_qk_round_trip = 8.0 * qk_tensor_bytes(problem);
+        traffic.total += fp32_qk_round_trip;
+        traffic.intermediate += fp32_qk_round_trip;
+    }
 
     return {
         "batch_update",
         composed ? "composed" : "fused",
         composed ? "l2norm_x2+public.batch_update.qk_pre_normalized"
-                 : "public.batch_update.qk_fused",
+                 : workspace_bytes != 0 ? "public.batch_update.fp32_qk_staged"
+                                        : "public.batch_update.qk_fused",
         tokens,
         0,
         0,
-        0,
+        workspace_bytes,
         measurement.graph_nodes,
         batch_update_logical_bytes(problem),
         traffic.total,

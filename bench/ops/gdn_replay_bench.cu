@@ -373,7 +373,10 @@ public:
           record_out_(value_elements() * sizeof(std::uint16_t)),
           key_record_(qk_elements() * sizeof(std::uint16_t)),
           value_record_(value_elements() * sizeof(std::uint16_t)),
-          gate_record_(gate_elements() * 2 * sizeof(float)) {
+          gate_record_(gate_elements() * 2 * sizeof(float)),
+          workspace_(std::max<std::size_t>(
+              1, ops::gated_delta_net_recurrent_workspace_capacity_bytes(
+                     kQkHeads, profile.value_heads, true, width * batch))) {
         record_states_.fill(0);
         record_out_.fill(0);
         key_record_.fill(0);
@@ -396,8 +399,9 @@ public:
                             {kStateDim, profile_.value_heads, width_, batch_});
         Tensor gate_record(gate_record_.p, DType::FP32, {2, profile_.value_heads, width_, batch_});
         Tensor out(record_out_.p, DType::BF16, {kStateDim, profile_.value_heads, width_, batch_});
-        ops::gated_delta_net_replay_record(q, k, v, g, beta, scale(), states, valid, initial,
-                                           key_record, value_record, gate_record, out, stream);
+        ops::gated_delta_net_replay_record(q, k, v, g, beta, scale(), workspace_, states, valid,
+                                           initial, key_record, value_record, gate_record, out,
+                                           stream);
     }
 
 private:
@@ -459,6 +463,7 @@ private:
     DeviceBuffer key_record_;
     DeviceBuffer value_record_;
     DeviceBuffer gate_record_;
+    WorkspaceArena workspace_;
 };
 
 Measurement measure_fold(const FoldResources& resources,
