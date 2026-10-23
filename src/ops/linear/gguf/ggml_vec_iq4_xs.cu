@@ -6,6 +6,11 @@
 namespace ninfer::ops::gguf::detail::vec {
 template <>
 void launch_k<GGML_TYPE_IQ4_XS, 8, false>(const VecArgs& args, cudaStream_t stream) {
+    if (r27::projection_eligible<GGML_TYPE_IQ4_XS>(args)) {
+        r27::launch<GGML_TYPE_IQ4_XS>(args, stream);
+        r27::trace_projection<GGML_TYPE_IQ4_XS>(args);
+        return;
+    }
     const bool eligible = args.rows == 17408 && args.k == 5120 && args.row_bytes == 2720 &&
         args.out.bf16 != nullptr && args.out.f32 == nullptr &&
         args.out.column_stride == args.rows && args.out.epilogue == Epilogue::Store &&

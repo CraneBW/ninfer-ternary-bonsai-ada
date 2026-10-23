@@ -44,6 +44,9 @@ def source_signatures():
              ROOT / "src/runtime/engine/engine_core.h",
              ROOT / "src/runtime/contract/types.h",
              ROOT / "src/targets/qwen3_6/impl/runtime/program_impl.h"]
+    files.extend(ROOT / "src/ops/linear/gguf" / name for name in (
+        "gguf_dispatch.h", "ggml_vec_r27_reduce_scatter.cuh", "ggml_vec_iq3_s.cu",
+        "ggml_vec_iq3_xxs.cu", "ggml_vec_iq4_xs.cu"))
     for directory in (
         ROOT / "src/ops/softmax_attention/dense/causal_cache",
         ROOT / "src/ops/linear_attention/gated_delta_net",
@@ -128,7 +131,7 @@ def compare(reference, candidate):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--candidate", choices=("both", "attention", "gdn", "final", "chunk2048", "silu", "silu256", "host"), default="both")
+    parser.add_argument("--candidate", choices=("both", "attention", "gdn", "final", "chunk2048", "silu", "silu256", "host", "projections", "matrix", "r27"), default="both")
     parser.add_argument("--screen", action="store_true", help="one preliminary 200W pair only")
     parser.add_argument("--release-acceptance", action="store_true",
                         help="final profile only: one acceptance pair at externally set 300W")
@@ -184,7 +187,9 @@ def main():
                     del env[key]
             env.update(NINFER_R29_BUNDLE="0", NINFER_GGUF_LARGE_PREFILL=str(wide),
                        NINFER_SM89_SHARED_VECTOR="0",
-                       NINFER_GGUF_SILU_MMQ=str(int(args.candidate in ("silu256", "host") or (bool(mode) and args.candidate == "silu"))),
+                       NINFER_GGUF_SILU_MMQ=str(int(args.candidate in ("silu256", "host", "projections", "matrix", "r27") or (bool(mode) and args.candidate == "silu"))),
+                       NINFER_SM89_SHARED_MATRIX=str(int(bool(mode) and args.candidate in ("projections", "matrix"))),
+                       NINFER_SM89_R27_PROJECTIONS=str(int(bool(mode) and args.candidate in ("projections", "r27"))),
                        NINFER_HOST_DECODE_OVERLAP=str(int(bool(mode) and args.candidate == "host")),
                        NINFER_GGUF_SILU_MMQ_T256=str(int(bool(mode) and args.candidate == "silu256")),
                        NINFER_SM89_ATTN_SPLIT_VECTOR=str(int(bool(mode)

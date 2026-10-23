@@ -33,6 +33,8 @@ def main():
     parser.add_argument("--prefill-chunk", type=int, choices=(512,1024), default=512)
     parser.add_argument("--large-prefill", type=int, choices=(0,1), default=0)
     parser.add_argument("--silu-mmq", type=int, choices=(0,1), default=0)
+    parser.add_argument("--shared-matrix", type=int, choices=(0,1), default=0)
+    parser.add_argument("--r27-projections", type=int, choices=(0,1), default=0)
     parser.add_argument("--request-index", type=int,
                         help="Run one unchanged frozen request in a fresh process; diagnostic only")
     parser.add_argument("--request-count", type=int, choices=range(1,7), default=6,
@@ -70,6 +72,8 @@ def main():
         assert prior.get("prefill_chunk",512) == args.prefill_chunk
         assert prior.get("large_prefill",0) == args.large_prefill
         assert prior.get("silu_mmq",0) == args.silu_mmq
+        assert prior.get("shared_matrix",0) == args.shared_matrix
+        assert prior.get("r27_projections",0) == args.r27_projections
         assert prior.get("layer_ready",0) == args.layer_ready
         assert prior.get("canonical_query_reuse",args.backend=="ar") == bool(args.canonical_query_reuse or args.backend=="ar")
         assert prior.get("transfer_mode","sync") == args.transfer_mode
@@ -102,6 +106,8 @@ def main():
                       NINFER_KVMEM_IO_WORKER_SUMMARY="1",
                       NINFER_GGUF_LARGE_PREFILL=str(args.large_prefill),
                       NINFER_GGUF_SILU_MMQ=str(args.silu_mmq),
+                      NINFER_SM89_SHARED_MATRIX=str(args.shared_matrix),
+                      NINFER_SM89_R27_PROJECTIONS=str(args.r27_projections),
                       NINFER_KVMEM_LAYER_READY_SUMMARY="1",
                       NINFER_KVMEM_LAYER_READY_TRACE="0")
     if args.transfer_mode=="async":
@@ -134,6 +140,7 @@ def main():
                   draft_tokens=args.draft_tokens,diagnostic_request_index=args.request_index,
                   prefill_chunk=args.prefill_chunk,large_prefill=args.large_prefill,
                   silu_mmq=args.silu_mmq,
+                  shared_matrix=args.shared_matrix,r27_projections=args.r27_projections,
                   diagnostic_request_count=args.request_count,
                   layer_ready=args.layer_ready,
                   canonical_query_reuse=bool(args.canonical_query_reuse or args.backend=="ar"),

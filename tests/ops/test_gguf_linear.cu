@@ -146,13 +146,14 @@ void verify_gathered_columns(int tokens) {
 struct RealOptions {
     bool timing = false;
     bool shared_vector = false;
+    bool shared_matrix = false;
     std::string format;
     std::string entry;
     std::string dump_output;
     std::string pattern = "constant";
     int tokens = 0;
 
-    bool filtered() const { return shared_vector || !format.empty() || !entry.empty() || tokens != 0; }
+    bool filtered() const { return shared_vector || shared_matrix || !format.empty() || !entry.empty() || tokens != 0; }
 };
 
 void verify_real_mixed_formats(const char* artifact_path, const char* oracle_path,
@@ -320,6 +321,42 @@ void verify_real_mixed_formats(const char* artifact_path, const char* oracle_pat
                         "shared-vector changed represented product bytes");
                 std::printf("GGUF_SHARED_VECTOR entry=%s T=%d N=%d K=%d two_outputs_bitwise=1 PASS\n",
                             entry.key().c_str(), tokens, rows, k);
+            } else if (options.shared_matrix) {
+                require(tokens == 512 || tokens == 1024, "shared-matrix requires T512/1024");
+                const int stride = rows + 16;
+                const std::size_t packed_bytes = static_cast<std::size_t>(stride) * tokens * 2;
+                ninfer::DeviceBuffer packed_buffer(packed_bytes), reference(output_bytes);
+                require(cudaMemset(packed_buffer.p, 0xa5, packed_bytes) == cudaSuccess,
+                        "shared-matrix packed guard initialization");
+                ninfer::Tensor packed(packed_buffer.p, ninfer::DType::BF16, {stride, tokens});
+                const std::array<ninfer::ops::detail::GgufProduct, 2> products{{
+                    {&w, &y}, {&w, &packed, 8}}};
+                require(ninfer::ops::detail::try_gguf_shared_matrix_dispatch(
+                            x, products, ws, nullptr), "shared-matrix route did not execute");
+                require(cudaDeviceSynchronize() == cudaSuccess, "shared-matrix completion");
+                std::vector<__nv_bfloat16> first(result.size());
+                std::vector<std::uint8_t> packed_host(packed_bytes);
+                output.copy_to_host(first.data(), output_bytes, kOutputGuardBytes);
+                packed_buffer.copy_to_host(packed_host.data(), packed_bytes);
+                for (int column = 0; column < tokens; ++column) {
+                    const auto* at = packed_host.data() + static_cast<std::size_t>(column) * stride * 2;
+                    require(std::memcmp(at + 16, first.data() + static_cast<std::size_t>(column) * rows,
+                                        static_cast<std::size_t>(rows) * 2) == 0,
+                            "shared-matrix strided destination differs");
+                    for (int byte = 0; byte < 16; ++byte) {
+                        require(at[byte] == 0xa5 && at[16 + rows * 2 + byte] == 0xa5,
+                                "shared-matrix inter-column guard changed");
+                    }
+                }
+                ninfer::Tensor reference_tensor(reference.p, ninfer::DType::BF16, {rows, tokens});
+                ninfer::ops::detail::gguf_linear_dispatch(x, w, reference_tensor, ws, nullptr);
+                require(cudaDeviceSynchronize() == cudaSuccess, "shared-matrix ordinary completion");
+                std::vector<__nv_bfloat16> ordinary(result.size());
+                reference.copy_to_host(ordinary.data(), output_bytes);
+                require(std::memcmp(first.data(), ordinary.data(), output_bytes) == 0,
+                        "shared-matrix changed original product bytes");
+                std::printf("GGUF_SHARED_MATRIX entry=%s T=%d N=%d K=%d stride=%d full_bytes=1 guards=1 PASS\n",
+                            entry.key().c_str(), tokens, rows, k, stride);
             } else {
                 ninfer::ops::detail::gguf_linear_dispatch(x, w, y, ws, nullptr);
             }
@@ -422,6 +459,8 @@ int main(int argc, char** argv) {
                 options.timing = true;
             } else if (name == "--shared-vector") {
                 options.shared_vector = true;
+            } else if (name == "--shared-matrix") {
+                options.shared_matrix = true;
             } else if (name == "--format" || name == "--entry" || name == "--tokens" ||
                        name == "--dump-output" || name == "--pattern") {
                 require(arg + 1 < argc, "GGUF filter option is missing a value");
@@ -451,7 +490,7 @@ int main(int argc, char** argv) {
             require(options.dump_output != argv[1] && options.dump_output != argv[2],
                     "BF16 output capture must differ from the artifact and CPU oracle paths");
         }
-        require(options.pattern != "random" || options.timing || !options.dump_output.empty(),
+        require(options.pattern != "random" || options.timing || !options.dump_output.empty() || options.shared_matrix,
                 "--pattern random is only available for --dump-output or --time");
         // Filters and random captures skip the unrelated constant synthetic
         // cases so their output cannot be mistaken for the captured evidence.

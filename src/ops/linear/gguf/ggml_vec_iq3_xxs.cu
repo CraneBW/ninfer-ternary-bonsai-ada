@@ -37,6 +37,11 @@ void trace_bundle_decode(const VecArgs& args, bool candidate) {
 
 template <>
 void launch_k<GGML_TYPE_IQ3_XXS, 8, false>(const VecArgs& args, cudaStream_t stream) {
+    if (r27::projection_eligible<GGML_TYPE_IQ3_XXS>(args)) {
+        r27::launch<GGML_TYPE_IQ3_XXS>(args, stream);
+        r27::trace_projection<GGML_TYPE_IQ3_XXS>(args);
+        return;
+    }
     const bool eligible = args.rows == 17408 && args.k == 5120 && args.row_bytes == 1960 &&
         args.out.bf16 != nullptr && args.out.f32 == nullptr &&
         args.out.column_stride == args.rows && args.out.epilogue == Epilogue::Store &&

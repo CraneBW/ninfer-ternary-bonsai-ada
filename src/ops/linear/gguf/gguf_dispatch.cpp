@@ -335,6 +335,77 @@ bool try_gguf_shared_vector_dispatch(
     return true;
 }
 
+bool try_gguf_shared_matrix_dispatch(
+    const Tensor& x, std::span<const GgufProduct> products,
+    WorkspaceArena& workspace, cudaStream_t stream) {
+    // Adapt gguf_linear.cpp::gguf_project's layout/gather key without its
+    // multi-layout allocations or unconditional FP32 output plane. Keeping the
+    // original per-product rows preserves full-K/fixup and BF16 boundaries.
+    if (products.size() < 2 || products.size() > 4 || x.dtype != DType::BF16 ||
+        !x.data || !x.is_contiguous() || x.ne[0] != 5120 || x.ne[2] != 1 ||
+        (x.ne[1] != 512 && x.ne[1] != 1024) || x.ne[1] > matrix_batch_columns()) {
+        return false;
+    }
+    const Weight* first = products.front().weight;
+    if (!first || (first->qtype != QType::GGUF_IQ3_S && first->qtype != QType::GGUF_IQ3_XXS &&
+                   first->qtype != QType::GGUF_IQ4_XS)) { return false; }
+    const auto type = gguf_type(first->qtype);
+    const int layout = gguf::matrix_activation_layout(type);
+    for (const auto& product : products) {
+        const Weight* w = product.weight;
+        const Tensor* y = product.out;
+        if (!w || (w->qtype != QType::GGUF_IQ3_S && w->qtype != QType::GGUF_IQ3_XXS &&
+                   w->qtype != QType::GGUF_IQ4_XS) || w->layout != QuantLayout::GgufBlocks ||
+            !w->qdata || w->n <= 0 || w->n % 128 != 0 || w->k != x.ne[0] ||
+            w->input_columns != first->input_columns || product.f32 ||
+            product.epilogue != GgufEpilogue::Store || !y || !y->data ||
+            y->dtype != DType::BF16 || !y->is_contiguous() || y->ne[1] != x.ne[1] ||
+            y->ne[2] != 1 || product.row < 0 ||
+            static_cast<std::int64_t>(product.row) + w->n > y->ne[0] ||
+            gguf::matrix_activation_layout(gguf_type(w->qtype)) != layout) {
+            return false;
+        }
+    }
+    auto scope = workspace.scope();
+    void* codes = workspace.alloc_bytes(gguf::matrix_activation_bytes(x.ne[0], x.ne[1])).data;
+    gguf::quantize_matrix_activation(type, static_cast<const __nv_bfloat16*>(x.data),
+        x.ne[0], x.ne[1], first->input_columns, codes, stream);
+    for (const auto& product : products) {
+        auto product_scope = workspace.scope();
+        const Weight& w = *product.weight;
+        const auto block = gguf_block_shape(w.qtype);
+        const auto product_type = gguf_type(w.qtype);
+        const std::int64_t row_bytes = static_cast<std::int64_t>(w.k / block.elements) * block.bytes;
+        auto* destination = static_cast<__nv_bfloat16*>(product.out->data) + product.row;
+        if (gguf::try_matrix_product_bf16(product_type, w.qdata, row_bytes, w.n, w.k,
+                codes, x.ne[1], destination, product.out->ne[0], stream)) { continue; }
+        auto* plane = static_cast<float*>(workspace.alloc_bytes(
+            static_cast<std::size_t>(w.n) * x.ne[1] * sizeof(float)).data);
+        const std::size_t fixup_bytes = gguf::matrix_fixup_bytes(product_type, w.n, x.ne[1]);
+        void* fixup = fixup_bytes ? workspace.alloc_bytes(fixup_bytes).data : nullptr;
+        gguf::matrix_product(product_type, w.qdata, row_bytes, w.n, w.k, codes,
+            x.ne[1], plane, w.n, fixup, stream);
+        gguf::VectorOutput output;
+        output.bf16 = destination;
+        output.column_stride = product.out->ne[0];
+        gguf::store_plane(plane, w.n, w.n, x.ne[1], output, stream);
+    }
+    static const bool trace = [] {
+        const char* value = std::getenv("NINFER_SM89_SHARED_MATRIX_TRACE");
+        return value && std::strcmp(value, "1") == 0;
+    }();
+    if (trace) {
+        static std::atomic<unsigned> emitted{0};
+        const unsigned shape = first->n == 17408 ? 0 : products.size() == 4 ? 1 : 2;
+        const unsigned bit = 1u << ((x.ne[1] == 1024 ? 3 : 0) + shape);
+        if (!(emitted.fetch_or(bit, std::memory_order_relaxed) & bit)) {
+            std::fprintf(stderr, "SM89_SHARED_MATRIX T=%d K=5120 products=%zu layout=%d quantizers=1 original_geometry=1\n",
+                         x.ne[1], products.size(), layout);
+        }
+    }
+    return true;
+}
+
 void gguf_linear_dispatch(const Tensor& x, const Weight& w, Tensor& out,
                           WorkspaceArena& workspace, cudaStream_t stream) {
     gguf_linear_dispatch_impl(x, w, out, workspace, stream, false);

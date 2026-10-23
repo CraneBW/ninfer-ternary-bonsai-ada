@@ -30,6 +30,14 @@ void gguf_linear_dispatch(const Tensor& x, const Weight& weight, Tensor& out,
     const Tensor& x, std::span<const GgufProduct> products,
     WorkspaceArena& workspace, cudaStream_t stream);
 
+// Reuse gguf_project's activation sharing for the registered K5120 IQ3/4
+// prefill products, T512/1024. Same gather AND MMQ layout, one existing scratch
+// buffer, original per-product matrix geometry/rounding, including strided stores.
+// Unsupported groups return false before the first enqueue.
+[[nodiscard]] bool try_gguf_shared_matrix_dispatch(
+    const Tensor& x, std::span<const GgufProduct> products,
+    WorkspaceArena& workspace, cudaStream_t stream);
+
 // IndividualGdn-only packed BF16 rows: K=5120, Q/K N=2048 at rows
 // 0/2048 or V N=6144 at row 4096, in contiguous [10240,T]. The caller
 // owns the destination; no intermediate output allocation or copy is added.

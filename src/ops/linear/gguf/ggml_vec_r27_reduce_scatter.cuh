@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <atomic>
 
 namespace ninfer::ops::gguf::detail::r27 {
 
@@ -22,6 +23,45 @@ inline bool bundle_enabled() {
         throw std::invalid_argument("NINFER_R27_BUNDLE must be 0 or 1");
     }();
     return enabled;
+}
+
+inline bool projections_enabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("NINFER_SM89_R27_PROJECTIONS");
+        if (!value || std::strcmp(value, "0") == 0) { return false; }
+        if (std::strcmp(value, "1") == 0) { return true; }
+        throw std::invalid_argument("NINFER_SM89_R27_PROJECTIONS must be 0 or 1");
+    }();
+    return enabled;
+}
+
+template <ggml_type type>
+inline bool projection_eligible(const VecArgs& args) {
+    using D = vec::Decoder<type>;
+    const bool rows = args.rows == 1024 || args.rows == 2048 || args.rows == 6144 || args.rows == 10240 ||
+                      args.rows == 16384 || args.rows == 34816;
+    return projections_enabled() && rows && args.k == 5120 &&
+           args.row_bytes == (5120 / D::kBlockElems) * D::kBlockBytes &&
+           args.out.bf16 && !args.out.f32 && args.out.column_stride == args.rows &&
+           args.out.epilogue == Epilogue::Store &&
+           device_facts().cc == GGML_CUDA_CC_ADA_LOVELACE;
+}
+
+template <ggml_type type>
+inline void trace_projection(const VecArgs& args) {
+    static const bool enabled = [] {
+        const char* value = std::getenv("NINFER_SM89_R27_PROJECTIONS_TRACE");
+        return value && std::strcmp(value, "1") == 0;
+    }();
+    if (!enabled) { return; }
+    const unsigned shape = args.rows == 1024 ? 0 : args.rows == 2048 ? 1 : args.rows == 6144 ? 2 :
+                           args.rows == 10240 ? 3 : args.rows == 16384 ? 4 : 5;
+    const unsigned bit = 1u << (shape * 2 + (args.out.column_stride != args.rows));
+    static std::atomic<unsigned> emitted{0};
+    if (!(emitted.fetch_or(bit, std::memory_order_relaxed) & bit)) {
+        std::fprintf(stderr, "SM89_R27_PROJECTION type=%d N=%d K=5120 T=8 stride=%lld original_tree=1\n",
+                     int(type), args.rows, static_cast<long long>(args.out.column_stride));
+    }
 }
 
 // Each stage first computes the original canonical low-lane + high-lane

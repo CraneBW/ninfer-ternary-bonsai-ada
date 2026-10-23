@@ -163,6 +163,20 @@ bool shared_vector_requested() {
 #endif
 }
 
+bool shared_matrix_requested() {
+#if defined(NINFER_SM89)
+    static const bool enabled = [] {
+        const char* value = std::getenv("NINFER_SM89_SHARED_MATRIX");
+        if (!value || std::strcmp(value, "0") == 0) { return false; }
+        if (std::strcmp(value, "1") == 0) { return true; }
+        throw std::invalid_argument("NINFER_SM89_SHARED_MATRIX must be 0 or 1");
+    }();
+    return enabled;
+#else
+    return false;
+#endif
+}
+
 void project_individual_gdn(const Tensor& hidden,
                              const IndividualGdnInputProjectionPayload& weights,
                              Tensor& projected, Tensor& z, WorkspaceArena& workspace,
@@ -171,6 +185,16 @@ void project_individual_gdn(const Tensor& hidden,
     const Tensor input = hidden.view({TextConfig::hidden, tokens});
     Tensor packed = projected.view({TextConfig::convolution_dim, tokens});
     Tensor output_gate = z.view({TextConfig::value_dim, tokens});
+    if (shared_matrix_requested()) {
+        const std::array<ops::detail::GgufProduct, 4> products{{
+            {&weights.query, &packed, 0},
+            {&weights.key, &packed, TextConfig::key_dim},
+            {&weights.value, &packed, 2 * TextConfig::key_dim},
+            {&weights.z, &output_gate}}};
+        if (ops::detail::try_gguf_shared_matrix_dispatch(input, products, workspace, stream)) {
+            return;
+        }
+    }
     if (shared_vector_requested() && tokens <= ops::gguf::kMaxVectorColumns) {
         // The registered GSQ parent is [Q;K;V;Z]. Join only contiguous views
         // with identical encoding/gather. Each output still receives the same
@@ -389,6 +413,13 @@ void Variant::attention_projection(const Tensor& hidden,
         Tensor gate_flat = gate.view({TextConfig::query_size, columns});
         Tensor key_flat = key.view({TextConfig::kv_size, columns});
         Tensor value_flat = value.view({TextConfig::kv_size, columns});
+        if (shared_matrix_requested()) {
+            const std::array<ops::detail::GgufProduct, 4> products{{
+                {&individual->query, &query_flat}, {&individual->gate, &gate_flat},
+                {&individual->key, &key_flat}, {&individual->value, &value_flat}}};
+            if (ops::detail::try_gguf_shared_matrix_dispatch(
+                    hidden, products, workspace, stream)) { return; }
+        }
         if (shared_vector_requested()) {
             const std::array<ops::detail::GgufProduct, 4> products{{
                 {&individual->query, &query_flat}, {&individual->gate, &gate_flat},
@@ -597,8 +628,10 @@ void Variant::post_mixer(const Tensor& hidden, const PostMixerWeights& weights, 
         Tensor up   = workspace.alloc(DType::BF16, {TextConfig::intermediate, hidden.ne[1]});
         const std::array<ops::detail::GgufProduct, 2> products{{
             {&*weights.gate, &gate}, {&*weights.up, &up}}};
-        if (!shared_vector_requested() ||
-            !ops::detail::try_gguf_shared_vector_dispatch(hidden, products, workspace, stream)) {
+        const bool shared_matrix = shared_matrix_requested() &&
+            ops::detail::try_gguf_shared_matrix_dispatch(hidden, products, workspace, stream);
+        if (!shared_matrix && (!shared_vector_requested() ||
+            !ops::detail::try_gguf_shared_vector_dispatch(hidden, products, workspace, stream))) {
             ops::linear(hidden, *weights.gate, gate, text_policy(*weights.gate), workspace, stream);
             ops::linear(hidden, *weights.up, up, text_policy(*weights.up), workspace, stream);
         }

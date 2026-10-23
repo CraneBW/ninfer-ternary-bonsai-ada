@@ -1,0 +1,1406 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-24",
+  "scope": "SM89 projection reuse; daily 200W; no release acceptance",
+  "base_commit": "0fb9a4da00492dec8939a82e2941759d39129b5d",
+  "device": "RTX 4070 Ti SUPER, SM89, 66 SM, 16 GiB",
+  "power_w": 200,
+  "model": "qwen3_8_gsq_rco_iq3_s_v3.ninfer",
+  "theory": {
+    "source": "docs/performance/2026-10-23-mtp7-attribution.json",
+    "observer_affected": true,
+    "clean_wall_fraction": false,
+    "decode_affected_kernel_sum_pct": 10.61,
+    "decode_conditional_speedup_pct": [
+      1.1,
+      2.2
+    ],
+    "prefill_quantizer_kernel_sum_pct": 1.5097495380318187,
+    "prefill_d2d_kernel_sum_pct": 0.19365525029727293,
+    "prefill_expected_speedup_pct": [
+      0.5,
+      1.2
+    ]
+  },
+  "qualification": {
+    "state": "PASS",
+    "processes": 120,
+    "cases": 84,
+    "complete_decode_compared_bytes": 6782976,
+    "independent_constant_oracle_sha256": "bed4c9cab795f0efbc1823d401b7d1de4aacfc3db6771363e7ac0dc347050384",
+    "random_reference": "Full original-path BF16 byte comparison; not independent random FP64 GEMM",
+    "route": {
+      "state": "PASS",
+      "command": [
+        "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/bench/ninfer_bench",
+        "--weights",
+        "/home/ran/ninfer-work/real-models/qwen3_8_gsq_rco_iq3_s_v3.ninfer",
+        "--corpus",
+        "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/bench/fixtures/bench_corpus.ids",
+        "-pg",
+        "1024,16",
+        "--max-ctx",
+        "8192",
+        "--prefill-chunk",
+        "1024",
+        "--kv-dtype",
+        "int8",
+        "--spec",
+        "mtp",
+        "--draft-tokens",
+        "7",
+        "--lm-head-draft",
+        "-r",
+        "1",
+        "--warmup",
+        "0",
+        "--output",
+        "json",
+        "--output-file",
+        "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tmp-nvcc/opsx-projection-reuse-20261024/route/report.json"
+      ],
+      "markers": [
+        "SM89_R27_PROJECTION type=23 N=2048 K=5120 T=8 stride=2048 original_tree=1",
+        "SM89_R27_PROJECTION type=23 N=6144 K=5120 T=8 stride=6144 original_tree=1",
+        "SM89_R27_PROJECTION type=21 N=2048 K=5120 T=8 stride=2048 original_tree=1",
+        "SM89_R27_PROJECTION type=21 N=6144 K=5120 T=8 stride=6144 original_tree=1",
+        "SM89_R27_PROJECTION type=18 N=6144 K=5120 T=8 stride=6144 original_tree=1",
+        "SM89_R27_PROJECTION type=18 N=2048 K=5120 T=8 stride=2048 original_tree=1",
+        "SM89_R27_PROJECTION type=21 N=1024 K=5120 T=8 stride=1024 original_tree=1",
+        "SM89_R27_PROJECTION type=23 N=1024 K=5120 T=8 stride=1024 original_tree=1",
+        "SM89_R27_PROJECTION type=18 N=1024 K=5120 T=8 stride=1024 original_tree=1",
+        "SM89_SHARED_MATRIX T=1024 K=5120 products=4 layout=0 quantizers=1 original_geometry=1",
+        "SM89_SHARED_MATRIX T=1024 K=5120 products=2 layout=0 quantizers=1 original_geometry=1"
+      ]
+    },
+    "receipt": "tmp-nvcc/opsx-projection-reuse-20261024/qualification/qualification.json"
+  },
+  "campaigns": {
+    "pairs": {
+      "state": "PASS",
+      "candidate": "projections",
+      "receipt": "tmp-nvcc/opsx-projection-reuse-20261024/pairs/comparison.json",
+      "schedule": [
+        0,
+        1,
+        1,
+        0,
+        0,
+        1
+      ],
+      "pairs": [
+        {
+          "pair": 1,
+          "output_ids_equal": true,
+          "contexts": [
+            {
+              "tokens": 4096,
+              "prefill_speedup_pct": -0.35319540842684294,
+              "decode_speedup_pct": -0.9598316044997057,
+              "total_reduction_pct": -0.4917262629324348,
+              "reference_speculative": {
+                "backend": "mtp",
+                "enabled": true,
+                "draft_window": 7,
+                "rounds": 17,
+                "drafted_tokens": 117,
+                "accepted_tokens": 111,
+                "fallback_steps": 0,
+                "acceptance_rate": 0.9487179487,
+                "acceptance_length": 7.529411765,
+                "accepted_per_position": [
+                  17,
+                  17,
+                  17,
+                  17,
+                  16,
+                  14,
+                  13
+                ]
+              },
+              "candidate_speculative": {
+                "backend": "mtp",
+                "enabled": true,
+                "draft_window": 7,
+                "rounds": 17,
+                "drafted_tokens": 117,
+                "accepted_tokens": 111,
+                "fallback_steps": 0,
+                "acceptance_rate": 0.9487179487,
+                "acceptance_length": 7.529411765,
+                "accepted_per_position": [
+                  17,
+                  17,
+                  17,
+                  17,
+                  16,
+                  14,
+                  13
+                ]
+              },
+              "speculative_work_equal": true
+            },
+            {
+              "tokens": 32768,
+              "prefill_speedup_pct": 0.7795641028841116,
+              "decode_speedup_pct": 0.69458820970556,
+              "total_reduction_pct": 0.7701055159617498,
+              "reference_speculative": {
+                "backend": "mtp",
+                "enabled": true,
+                "draft_window": 7,
+                "rounds": 17,
+                "drafted_tokens": 113,
+                "accepted_tokens": 111,
+                "fallback_steps": 0,
+                "acceptance_rate": 0.982300885,
+                "acceptance_length": 7.529411765,
+                "accepted_per_position": [
+                  17,
+                  16,
+                  16,
+                  16,
+                  16,
+                  15,
+                  15
+                ]
+              },
+              "candidate_speculative": {
+                "backend": "mtp",
+                "enabled": true,
+                "draft_window": 7,
+                "rounds": 17,
+                "drafted_tokens": 113,
+                "accepted_tokens": 111,
+                "fallback_steps": 0,
+                "acceptance_rate": 0.982300885,
+                "acceptance_length": 7.529411765,
+                "accepted_per_position": [
+                  17,
+                  16,
+                  16,
+                  16,
+                  16,
+                  15,
+                  15
+                ]
+              },
+              "speculative_work_equal": true
+            }
+          ]
+        },
+        {
+          "pair": 2,
+          "output_ids_equal": true,
+          "contexts": [
+            {
+              "tokens": 4096,
+              "prefill_speedup_pct": 0.752502712406411,
+              "decode_speedup_pct": -0.3554917985831074,
+              "total_reduction_pct": 0.49676756160668134,
+              "reference_speculative": {
+                "backend": "mtp",
+                "enabled": true,
+                "draft_window": 7,
+                "rounds": 17,
+                "drafted_tokens": 117,
+                "accepted_tokens": 111,
+                "fallback_steps": 0,
+                "acceptance_rate": 0.9487179487,
+                "acceptance_length": 7.529411765,
+                "accepted_per_position": [
+                  17,
+                  17,
+                  17,
+                  17,
+                  16,
+                  14,
+                  13
+                ]
+              },
+              "candidate_speculative": {
+                "backend": "mtp",
+                "enabled": true,
+                "draft_window": 7,
+                "rounds": 17,
+                "drafted_tokens": 117,
+                "accepted_tokens": 111,
+                "fallback_steps": 0,
+                "acceptance_rate": 0.9487179487,
+                "acceptance_length": 7.529411765,
+                "accepted_per_position": [
+                  17,
+                  17,
+                  17,
+                  17,
+                  16,
+                  14,
+                  13
+                ]
+              },
+              "speculative_work_equal": true
+            },
+            {
+              "tokens": 32768,
+              "prefill_speedup_pct": -0.09654027490338946,
+              "decode_speedup_pct": -1.199788537742763,
+              "total_reduction_pct": -0.1362342079604506,
+              "reference_speculative": {
+                "backend": "mtp",
+                "enabled": true,
+                "draft_window": 7,
+                "rounds": 17,
+                "drafted_tokens": 113,
+                "accepted_tokens": 111,
+                "fallback_steps": 0,
+                "acceptance_rate": 0.982300885,
+                "acceptance_length": 7.529411765,
+                "accepted_per_position": [
+                  17,
+                  16,
+                  16,
+                  16,
+                  16,
+                  15,
+                  15
+                ]
+              },
+              "candidate_speculative": {
+                "backend": "mtp",
+                "enabled": true,
+                "draft_window": 7,
+                "rounds": 17,
+                "drafted_tokens": 113,
+                "accepted_tokens": 111,
+                "fallback_steps": 0,
+                "acceptance_rate": 0.982300885,
+                "acceptance_length": 7.529411765,
+                "accepted_per_position": [
+                  17,
+                  16,
+                  16,
+                  16,
+                  16,
+                  15,
+                  15
+                ]
+              },
+              "speculative_work_equal": true
+            }
+          ]
+        },
+        {
+          "pair": 3,
+          "output_ids_equal": true,
+          "contexts": [
+            {
+              "tokens": 4096,
+              "prefill_speedup_pct": 0.09423995686159703,
+              "decode_speedup_pct": 1.0647777825764981,
+              "total_reduction_pct": 0.3108755577998501,
+              "reference_speculative": {
+                "backend": "mtp",
+                "enabled": true,
+                "draft_window": 7,
+                "rounds": 17,
+                "drafted_tokens": 117,
+                "accepted_tokens": 111,
+                "fallback_steps": 0,
+                "acceptance_rate": 0.9487179487,
+                "acceptance_length": 7.529411765,
+                "accepted_per_position": [
+                  17,
+                  17,
+                  17,
+                  17,
+                  16,
+                  14,
+                  13
+                ]
+              },
+              "candidate_speculative": {
+                "backend": "mtp",
+                "enabled": true,
+                "draft_window": 7,
+                "rounds": 17,
+                "drafted_tokens": 117,
+                "accepted_tokens": 111,
+                "fallback_steps": 0,
+                "acceptance_rate": 0.9487179487,
+                "acceptance_length": 7.529411765,
+                "accepted_per_position": [
+                  17,
+                  17,
+                  17,
+                  17,
+                  16,
+                  14,
+                  13
+                ]
+              },
+              "speculative_work_equal": true
+            },
+            {
+              "tokens": 32768,
+              "prefill_speedup_pct": 0.4339490335613094,
+              "decode_speedup_pct": -0.3724209241568244,
+              "total_reduction_pct": 0.4045493717816373,
+              "reference_speculative": {
+                "backend": "mtp",
+                "enabled": true,
+                "draft_window": 7,
+                "rounds": 17,
+                "drafted_tokens": 113,
+                "accepted_tokens": 111,
+                "fallback_steps": 0,
+                "acceptance_rate": 0.982300885,
+                "acceptance_length": 7.529411765,
+                "accepted_per_position": [
+                  17,
+                  16,
+                  16,
+                  16,
+                  16,
+                  15,
+                  15
+                ]
+              },
+              "candidate_speculative": {
+                "backend": "mtp",
+                "enabled": true,
+                "draft_window": 7,
+                "rounds": 17,
+                "drafted_tokens": 113,
+                "accepted_tokens": 111,
+                "fallback_steps": 0,
+                "acceptance_rate": 0.982300885,
+                "acceptance_length": 7.529411765,
+                "accepted_per_position": [
+                  17,
+                  16,
+                  16,
+                  16,
+                  16,
+                  15,
+                  15
+                ]
+              },
+              "speculative_work_equal": true
+            }
+          ]
+        }
+      ],
+      "paired_medians": [
+        {
+          "tokens": 4096,
+          "prefill_speedup_pct": 0.09423995686159703,
+          "decode_speedup_pct": -0.3554917985831074,
+          "total_reduction_pct": 0.3108755577998501
+        },
+        {
+          "tokens": 32768,
+          "prefill_speedup_pct": 0.4339490335613094,
+          "decode_speedup_pct": -0.3724209241568244,
+          "total_reduction_pct": 0.4045493717816373
+        }
+      ],
+      "arm_median_speeds": [
+        {
+          "tokens": 4096,
+          "reference": {
+            "prefill_tok_s_mean": 1640.257542,
+            "decode_output_tok_s_mean": 173.9032806,
+            "total_seconds_mean": 3.24265731
+          },
+          "candidate": {
+            "prefill_tok_s_mean": 1641.80332,
+            "decode_output_tok_s_mean": 173.2850687,
+            "total_seconds_mean": 3.232576681
+          }
+        },
+        {
+          "tokens": 32768,
+          "reference": {
+            "prefill_tok_s_mean": 1483.52606,
+            "decode_output_tok_s_mean": 159.4102161,
+            "total_seconds_mean": 22.8913716
+          },
+          "candidate": {
+            "prefill_tok_s_mean": 1489.963807,
+            "decode_output_tok_s_mean": 158.8165391,
+            "total_seconds_mean": 22.7987647
+          }
+        }
+      ],
+      "binary": {
+        "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/bench/ninfer_bench",
+        "size": 400247272,
+        "mtime_ns": 1792781013963034550
+      },
+      "model": {
+        "path": "/home/ran/ninfer-work/real-models/qwen3_8_gsq_rco_iq3_s_v3.ninfer",
+        "size": 15017456896,
+        "mtime_ns": 1792427370146524551
+      },
+      "corpus": {
+        "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/bench/fixtures/bench_corpus.ids",
+        "size": 333620,
+        "mtime_ns": 1789914130652130524
+      },
+      "sources": {
+        "src/ops/linear/gguf/ggml_bridge.cu": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/linear/gguf/ggml_bridge.cu",
+          "size": 61743,
+          "mtime_ns": 1792753798974128046,
+          "sha256": "5c314331707fd2509147c671264e8abb73e655cf7465d0d09bdeddf1514d8f43"
+        },
+        "src/ops/linear/gguf/ggml_vec_iq3_s.cu": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/linear/gguf/ggml_vec_iq3_s.cu",
+          "size": 3006,
+          "mtime_ns": 1792780661738009224,
+          "sha256": "af855042e0673a172db9ca6ed2527041a49a9e8397a13bef63dd1c3b9f4913c6"
+        },
+        "src/ops/linear/gguf/ggml_vec_iq3_xxs.cu": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/linear/gguf/ggml_vec_iq3_xxs.cu",
+          "size": 3036,
+          "mtime_ns": 1792780661738009224,
+          "sha256": "1fff96e45fa718c7047d56dd2f95f11f3b8bb4968d2e542184106520f65ba409"
+        },
+        "src/ops/linear/gguf/ggml_vec_iq4_xs.cu": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/linear/gguf/ggml_vec_iq4_xs.cu",
+          "size": 1615,
+          "mtime_ns": 1792780661738009224,
+          "sha256": "53a77291ceab9847ef8ed5a783f6b0d77a82bea3a7ff5e429ae940f4ba6fc4ac"
+        },
+        "src/ops/linear/gguf/ggml_vec_r27_reduce_scatter.cuh": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/linear/gguf/ggml_vec_r27_reduce_scatter.cuh",
+          "size": 9094,
+          "mtime_ns": 1792780902396767786,
+          "sha256": "5b62de8a55ea65d53d6c92996188adc80c30c48febfbe53d500b7c3c786b3433"
+        },
+        "src/ops/linear/gguf/gguf_dispatch.cpp": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/linear/gguf/gguf_dispatch.cpp",
+          "size": 22313,
+          "mtime_ns": 1792780801916908303,
+          "sha256": "b9026f241aa6dbf191955143fc4f0afcbd8b80696156772952252ffd571e01ee"
+        },
+        "src/ops/linear/gguf/gguf_dispatch.h": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/linear/gguf/gguf_dispatch.h",
+          "size": 3007,
+          "mtime_ns": 1792780661738009224,
+          "sha256": "32e0b592acd0bdc9a4d8ff09f5f103337bf4cd306165e30b9614c9db52054dd6"
+        },
+        "src/ops/linear_attention/gated_delta_net/common.cuh": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/linear_attention/gated_delta_net/common.cuh",
+          "size": 4133,
+          "mtime_ns": 1789914130681898807,
+          "sha256": "901b8c7a5ce55f12ebd7e2ac8e4374201fd8ccd91bab57fde0280f6bd74d1f36"
+        },
+        "src/ops/linear_attention/gated_delta_net/common.h": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/linear_attention/gated_delta_net/common.h",
+          "size": 482,
+          "mtime_ns": 1789914130681898807,
+          "sha256": "8485c9c88e4e5ce84244e3b1943070429c37791d858b5e9762bcebc7eef458b1"
+        },
+        "src/ops/linear_attention/gated_delta_net/gated_delta_net.cpp": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/linear_attention/gated_delta_net/gated_delta_net.cpp",
+          "size": 17319,
+          "mtime_ns": 1792739368967496757,
+          "sha256": "fac732608b781303851fe8a44b366fca7cfe0fa11a078ef975e3d16c7625abf7"
+        },
+        "src/ops/linear_attention/gated_delta_net/launch.h": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/linear_attention/gated_delta_net/launch.h",
+          "size": 3142,
+          "mtime_ns": 1792739260409694412,
+          "sha256": "d2b342e5ff025f8e983da385ddbc5549cb76a94d1d2f0f73ab13352ba3eb2df3"
+        },
+        "src/ops/linear_attention/gated_delta_net/prepared_qk.h": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/linear_attention/gated_delta_net/prepared_qk.h",
+          "size": 699,
+          "mtime_ns": 1792739260408694321,
+          "sha256": "2c16504b1633fccc2ee60c4142fd1637bc0ecdd69e2f153edf7b0cf17d46ac0c"
+        },
+        "src/ops/linear_attention/gated_delta_net/recurrent.cu": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/linear_attention/gated_delta_net/recurrent.cu",
+          "size": 16016,
+          "mtime_ns": 1792741452578924005,
+          "sha256": "e40879f7af4460b30553a32ddb7b381b90ad41d9ec388888ea7543eba915dc21"
+        },
+        "src/ops/linear_attention/gated_delta_net/recurrent.cuh": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/linear_attention/gated_delta_net/recurrent.cuh",
+          "size": 35639,
+          "mtime_ns": 1792739368936780883,
+          "sha256": "1a53ac59af1e8d15e0ed1c36dcbc4cc6e4ccb8dfc041ddd0d85ba1ff80426ace"
+        },
+        "src/ops/linear_attention/gated_delta_net/replay.cpp": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/linear_attention/gated_delta_net/replay.cpp",
+          "size": 17479,
+          "mtime_ns": 1792741152316706873,
+          "sha256": "c2c018d0ef911f127c208c49839767ad8f7f7ae9f3a8ea2c0e51b46db28bcbbc"
+        },
+        "src/ops/softmax_attention/dense/causal_cache/causal_softmax_attention.cpp": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/softmax_attention/dense/causal_cache/causal_softmax_attention.cpp",
+          "size": 28736,
+          "mtime_ns": 1792352840372965331,
+          "sha256": "d1cb9ad00b0481a20af749d7ffb48c3508f018b475e735a435532cab2111dd9c"
+        },
+        "src/ops/softmax_attention/dense/causal_cache/geometry.cuh": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/softmax_attention/dense/causal_cache/geometry.cuh",
+          "size": 591,
+          "mtime_ns": 1789914130683395735,
+          "sha256": "cccf46c4e0704cfa5893a45f9bb9a0e51b7f300c921b873046671f9e44788368"
+        },
+        "src/ops/softmax_attention/dense/causal_cache/launch.h": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/softmax_attention/dense/causal_cache/launch.h",
+          "size": 7689,
+          "mtime_ns": 1789914130683395735,
+          "sha256": "eccd81679a6dff8f096932a85654d89457e500ca2440ea849a382f3f3539afd1"
+        },
+        "src/ops/softmax_attention/dense/causal_cache/prompt.cu": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/softmax_attention/dense/causal_cache/prompt.cu",
+          "size": 12310,
+          "mtime_ns": 1792539944426404690,
+          "sha256": "4b85fc255d1d6ab1491083bb3b7c5074b7dd26bc6f7ff826d9bc148ba7f06d10"
+        },
+        "src/ops/softmax_attention/dense/causal_cache/prompt_bf16.cuh": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/softmax_attention/dense/causal_cache/prompt_bf16.cuh",
+          "size": 21085,
+          "mtime_ns": 1789914130683395735,
+          "sha256": "3ff7fe786f06620cd423810ef036300fbfac82ddc4aae53979ded9f3607971ad"
+        },
+        "src/ops/softmax_attention/dense/causal_cache/prompt_common.cuh": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/softmax_attention/dense/causal_cache/prompt_common.cuh",
+          "size": 3526,
+          "mtime_ns": 1789914130683395735,
+          "sha256": "a5dad073a2d267fa2a71a7e5e42499cca1db9d4c0bcd19361c1b8492a2fef358"
+        },
+        "src/ops/softmax_attention/dense/causal_cache/prompt_fp8.cu": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/softmax_attention/dense/causal_cache/prompt_fp8.cu",
+          "size": 4496,
+          "mtime_ns": 1789914130683395735,
+          "sha256": "0c509d9f36da5f2ea209671d3f151f845f081596406be611a12439f780940a5c"
+        },
+        "src/ops/softmax_attention/dense/causal_cache/prompt_fp8.cuh": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/softmax_attention/dense/causal_cache/prompt_fp8.cuh",
+          "size": 21771,
+          "mtime_ns": 1789914130683395735,
+          "sha256": "b4499e88bba4d21ba0be9bc8ad8e7dbcaec77edba93fbc5d6e61040bdaad4867"
+        },
+        "src/ops/softmax_attention/dense/causal_cache/prompt_i8.cuh": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/softmax_attention/dense/causal_cache/prompt_i8.cuh",
+          "size": 57694,
+          "mtime_ns": 1792514672146914578,
+          "sha256": "ace1e1c1a4210e428cc5284b08d00aaa4de105e0dcd486597dbde428b00ba612"
+        },
+        "src/ops/softmax_attention/dense/causal_cache/prompt_i8_pipeline.cuh": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/softmax_attention/dense/causal_cache/prompt_i8_pipeline.cuh",
+          "size": 42460,
+          "mtime_ns": 1792515021214735312,
+          "sha256": "bd32e98df866f567ae913d6d7799889923b671168b03ae7007e9e0cfdf710c7a"
+        },
+        "src/ops/softmax_attention/dense/causal_cache/prompt_k8v4.cu": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/softmax_attention/dense/causal_cache/prompt_k8v4.cu",
+          "size": 4533,
+          "mtime_ns": 1789914130683395735,
+          "sha256": "217af351c25e7374cfcc66b48cf31a4b9fef5eea4bb5e373f4a056908fbcb876"
+        },
+        "src/ops/softmax_attention/dense/causal_cache/prompt_k8v4.cuh": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/softmax_attention/dense/causal_cache/prompt_k8v4.cuh",
+          "size": 22737,
+          "mtime_ns": 1789914130683395735,
+          "sha256": "23966d762ad51469fba137e56b44e0a30a8e49f9f08e6ac1f78a66475e663784"
+        },
+        "src/ops/softmax_attention/dense/causal_cache/prompt_nvfp4.cu": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/softmax_attention/dense/causal_cache/prompt_nvfp4.cu",
+          "size": 1407,
+          "mtime_ns": 1789914130683395735,
+          "sha256": "660209c70494e67f8410da51e6044a69f2a8f7523b9df5e433704a09d930054b"
+        },
+        "src/ops/softmax_attention/dense/causal_cache/prompt_nvfp4.cuh": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/softmax_attention/dense/causal_cache/prompt_nvfp4.cuh",
+          "size": 19509,
+          "mtime_ns": 1789914130683395735,
+          "sha256": "99ec2b0eabdcf752cf7e2debecf0e0f832804e58d2675f8ff645fb36534b3b49"
+        },
+        "src/ops/softmax_attention/dense/causal_cache/prompt_nvfp4_non_rdc.cu": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/softmax_attention/dense/causal_cache/prompt_nvfp4_non_rdc.cu",
+          "size": 3742,
+          "mtime_ns": 1789914130683395735,
+          "sha256": "ddfcdbf34333b6e1781941ab4e992ce5826cb541b4853223397f68e0e8a7f25f"
+        },
+        "src/ops/softmax_attention/dense/causal_cache/prompt_nvfp4_non_rdc_launch.h": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/softmax_attention/dense/causal_cache/prompt_nvfp4_non_rdc_launch.h",
+          "size": 894,
+          "mtime_ns": 1789914130683395735,
+          "sha256": "d93e69856499d5abee65b8aae3eb11ce5766a4d032fbe36422a77128f5d63ca1"
+        },
+        "src/ops/softmax_attention/dense/causal_cache/small_t.cu": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/softmax_attention/dense/causal_cache/small_t.cu",
+          "size": 38347,
+          "mtime_ns": 1792739378689373154,
+          "sha256": "647e49930403986efaa342f1448ed03a65406755dd6fec3aa51fb1f42bfedac8"
+        },
+        "src/ops/softmax_attention/dense/causal_cache/small_t.cuh": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/softmax_attention/dense/causal_cache/small_t.cuh",
+          "size": 14525,
+          "mtime_ns": 1792739378688373064,
+          "sha256": "806d54f672ae84bb46b83d6a6e09916890658df9652731fb772a9d5499198af0"
+        },
+        "src/ops/softmax_attention/dense/causal_cache/small_t_bf16.cuh": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/softmax_attention/dense/causal_cache/small_t_bf16.cuh",
+          "size": 19635,
+          "mtime_ns": 1789914130683395735,
+          "sha256": "7ce5d02087861d772678e82fb24d531b4778dfc07647d39b83be13bf71efa05c"
+        },
+        "src/ops/softmax_attention/dense/causal_cache/small_t_fp8.cu": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/softmax_attention/dense/causal_cache/small_t_fp8.cu",
+          "size": 11461,
+          "mtime_ns": 1789914130683395735,
+          "sha256": "265033abe7ba4c8352ba89f4b376bd69de61beba1bd82c9fd263bc29128699cb"
+        },
+        "src/ops/softmax_attention/dense/causal_cache/small_t_fp8.cuh": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/softmax_attention/dense/causal_cache/small_t_fp8.cuh",
+          "size": 31142,
+          "mtime_ns": 1789914130683395735,
+          "sha256": "a44f10e3aec94cd0d7bcb1b77ce7638df17df0979cb0e55257d6f9c1ae9b184b"
+        },
+        "src/ops/softmax_attention/dense/causal_cache/small_t_i8.cuh": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/softmax_attention/dense/causal_cache/small_t_i8.cuh",
+          "size": 77197,
+          "mtime_ns": 1792397116969680592,
+          "sha256": "26930cc6be4de427efef2598514cc5b7dae6aa234641e012702a9167514f1f5a"
+        },
+        "src/ops/softmax_attention/dense/causal_cache/small_t_k8v4.cu": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/softmax_attention/dense/causal_cache/small_t_k8v4.cu",
+          "size": 11395,
+          "mtime_ns": 1789914130683395735,
+          "sha256": "5987d411a0e37b662ea9ff04aef502859a591f3eee1d38370f8b0dfafe475061"
+        },
+        "src/ops/softmax_attention/dense/causal_cache/small_t_k8v4.cuh": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/softmax_attention/dense/causal_cache/small_t_k8v4.cuh",
+          "size": 31071,
+          "mtime_ns": 1789914130683395735,
+          "sha256": "af0547bdbf08d90346abb1a2920d3a991a59b7e6f0dd2d6e0822bfb2a172cbbf"
+        },
+        "src/ops/softmax_attention/dense/causal_cache/small_t_nvfp4.cu": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/softmax_attention/dense/causal_cache/small_t_nvfp4.cu",
+          "size": 11161,
+          "mtime_ns": 1789914130683395735,
+          "sha256": "3edaf6c578629a396f30ad24238a436a2b2cd8494167e58b64ecea04a4aa4f7c"
+        },
+        "src/ops/softmax_attention/dense/causal_cache/small_t_nvfp4.cuh": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/softmax_attention/dense/causal_cache/small_t_nvfp4.cuh",
+          "size": 32476,
+          "mtime_ns": 1789914130683395735,
+          "sha256": "d34e019a7065de4aac0499a871273e26a14bc29538a2690ca1c76bf721c4fa7f"
+        },
+        "src/runtime/contract/types.h": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/runtime/contract/types.h",
+          "size": 23761,
+          "mtime_ns": 1792762398080146544,
+          "sha256": "884ab5220b16587f4a4e0ec264e28dac931e3516908e9a3e69a3a18b91d7cc4b"
+        },
+        "src/runtime/engine/engine_core.h": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/runtime/engine/engine_core.h",
+          "size": 116439,
+          "mtime_ns": 1792767523898425290,
+          "sha256": "4d2c89c497d4635c5d32f8a6966b1af207033702ae56d4d4fe0379a485c75283"
+        },
+        "src/targets/qwen3_6/impl/runtime/program_impl.h": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/targets/qwen3_6/impl/runtime/program_impl.h",
+          "size": 812689,
+          "mtime_ns": 1792762666764132119,
+          "sha256": "93bd4a3b6f4b5b6a49618c96a2f7e6060a187ebe594c04283999fa46422e224b"
+        },
+        "src/targets/qwen3_6_27b/impl/variant.cpp": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/targets/qwen3_6_27b/impl/variant.cpp",
+          "size": 53743,
+          "mtime_ns": 1792780726037759607,
+          "sha256": "888c10fcbda561de3a917818f69862b3602f63592f9878a396beb3ccae6f7afa"
+        },
+        "tools/bench/sm89_attention_gdn_pairs.py": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tools/bench/sm89_attention_gdn_pairs.py",
+          "size": 14556,
+          "mtime_ns": 1792780801917908377,
+          "sha256": "c073334dc774eb278db41ace5b63ef69d83c769c018a397a101693ba19a7809f"
+        }
+      },
+      "workspace_bytes": 209484800,
+      "all_ids_equal": true,
+      "all_speculative_work_equal": true,
+      "power_before_w": 200.0,
+      "power_after_w": 200.0
+    },
+    "matrix-only": {
+      "state": "PASS",
+      "candidate": "matrix",
+      "receipt": "tmp-nvcc/opsx-projection-reuse-20261024/matrix-only/comparison.json",
+      "schedule": [
+        0,
+        1,
+        1,
+        0,
+        0,
+        1
+      ],
+      "pairs": [
+        {
+          "pair": 1,
+          "output_ids_equal": true,
+          "contexts": [
+            {
+              "tokens": 4096,
+              "prefill_speedup_pct": -0.3171263113667222,
+              "decode_speedup_pct": -2.3156139518698438,
+              "total_reduction_pct": -0.7850492303146384,
+              "reference_speculative": {
+                "backend": "mtp",
+                "enabled": true,
+                "draft_window": 7,
+                "rounds": 17,
+                "drafted_tokens": 117,
+                "accepted_tokens": 111,
+                "fallback_steps": 0,
+                "acceptance_rate": 0.9487179487,
+                "acceptance_length": 7.529411765,
+                "accepted_per_position": [
+                  17,
+                  17,
+                  17,
+                  17,
+                  16,
+                  14,
+                  13
+                ]
+              },
+              "candidate_speculative": {
+                "backend": "mtp",
+                "enabled": true,
+                "draft_window": 7,
+                "rounds": 17,
+                "drafted_tokens": 117,
+                "accepted_tokens": 111,
+                "fallback_steps": 0,
+                "acceptance_rate": 0.9487179487,
+                "acceptance_length": 7.529411765,
+                "accepted_per_position": [
+                  17,
+                  17,
+                  17,
+                  17,
+                  16,
+                  14,
+                  13
+                ]
+              },
+              "speculative_work_equal": true
+            },
+            {
+              "tokens": 32768,
+              "prefill_speedup_pct": -1.0072945224522845,
+              "decode_speedup_pct": -0.7047165646985043,
+              "total_reduction_pct": -1.0067362964343074,
+              "reference_speculative": {
+                "backend": "mtp",
+                "enabled": true,
+                "draft_window": 7,
+                "rounds": 17,
+                "drafted_tokens": 113,
+                "accepted_tokens": 111,
+                "fallback_steps": 0,
+                "acceptance_rate": 0.982300885,
+                "acceptance_length": 7.529411765,
+                "accepted_per_position": [
+                  17,
+                  16,
+                  16,
+                  16,
+                  16,
+                  15,
+                  15
+                ]
+              },
+              "candidate_speculative": {
+                "backend": "mtp",
+                "enabled": true,
+                "draft_window": 7,
+                "rounds": 17,
+                "drafted_tokens": 113,
+                "accepted_tokens": 111,
+                "fallback_steps": 0,
+                "acceptance_rate": 0.982300885,
+                "acceptance_length": 7.529411765,
+                "accepted_per_position": [
+                  17,
+                  16,
+                  16,
+                  16,
+                  16,
+                  15,
+                  15
+                ]
+              },
+              "speculative_work_equal": true
+            }
+          ]
+        },
+        {
+          "pair": 2,
+          "output_ids_equal": true,
+          "contexts": [
+            {
+              "tokens": 4096,
+              "prefill_speedup_pct": -0.05677343740528862,
+              "decode_speedup_pct": -0.5275721975505521,
+              "total_reduction_pct": -0.1685711577972704,
+              "reference_speculative": {
+                "backend": "mtp",
+                "enabled": true,
+                "draft_window": 7,
+                "rounds": 17,
+                "drafted_tokens": 117,
+                "accepted_tokens": 111,
+                "fallback_steps": 0,
+                "acceptance_rate": 0.9487179487,
+                "acceptance_length": 7.529411765,
+                "accepted_per_position": [
+                  17,
+                  17,
+                  17,
+                  17,
+                  16,
+                  14,
+                  13
+                ]
+              },
+              "candidate_speculative": {
+                "backend": "mtp",
+                "enabled": true,
+                "draft_window": 7,
+                "rounds": 17,
+                "drafted_tokens": 117,
+                "accepted_tokens": 111,
+                "fallback_steps": 0,
+                "acceptance_rate": 0.9487179487,
+                "acceptance_length": 7.529411765,
+                "accepted_per_position": [
+                  17,
+                  17,
+                  17,
+                  17,
+                  16,
+                  14,
+                  13
+                ]
+              },
+              "speculative_work_equal": true
+            },
+            {
+              "tokens": 32768,
+              "prefill_speedup_pct": 0.3461034322172152,
+              "decode_speedup_pct": 0.5509995811845858,
+              "total_reduction_pct": 0.35240125804435474,
+              "reference_speculative": {
+                "backend": "mtp",
+                "enabled": true,
+                "draft_window": 7,
+                "rounds": 17,
+                "drafted_tokens": 113,
+                "accepted_tokens": 111,
+                "fallback_steps": 0,
+                "acceptance_rate": 0.982300885,
+                "acceptance_length": 7.529411765,
+                "accepted_per_position": [
+                  17,
+                  16,
+                  16,
+                  16,
+                  16,
+                  15,
+                  15
+                ]
+              },
+              "candidate_speculative": {
+                "backend": "mtp",
+                "enabled": true,
+                "draft_window": 7,
+                "rounds": 17,
+                "drafted_tokens": 113,
+                "accepted_tokens": 111,
+                "fallback_steps": 0,
+                "acceptance_rate": 0.982300885,
+                "acceptance_length": 7.529411765,
+                "accepted_per_position": [
+                  17,
+                  16,
+                  16,
+                  16,
+                  16,
+                  15,
+                  15
+                ]
+              },
+              "speculative_work_equal": true
+            }
+          ]
+        },
+        {
+          "pair": 3,
+          "output_ids_equal": true,
+          "contexts": [
+            {
+              "tokens": 4096,
+              "prefill_speedup_pct": 0.19846875485756144,
+              "decode_speedup_pct": -0.7694942946955385,
+              "total_reduction_pct": -0.024891942235649722,
+              "reference_speculative": {
+                "backend": "mtp",
+                "enabled": true,
+                "draft_window": 7,
+                "rounds": 17,
+                "drafted_tokens": 117,
+                "accepted_tokens": 111,
+                "fallback_steps": 0,
+                "acceptance_rate": 0.9487179487,
+                "acceptance_length": 7.529411765,
+                "accepted_per_position": [
+                  17,
+                  17,
+                  17,
+                  17,
+                  16,
+                  14,
+                  13
+                ]
+              },
+              "candidate_speculative": {
+                "backend": "mtp",
+                "enabled": true,
+                "draft_window": 7,
+                "rounds": 17,
+                "drafted_tokens": 117,
+                "accepted_tokens": 111,
+                "fallback_steps": 0,
+                "acceptance_rate": 0.9487179487,
+                "acceptance_length": 7.529411765,
+                "accepted_per_position": [
+                  17,
+                  17,
+                  17,
+                  17,
+                  16,
+                  14,
+                  13
+                ]
+              },
+              "speculative_work_equal": true
+            },
+            {
+              "tokens": 32768,
+              "prefill_speedup_pct": 0.24068730268691496,
+              "decode_speedup_pct": -1.8149432874355664,
+              "total_reduction_pct": 0.16688431779485757,
+              "reference_speculative": {
+                "backend": "mtp",
+                "enabled": true,
+                "draft_window": 7,
+                "rounds": 17,
+                "drafted_tokens": 113,
+                "accepted_tokens": 111,
+                "fallback_steps": 0,
+                "acceptance_rate": 0.982300885,
+                "acceptance_length": 7.529411765,
+                "accepted_per_position": [
+                  17,
+                  16,
+                  16,
+                  16,
+                  16,
+                  15,
+                  15
+                ]
+              },
+              "candidate_speculative": {
+                "backend": "mtp",
+                "enabled": true,
+                "draft_window": 7,
+                "rounds": 17,
+                "drafted_tokens": 113,
+                "accepted_tokens": 111,
+                "fallback_steps": 0,
+                "acceptance_rate": 0.982300885,
+                "acceptance_length": 7.529411765,
+                "accepted_per_position": [
+                  17,
+                  16,
+                  16,
+                  16,
+                  16,
+                  15,
+                  15
+                ]
+              },
+              "speculative_work_equal": true
+            }
+          ]
+        }
+      ],
+      "paired_medians": [
+        {
+          "tokens": 4096,
+          "prefill_speedup_pct": -0.05677343740528862,
+          "decode_speedup_pct": -0.7694942946955385,
+          "total_reduction_pct": -0.1685711577972704
+        },
+        {
+          "tokens": 32768,
+          "prefill_speedup_pct": 0.24068730268691496,
+          "decode_speedup_pct": -0.7047165646985043,
+          "total_reduction_pct": 0.16688431779485757
+        }
+      ],
+      "arm_median_speeds": [
+        {
+          "tokens": 4096,
+          "reference": {
+            "prefill_tok_s_mean": 1629.80566,
+            "decode_output_tok_s_mean": 173.2061705,
+            "total_seconds_mean": 3.254457092
+          },
+          "candidate": {
+            "prefill_tok_s_mean": 1633.040315,
+            "decode_output_tok_s_mean": 172.2923829,
+            "total_seconds_mean": 3.256012277
+          }
+        },
+        {
+          "tokens": 32768,
+          "reference": {
+            "prefill_tok_s_mean": 1481.137291,
+            "decode_output_tok_s_mean": 159.4468279,
+            "total_seconds_mean": 22.93286081
+          },
+          "candidate": {
+            "prefill_tok_s_mean": 1486.263558,
+            "decode_output_tok_s_mean": 159.1218588,
+            "total_seconds_mean": 22.85204512
+          }
+        }
+      ],
+      "binary": {
+        "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/build/bench/ninfer_bench",
+        "size": 400247272,
+        "mtime_ns": 1792781013963034550
+      },
+      "model": {
+        "path": "/home/ran/ninfer-work/real-models/qwen3_8_gsq_rco_iq3_s_v3.ninfer",
+        "size": 15017456896,
+        "mtime_ns": 1792427370146524551
+      },
+      "corpus": {
+        "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/bench/fixtures/bench_corpus.ids",
+        "size": 333620,
+        "mtime_ns": 1789914130652130524
+      },
+      "sources": {
+        "src/ops/linear/gguf/ggml_bridge.cu": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/linear/gguf/ggml_bridge.cu",
+          "size": 61743,
+          "mtime_ns": 1792753798974128046,
+          "sha256": "5c314331707fd2509147c671264e8abb73e655cf7465d0d09bdeddf1514d8f43"
+        },
+        "src/ops/linear/gguf/ggml_vec_iq3_s.cu": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/linear/gguf/ggml_vec_iq3_s.cu",
+          "size": 3006,
+          "mtime_ns": 1792780661738009224,
+          "sha256": "af855042e0673a172db9ca6ed2527041a49a9e8397a13bef63dd1c3b9f4913c6"
+        },
+        "src/ops/linear/gguf/ggml_vec_iq3_xxs.cu": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/linear/gguf/ggml_vec_iq3_xxs.cu",
+          "size": 3036,
+          "mtime_ns": 1792780661738009224,
+          "sha256": "1fff96e45fa718c7047d56dd2f95f11f3b8bb4968d2e542184106520f65ba409"
+        },
+        "src/ops/linear/gguf/ggml_vec_iq4_xs.cu": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/linear/gguf/ggml_vec_iq4_xs.cu",
+          "size": 1615,
+          "mtime_ns": 1792780661738009224,
+          "sha256": "53a77291ceab9847ef8ed5a783f6b0d77a82bea3a7ff5e429ae940f4ba6fc4ac"
+        },
+        "src/ops/linear/gguf/ggml_vec_r27_reduce_scatter.cuh": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/linear/gguf/ggml_vec_r27_reduce_scatter.cuh",
+          "size": 9094,
+          "mtime_ns": 1792780902396767786,
+          "sha256": "5b62de8a55ea65d53d6c92996188adc80c30c48febfbe53d500b7c3c786b3433"
+        },
+        "src/ops/linear/gguf/gguf_dispatch.cpp": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/linear/gguf/gguf_dispatch.cpp",
+          "size": 22313,
+          "mtime_ns": 1792780801916908303,
+          "sha256": "b9026f241aa6dbf191955143fc4f0afcbd8b80696156772952252ffd571e01ee"
+        },
+        "src/ops/linear/gguf/gguf_dispatch.h": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/linear/gguf/gguf_dispatch.h",
+          "size": 3007,
+          "mtime_ns": 1792780661738009224,
+          "sha256": "32e0b592acd0bdc9a4d8ff09f5f103337bf4cd306165e30b9614c9db52054dd6"
+        },
+        "src/ops/linear_attention/gated_delta_net/common.cuh": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/linear_attention/gated_delta_net/common.cuh",
+          "size": 4133,
+          "mtime_ns": 1789914130681898807,
+          "sha256": "901b8c7a5ce55f12ebd7e2ac8e4374201fd8ccd91bab57fde0280f6bd74d1f36"
+        },
+        "src/ops/linear_attention/gated_delta_net/common.h": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/linear_attention/gated_delta_net/common.h",
+          "size": 482,
+          "mtime_ns": 1789914130681898807,
+          "sha256": "8485c9c88e4e5ce84244e3b1943070429c37791d858b5e9762bcebc7eef458b1"
+        },
+        "src/ops/linear_attention/gated_delta_net/gated_delta_net.cpp": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/linear_attention/gated_delta_net/gated_delta_net.cpp",
+          "size": 17319,
+          "mtime_ns": 1792739368967496757,
+          "sha256": "fac732608b781303851fe8a44b366fca7cfe0fa11a078ef975e3d16c7625abf7"
+        },
+        "src/ops/linear_attention/gated_delta_net/launch.h": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/linear_attention/gated_delta_net/launch.h",
+          "size": 3142,
+          "mtime_ns": 1792739260409694412,
+          "sha256": "d2b342e5ff025f8e983da385ddbc5549cb76a94d1d2f0f73ab13352ba3eb2df3"
+        },
+        "src/ops/linear_attention/gated_delta_net/prepared_qk.h": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/linear_attention/gated_delta_net/prepared_qk.h",
+          "size": 699,
+          "mtime_ns": 1792739260408694321,
+          "sha256": "2c16504b1633fccc2ee60c4142fd1637bc0ecdd69e2f153edf7b0cf17d46ac0c"
+        },
+        "src/ops/linear_attention/gated_delta_net/recurrent.cu": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/linear_attention/gated_delta_net/recurrent.cu",
+          "size": 16016,
+          "mtime_ns": 1792741452578924005,
+          "sha256": "e40879f7af4460b30553a32ddb7b381b90ad41d9ec388888ea7543eba915dc21"
+        },
+        "src/ops/linear_attention/gated_delta_net/recurrent.cuh": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/linear_attention/gated_delta_net/recurrent.cuh",
+          "size": 35639,
+          "mtime_ns": 1792739368936780883,
+          "sha256": "1a53ac59af1e8d15e0ed1c36dcbc4cc6e4ccb8dfc041ddd0d85ba1ff80426ace"
+        },
+        "src/ops/linear_attention/gated_delta_net/replay.cpp": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/linear_attention/gated_delta_net/replay.cpp",
+          "size": 17479,
+          "mtime_ns": 1792741152316706873,
+          "sha256": "c2c018d0ef911f127c208c49839767ad8f7f7ae9f3a8ea2c0e51b46db28bcbbc"
+        },
+        "src/ops/softmax_attention/dense/causal_cache/causal_softmax_attention.cpp": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/softmax_attention/dense/causal_cache/causal_softmax_attention.cpp",
+          "size": 28736,
+          "mtime_ns": 1792352840372965331,
+          "sha256": "d1cb9ad00b0481a20af749d7ffb48c3508f018b475e735a435532cab2111dd9c"
+        },
+        "src/ops/softmax_attention/dense/causal_cache/geometry.cuh": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/softmax_attention/dense/causal_cache/geometry.cuh",
+          "size": 591,
+          "mtime_ns": 1789914130683395735,
+          "sha256": "cccf46c4e0704cfa5893a45f9bb9a0e51b7f300c921b873046671f9e44788368"
+        },
+        "src/ops/softmax_attention/dense/causal_cache/launch.h": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/softmax_attention/dense/causal_cache/launch.h",
+          "size": 7689,
+          "mtime_ns": 1789914130683395735,
+          "sha256": "eccd81679a6dff8f096932a85654d89457e500ca2440ea849a382f3f3539afd1"
+        },
+        "src/ops/softmax_attention/dense/causal_cache/prompt.cu": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/softmax_attention/dense/causal_cache/prompt.cu",
+          "size": 12310,
+          "mtime_ns": 1792539944426404690,
+          "sha256": "4b85fc255d1d6ab1491083bb3b7c5074b7dd26bc6f7ff826d9bc148ba7f06d10"
+        },
+        "src/ops/softmax_attention/dense/causal_cache/prompt_bf16.cuh": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/softmax_attention/dense/causal_cache/prompt_bf16.cuh",
+          "size": 21085,
+          "mtime_ns": 1789914130683395735,
+          "sha256": "3ff7fe786f06620cd423810ef036300fbfac82ddc4aae53979ded9f3607971ad"
+        },
+        "src/ops/softmax_attention/dense/causal_cache/prompt_common.cuh": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/softmax_attention/dense/causal_cache/prompt_common.cuh",
+          "size": 3526,
+          "mtime_ns": 1789914130683395735,
+          "sha256": "a5dad073a2d267fa2a71a7e5e42499cca1db9d4c0bcd19361c1b8492a2fef358"
+        },
+        "src/ops/softmax_attention/dense/causal_cache/prompt_fp8.cu": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/softmax_attention/dense/causal_cache/prompt_fp8.cu",
+          "size": 4496,
+          "mtime_ns": 1789914130683395735,
+          "sha256": "0c509d9f36da5f2ea209671d3f151f845f081596406be611a12439f780940a5c"
+        },
+        "src/ops/softmax_attention/dense/causal_cache/prompt_fp8.cuh": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/softmax_attention/dense/causal_cache/prompt_fp8.cuh",
+          "size": 21771,
+          "mtime_ns": 1789914130683395735,
+          "sha256": "b4499e88bba4d21ba0be9bc8ad8e7dbcaec77edba93fbc5d6e61040bdaad4867"
+        },
+        "src/ops/softmax_attention/dense/causal_cache/prompt_i8.cuh": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/softmax_attention/dense/causal_cache/prompt_i8.cuh",
+          "size": 57694,
+          "mtime_ns": 1792514672146914578,
+          "sha256": "ace1e1c1a4210e428cc5284b08d00aaa4de105e0dcd486597dbde428b00ba612"
+        },
+        "src/ops/softmax_attention/dense/causal_cache/prompt_i8_pipeline.cuh": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/softmax_attention/dense/causal_cache/prompt_i8_pipeline.cuh",
+          "size": 42460,
+          "mtime_ns": 1792515021214735312,
+          "sha256": "bd32e98df866f567ae913d6d7799889923b671168b03ae7007e9e0cfdf710c7a"
+        },
+        "src/ops/softmax_attention/dense/causal_cache/prompt_k8v4.cu": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/softmax_attention/dense/causal_cache/prompt_k8v4.cu",
+          "size": 4533,
+          "mtime_ns": 1789914130683395735,
+          "sha256": "217af351c25e7374cfcc66b48cf31a4b9fef5eea4bb5e373f4a056908fbcb876"
+        },
+        "src/ops/softmax_attention/dense/causal_cache/prompt_k8v4.cuh": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/softmax_attention/dense/causal_cache/prompt_k8v4.cuh",
+          "size": 22737,
+          "mtime_ns": 1789914130683395735,
+          "sha256": "23966d762ad51469fba137e56b44e0a30a8e49f9f08e6ac1f78a66475e663784"
+        },
+        "src/ops/softmax_attention/dense/causal_cache/prompt_nvfp4.cu": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/softmax_attention/dense/causal_cache/prompt_nvfp4.cu",
+          "size": 1407,
+          "mtime_ns": 1789914130683395735,
+          "sha256": "660209c70494e67f8410da51e6044a69f2a8f7523b9df5e433704a09d930054b"
+        },
+        "src/ops/softmax_attention/dense/causal_cache/prompt_nvfp4.cuh": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/softmax_attention/dense/causal_cache/prompt_nvfp4.cuh",
+          "size": 19509,
+          "mtime_ns": 1789914130683395735,
+          "sha256": "99ec2b0eabdcf752cf7e2debecf0e0f832804e58d2675f8ff645fb36534b3b49"
+        },
+        "src/ops/softmax_attention/dense/causal_cache/prompt_nvfp4_non_rdc.cu": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/softmax_attention/dense/causal_cache/prompt_nvfp4_non_rdc.cu",
+          "size": 3742,
+          "mtime_ns": 1789914130683395735,
+          "sha256": "ddfcdbf34333b6e1781941ab4e992ce5826cb541b4853223397f68e0e8a7f25f"
+        },
+        "src/ops/softmax_attention/dense/causal_cache/prompt_nvfp4_non_rdc_launch.h": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/softmax_attention/dense/causal_cache/prompt_nvfp4_non_rdc_launch.h",
+          "size": 894,
+          "mtime_ns": 1789914130683395735,
+          "sha256": "d93e69856499d5abee65b8aae3eb11ce5766a4d032fbe36422a77128f5d63ca1"
+        },
+        "src/ops/softmax_attention/dense/causal_cache/small_t.cu": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/softmax_attention/dense/causal_cache/small_t.cu",
+          "size": 38347,
+          "mtime_ns": 1792739378689373154,
+          "sha256": "647e49930403986efaa342f1448ed03a65406755dd6fec3aa51fb1f42bfedac8"
+        },
+        "src/ops/softmax_attention/dense/causal_cache/small_t.cuh": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/softmax_attention/dense/causal_cache/small_t.cuh",
+          "size": 14525,
+          "mtime_ns": 1792739378688373064,
+          "sha256": "806d54f672ae84bb46b83d6a6e09916890658df9652731fb772a9d5499198af0"
+        },
+        "src/ops/softmax_attention/dense/causal_cache/small_t_bf16.cuh": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/softmax_attention/dense/causal_cache/small_t_bf16.cuh",
+          "size": 19635,
+          "mtime_ns": 1789914130683395735,
+          "sha256": "7ce5d02087861d772678e82fb24d531b4778dfc07647d39b83be13bf71efa05c"
+        },
+        "src/ops/softmax_attention/dense/causal_cache/small_t_fp8.cu": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/softmax_attention/dense/causal_cache/small_t_fp8.cu",
+          "size": 11461,
+          "mtime_ns": 1789914130683395735,
+          "sha256": "265033abe7ba4c8352ba89f4b376bd69de61beba1bd82c9fd263bc29128699cb"
+        },
+        "src/ops/softmax_attention/dense/causal_cache/small_t_fp8.cuh": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/softmax_attention/dense/causal_cache/small_t_fp8.cuh",
+          "size": 31142,
+          "mtime_ns": 1789914130683395735,
+          "sha256": "a44f10e3aec94cd0d7bcb1b77ce7638df17df0979cb0e55257d6f9c1ae9b184b"
+        },
+        "src/ops/softmax_attention/dense/causal_cache/small_t_i8.cuh": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/softmax_attention/dense/causal_cache/small_t_i8.cuh",
+          "size": 77197,
+          "mtime_ns": 1792397116969680592,
+          "sha256": "26930cc6be4de427efef2598514cc5b7dae6aa234641e012702a9167514f1f5a"
+        },
+        "src/ops/softmax_attention/dense/causal_cache/small_t_k8v4.cu": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/softmax_attention/dense/causal_cache/small_t_k8v4.cu",
+          "size": 11395,
+          "mtime_ns": 1789914130683395735,
+          "sha256": "5987d411a0e37b662ea9ff04aef502859a591f3eee1d38370f8b0dfafe475061"
+        },
+        "src/ops/softmax_attention/dense/causal_cache/small_t_k8v4.cuh": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/softmax_attention/dense/causal_cache/small_t_k8v4.cuh",
+          "size": 31071,
+          "mtime_ns": 1789914130683395735,
+          "sha256": "af0547bdbf08d90346abb1a2920d3a991a59b7e6f0dd2d6e0822bfb2a172cbbf"
+        },
+        "src/ops/softmax_attention/dense/causal_cache/small_t_nvfp4.cu": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/softmax_attention/dense/causal_cache/small_t_nvfp4.cu",
+          "size": 11161,
+          "mtime_ns": 1789914130683395735,
+          "sha256": "3edaf6c578629a396f30ad24238a436a2b2cd8494167e58b64ecea04a4aa4f7c"
+        },
+        "src/ops/softmax_attention/dense/causal_cache/small_t_nvfp4.cuh": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/ops/softmax_attention/dense/causal_cache/small_t_nvfp4.cuh",
+          "size": 32476,
+          "mtime_ns": 1789914130683395735,
+          "sha256": "d34e019a7065de4aac0499a871273e26a14bc29538a2690ca1c76bf721c4fa7f"
+        },
+        "src/runtime/contract/types.h": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/runtime/contract/types.h",
+          "size": 23761,
+          "mtime_ns": 1792762398080146544,
+          "sha256": "884ab5220b16587f4a4e0ec264e28dac931e3516908e9a3e69a3a18b91d7cc4b"
+        },
+        "src/runtime/engine/engine_core.h": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/runtime/engine/engine_core.h",
+          "size": 116439,
+          "mtime_ns": 1792767523898425290,
+          "sha256": "4d2c89c497d4635c5d32f8a6966b1af207033702ae56d4d4fe0379a485c75283"
+        },
+        "src/targets/qwen3_6/impl/runtime/program_impl.h": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/targets/qwen3_6/impl/runtime/program_impl.h",
+          "size": 812689,
+          "mtime_ns": 1792762666764132119,
+          "sha256": "93bd4a3b6f4b5b6a49618c96a2f7e6060a187ebe594c04283999fa46422e224b"
+        },
+        "src/targets/qwen3_6_27b/impl/variant.cpp": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/src/targets/qwen3_6_27b/impl/variant.cpp",
+          "size": 53743,
+          "mtime_ns": 1792780726037759607,
+          "sha256": "888c10fcbda561de3a917818f69862b3602f63592f9878a396beb3ccae6f7afa"
+        },
+        "tools/bench/sm89_attention_gdn_pairs.py": {
+          "path": "/home/ran/ninfer-work/publish/ninfer-ternary-bonsai-ada/tools/bench/sm89_attention_gdn_pairs.py",
+          "size": 14556,
+          "mtime_ns": 1792780801917908377,
+          "sha256": "c073334dc774eb278db41ace5b63ef69d83c769c018a397a101693ba19a7809f"
+        }
+      },
+      "workspace_bytes": 209484800,
+      "all_ids_equal": true,
+      "all_speculative_work_equal": true,
+      "power_before_w": 200.0,
+      "power_after_w": 200.0
+    }
+  },
+  "decision": {
+    "adopted": false,
+    "reason": "Combined decode negative in both contexts; matrix-only prefill mixed and below expected gain, with no confirmed decode benefit. Keep both new switches off.",
+    "default_environment": {
+      "NINFER_SM89_SHARED_MATRIX": "0",
+      "NINFER_SM89_R27_PROJECTIONS": "0"
+    },
+    "old_r27_bundle_unchanged": true,
+    "long_quality": {
+      "213k": "NOT_RUN",
+      "256k": "NOT_RUN",
+      "reason": "No winning new profile; defaults and original questions unchanged. New candidates have no new long-context qualification."
+    },
+    "nvfp4": "DEFERRED",
+    "release_300w": "NOT_RUN"
+  }
+}
