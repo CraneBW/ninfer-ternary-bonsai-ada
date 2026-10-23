@@ -277,6 +277,17 @@ metadata。
 Session key 只是查找提示，不拥有 continuation。每个请求进入 Engine 时取得单调的
 `publication_order`；只有更新顺序更晚的完成结果才能替换 SessionIndex binding。
 
+Frontend 另外保留已完成文本输出的编码来源：生成 BPE 不保证等于重新编码其解码文本。
+Engine 在模型、输出和终态 retention 完成后，才将已提交 prompt/generated token 交给
+OutputSession 记录；仅接受自然 `<|im_end|>` 结束、无媒体且非 raw 的请求。续轮只有在整个
+历史字节、所有 added-token 的 ID/字节位置以及全部所需 token frontier 可精确映射时，才恢复
+原生成 token 切分。位置、rewrite/message/cache frontier 与实际预算同步更新；Program 仍执行
+原有精确 token、GDN 执行边界、KV/StateImage、owner/epoch 检查。
+
+该记录不拥有 KV 或 cache 资格。其 Host 容量限定为 8 条、每条 262144 token、2MiB 字节和
+4096 个 added-token 标记；媒体、取消、输出限额、文字或结构变化均不据此复用。
+`NINFER_GENERATED_HISTORY_REPLAY=0` 在 Engine 创建前关闭记录，恢复普通重编码路径。
+
 ---
 
 ## 5. Worker 与调度

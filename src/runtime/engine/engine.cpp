@@ -7,6 +7,7 @@
 #include "runtime/contract/types.h"
 #include "runtime/engine/causal_score_core.h"
 #include "runtime/engine/engine_core.h"
+#include "runtime/engine/test_access.h"
 #include "targets/qwen3_6/impl/frontend/encoded_history_cache.h"
 #include "targets/registry.h"
 
@@ -157,6 +158,14 @@ public:
     SamplingMode sampling_mode = SamplingMode::Thinking;
     targets::qwen3_6::PreparedPrompt value;
 };
+
+PreparedPrompt PreparedPromptTestAccess::adopt(targets::qwen3_6::PreparedPrompt prompt,
+                                                SamplingMode mode) {
+    const auto summary = prompt.summary();
+    const auto preparation = prompt.preparation_stats();
+    return PreparedPrompt(std::make_unique<PreparedPrompt::Impl>(summary, preparation, mode,
+                                                                 std::move(prompt)));
+}
 
 PreparedPrompt::PreparedPrompt() noexcept                            = default;
 PreparedPrompt::~PreparedPrompt()                                    = default;

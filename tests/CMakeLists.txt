@@ -168,6 +168,12 @@ target_include_directories(ninfer_qwen3_6_incremental_encode_test PRIVATE
   ${PROJECT_SOURCE_DIR}/src/targets/qwen3_6/impl)
 find_package(Threads REQUIRED)
 target_link_libraries(ninfer_qwen3_6_incremental_encode_test PRIVATE Threads::Threads)
+ninfer_add_test(ninfer_qwen3_6_generated_history_test
+  SOURCES targets/qwen3_6/test_generated_history.cpp
+  LIBRARIES ninfer_engine ninfer_core)
+target_include_directories(ninfer_qwen3_6_generated_history_test PRIVATE
+  ${PROJECT_SOURCE_DIR}/src/targets/qwen3_6/export)
+set_tests_properties(ninfer_qwen3_6_generated_history_test PROPERTIES SKIP_RETURN_CODE 77)
 ninfer_add_test(ninfer_qwen3_6_runtime_mechanisms_test
   SOURCES targets/qwen3_6/test_runtime_mechanisms.cpp
   LIBRARIES ninfer_engine ninfer_core)

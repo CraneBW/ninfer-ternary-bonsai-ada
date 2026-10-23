@@ -42,6 +42,7 @@ struct AddedToken {
 struct DecodedTokenView {
     std::string_view bytes;
     bool special = false;
+    bool added = false;
 };
 
 struct TokenizerResources {
@@ -168,6 +169,7 @@ private:
     std::vector<std::string> decoded_token_bytes_;
     std::vector<bool> valid_token_ids_;
     std::vector<bool> special_token_ids_;
+    std::vector<bool> added_token_ids_;
     std::unordered_map<std::string, int> vocab_token_to_id_;
     BpeMergeTable bpe_merge_rules_;
     std::array<int, 256> byte_token_ids_{};

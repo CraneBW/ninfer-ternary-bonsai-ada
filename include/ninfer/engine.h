@@ -30,6 +30,7 @@ private:
     std::unique_ptr<Impl> impl_;
 
     friend class Engine;
+    friend class PreparedPromptTestAccess;
 };
 
 class GenerationHandle {

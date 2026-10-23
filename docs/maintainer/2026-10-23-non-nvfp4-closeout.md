@@ -146,6 +146,10 @@ AR 秦始皇也保留相同边界：有效endpoint53117，新输入只匹配到4
 95779/145007；第一次工具续轮重算51509token、TTFT36.451s，之后精确续轮命中53283、
 只算605token、TTFT0.635s。其他正式MTP续轮命中有效endpoint、只算21token，TTFT约0.160–0.202s。
 
+2026-10-24 后续已定位为同一文本的生成 BPE 与重新编码分词不同，新增原始 token 编码来源回放。
+本节保留当时的失败记录；针对两份保存历史的实际修复与 GPU 续轮对照见
+[原始分词回放报告](2026-10-24-completed-output-replay.md)。
+
 ## S4原213K长状态验收
 
 新生产binary同时显式开启 `NINFER_SM89_ATTN_SPLIT_VECTOR=1`、`NINFER_SM89_GDN_PRENORM=1`

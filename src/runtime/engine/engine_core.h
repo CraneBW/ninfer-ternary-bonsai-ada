@@ -904,6 +904,7 @@ private:
             request->queue_wait_recorded       = true;
         }
         GenerationResult result;
+        request->output.remember_generated_history(request->generated, reason);
         result.prompt                  = request->prompt_summary;
         result.generated_token_ids     = std::move(request->generated);
         result.content                 = std::move(request->content);

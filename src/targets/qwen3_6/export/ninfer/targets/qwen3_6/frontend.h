@@ -114,6 +114,9 @@ public:
     void validate_generation_capacity(std::uint32_t effective_output_tokens) const;
     [[nodiscard]] runtime::OutputDecision preview_terminal(FinishReason reason);
     [[nodiscard]] PublishedOutput commit_preview();
+    // Called only after Engine has completed model/output commit and terminal retention.
+    // Retains encoding provenance, not KV state or eligibility.
+    void remember_generated_history(std::span<const TokenId> generated, FinishReason reason);
     [[nodiscard]] std::vector<GeneratedToolCall> take_tool_calls() noexcept;
     [[nodiscard]] ToolCallParseDiagnostics tool_call_parse_diagnostics() const noexcept;
     [[nodiscard]] std::uint32_t reasoning_tokens() const noexcept;

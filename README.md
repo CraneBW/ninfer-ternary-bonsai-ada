@@ -49,6 +49,8 @@ flowchart LR
 
 同轮补齐S4原213K **6/6** 长状态资格，并适配DeepInfer的有界C1上一轮CPU输出处理与下一轮GPU提交重叠。AR/MTP4/短容量DFlash2生命周期验证通过；200W三对decode中位−0.33%/−0.71%（4K/32K），未获稳定收益，`NINFER_HOST_DECODE_OVERLAP`与S4两开关均保持默认0。实现完成与性能采用分开记录，未新增该组合256K资格。
 
+2026-10-24 修复正式 Pi 样本剩余的 22.052s / 36.451s 工具续轮重建：同一输出重新 BPE 会改变分词，现为完整文本保留已提交原 token，并继续执行完整 KV/GDN 资格检查。200W 保存历史定向对照，MTP4 TTFT **23.042→0.159s**、AR **37.857→0.247s**，分别命中33888/53117 token，仅新算63 token。开启与显式原 token 续轮核对，历史文字改动仍拒绝旧状态；无新显存分配，默认开启，`NINFER_GENERATED_HISTORY_REPLAY=0` 回退。[实现、对照及冻结历史验证边界](docs/maintainer/2026-10-24-completed-output-replay.md)。
+
 ## 运行环境与模型
 
 | 项目 | 本项目当前明确范围 |

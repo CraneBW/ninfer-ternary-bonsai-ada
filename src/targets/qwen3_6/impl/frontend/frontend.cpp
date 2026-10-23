@@ -5,6 +5,7 @@
 
 #include "targets/qwen3_6/impl/frontend/chat_template.h"
 #include "targets/qwen3_6/impl/frontend/encoded_history_cache.h"
+#include "targets/qwen3_6/impl/frontend/generated_history_cache.h"
 #include "targets/qwen3_6/impl/frontend/media_cache.h"
 #include "targets/qwen3_6/impl/frontend/processor.h"
 #include "targets/qwen3_6/impl/frontend/test_access.h"
@@ -1051,6 +1052,12 @@ public:
     std::shared_ptr<const std::vector<TokenId>> thinking_control_tokens;
     bool vision_enabled       = true;
     std::uint32_t max_context = 0;
+    std::shared_ptr<fi::GeneratedHistoryCache> generated_history =
+        std::make_shared<fi::GeneratedHistoryCache>();
+    const bool generated_history_enabled = [] {
+        const char* setting = std::getenv("NINFER_GENERATED_HISTORY_REPLAY");
+        return setting == nullptr || std::string_view(setting) != "0";
+    }();
 };
 
 class OutputSession::Impl {
@@ -1094,6 +1101,8 @@ public:
     std::vector<GeneratedToolCall> tool_calls;
     ToolCallParseDiagnostics tool_call_parse;
     bool preview_ready = false;
+    std::shared_ptr<fi::GeneratedHistoryCache> generated_history;
+    std::vector<TokenId> original_prompt;
 };
 
 std::span<const std::int32_t> PreparedPromptData::position_axis(int axis) const {
@@ -1437,6 +1446,18 @@ std::vector<GeneratedToolCall> OutputSession::take_tool_calls() noexcept {
     return impl_ != nullptr ? std::move(impl_->tool_calls) : std::vector<GeneratedToolCall>{};
 }
 
+void OutputSession::remember_generated_history(std::span<const TokenId> generated,
+                                               FinishReason reason) {
+    if (!impl_ || !impl_->generated_history || !impl_->state.terminal ||
+        reason != FinishReason::StopToken || generated.empty()) { return; }
+    if (impl_->original_prompt.size() + generated.size() > fi::GeneratedHistoryCache::max_ids) {
+        return;
+    }
+    impl_->original_prompt.insert(impl_->original_prompt.end(), generated.begin(), generated.end());
+    impl_->generated_history->remember(*impl_->tokenizer, std::move(impl_->original_prompt));
+    impl_->generated_history.reset();
+}
+
 ToolCallParseDiagnostics OutputSession::tool_call_parse_diagnostics() const noexcept {
     return impl_ != nullptr ? impl_->tool_call_parse : ToolCallParseDiagnostics{};
 }
@@ -1616,6 +1637,11 @@ PreparedPrompt Frontend::prepare(PromptInput input, const PreparationControl& co
             encoded = fi::encode_rendered_chat(
                 *impl_->tokenizer, rendered, static_cast<std::size_t>(impl_->max_context) + 1U);
         }
+        if (const auto hit = impl_->generated_history->apply(*impl_->tokenizer, encoded);
+            hit && std::getenv("NINFER_PREFIX_TRACE")) {
+            std::fprintf(stderr, "PREFIX_TRACE generated_encoding canonical=%zu original=%zu\n",
+                         hit->canonical_tokens, hit->original_tokens);
+        }
         result.prepare.tokenize_seconds =
             std::chrono::duration<double>(Clock::now() - tokenize_started).count();
         fi::check_preparation_control(control, "tokenization");
@@ -1677,6 +1703,7 @@ std::uint32_t Frontend::count_tokens(PromptInput input, const PreparationControl
                 impl_->chat_template.render(messages, render_options(options));
             encoded = fi::encode_rendered_chat(*impl_->tokenizer, rendered);
         }
+        (void)impl_->generated_history->apply(*impl_->tokenizer, encoded);
         const std::uint32_t count = checked_token_count(encoded.input_ids.size());
         fi::check_preparation_control(control, "tokenization");
         return count;
@@ -1752,9 +1779,15 @@ OutputSession Frontend::make_output_session(const PreparedPrompt& prompt,
     if (prompt.data_ == nullptr) { throw std::invalid_argument("prepared prompt is empty"); }
     StopPolicy policy = merge_stop_policy(*impl_->tokenizer, caller_stop);
     if (output.raw) { policy.publish_stop_token = true; }
-    return OutputSession(std::make_unique<OutputSession::Impl>(
+    auto session = std::make_unique<OutputSession::Impl>(
         impl_->tokenizer, std::move(policy), output, prompt.data_->starts_in_reasoning, thinking,
-        impl_->thinking_control_tokens, prompt.data_->tool_call_output));
+        impl_->thinking_control_tokens, prompt.data_->tool_call_output);
+    if (impl_->generated_history_enabled && !output.raw && prompt.data_->identity.reusable &&
+        !prompt.data_->has_media()) {
+        session->generated_history = impl_->generated_history;
+        session->original_prompt = prompt.data_->token_ids;
+    }
+    return OutputSession(std::move(session));
 }
 
 const StopPolicy& Frontend::default_stop_policy() const noexcept { return impl_->defaults; }

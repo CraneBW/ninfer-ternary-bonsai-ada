@@ -771,11 +771,13 @@ Tokenizer::Tokenizer(TokenizerResources resources) {
     }
     std::vector<bool> added_token_ids(decoded_token_bytes_.size());
     special_token_ids_.resize(decoded_token_bytes_.size());
+    added_token_ids_.resize(decoded_token_bytes_.size());
     for (const AddedToken& token : added_tokens_) {
         const auto index             = static_cast<std::size_t>(token.id);
         valid_token_ids_.at(index)   = true;
         added_token_ids.at(index)    = true;
         special_token_ids_.at(index) = token.special;
+        added_token_ids_.at(index) = true;
     }
     for (std::size_t index = 0; index < decoded_token_bytes_.size(); ++index) {
         if (valid_token_ids_[index] && !added_token_ids[index]) {
@@ -959,7 +961,8 @@ DecodedTokenView Tokenizer::decoded_token(int id) const {
                                 " is outside loaded vocabulary");
     }
     return DecodedTokenView{.bytes   = decoded_token_bytes_[index],
-                            .special = special_token_ids_[index]};
+                            .special = special_token_ids_[index],
+                            .added = added_token_ids_[index]};
 }
 
 std::string_view Tokenizer::decode_token_bytes(int id, bool skip_special_tokens) const {
