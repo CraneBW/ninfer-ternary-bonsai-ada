@@ -7623,7 +7623,8 @@ void ProgramImplCore::kvmem_apply_window(SequenceState& sequence, std::uint32_t 
     sequence.dflash_context_frontier = std::min(sequence.dflash_context_frontier, window);
 }
 
-std::uint32_t ProgramImplCore::kvmem_reclaim_generation(SequenceState& sequence) {
+std::uint32_t ProgramImplCore::kvmem_reclaim_generation(SequenceState& sequence,
+                                                       std::uint32_t append_tokens) {
     if (!sequence.kv || !text_kv_addresses->kvmem_enabled()) { return 0; }
     const std::uint32_t reserve_tokens = text_kv_addresses->kvmem_gen_reserve_tokens();
     // Reclaim before append exceeds this address's reserved device claim, which can be
@@ -7635,12 +7636,12 @@ std::uint32_t ProgramImplCore::kvmem_reclaim_generation(SequenceState& sequence)
     const std::uint32_t claim_pages =
         text_kv_addresses->kvmem_device_claim_pages(sequence.kv->text);
     const std::uint32_t next_pages =
-        kv_pages_for_frontier(sequence.execution_frontier + 1U);
+        kv_pages_for_frontier(sequence.execution_frontier + append_tokens);
     if (!text_kv_addresses->kvmem_generation_reclaim_due(
-            sequence.kv->text, sequence.execution_frontier + 1U)) {
+            sequence.kv->text, sequence.execution_frontier + append_tokens)) {
         return 0;
     }
-    // A speculative batch and a published endpoint pin this lineage's KV geometry: their views
+    // A running batch and a published endpoint pin this lineage's KV geometry: their views
     // name the pages by slot, so a reclaim would move KV those views already read. A retained
     // shared prefix is pinned page by page instead, so a reclaim may repack the private suffix
     // behind it. NOTE the deliberate exclusion of `rewrite_checkpoint`: a prefix-cache
@@ -7651,7 +7652,8 @@ std::uint32_t ProgramImplCore::kvmem_reclaim_generation(SequenceState& sequence)
     // `reuse_base + source.kv_offset` and refuses a resume below `kv_reuse_floor`, so a window
     // that lost its middle costs a cache miss rather than a wrong read. Gating on it here would
     // block every reclaim for a prefix-caching request, i.e. all of them.
-    const bool pinned = speculative_backend != SpeculativeBackend::None ||
+    const bool paired_mtp = speculative_backend == SpeculativeBackend::Mtp;
+    const bool pinned = (speculative_backend != SpeculativeBackend::None && !paired_mtp) ||
                         sequence.endpoint_valid;
     if (pinned) {
         if (std::getenv("NINFER_KVMEM_TRACE") != nullptr) {
@@ -7664,10 +7666,19 @@ std::uint32_t ProgramImplCore::kvmem_reclaim_generation(SequenceState& sequence)
         }
         return 0;
     }
+    if (paired_mtp && (!sequence.kv->backend ||
+                       requests[sequence.lane].lifecycle != Lifecycle::Active ||
+                       requests[sequence.lane].pending.kind != PendingKind::None ||
+                       sequence.text_kv_valid != sequence.execution_frontier ||
+                       sequence.mtp_kv_valid != sequence.execution_frontier)) {
+        throw std::logic_error("MTP generation reclaim requires a committed round boundary");
+    }
     // The packed window drops the evicted pages from the address, so the growth entitlement has
     // to be re-established from the logical bound the address still names -- without it the
     // reclaimed pages come back with no reservation behind them and the next append fails.
     const std::uint32_t logical = text_kv_addresses->mapping_limit(sequence.kv->text);
+    const std::uint32_t backend_logical = paired_mtp
+        ? backend_kv_addresses->mapping_limit(*sequence.kv->backend) : 0;
     const std::uint32_t window =
         text_kv_addresses->kvmem_compact_generation(sequence.kv->text, device.stream);
     if (std::getenv("NINFER_KVMEM_TRACE") != nullptr) {
@@ -7693,7 +7704,30 @@ std::uint32_t ProgramImplCore::kvmem_reclaim_generation(SequenceState& sequence)
             "a speculative batch pins its geometry); raise --kv-device-tokens, lower "
             "--kvmem-budget or shorten the generation");
     }
-    text_kv_addresses->resize_entitlement(sequence.kv->text, logical);
+    if (paired_mtp) {
+        // Follow ActKV's follow_retrieval protocol: Main is the only selector.
+        // Reuse the coupled native compaction already used by chunked prefill.
+        // resolve_speculative_pending has trimmed both stores to the committed
+        // frontier. Its state fold and these copies are ordered on device.stream;
+        // no recurrent state is rewound, and no old ingress/graph is in flight.
+        const auto selected = text_kv_addresses->kvmem_selected_blocks(sequence.kv->text);
+        const auto budget = text_kv_addresses->kvmem_budget_tokens() - reserve_tokens;
+        const auto backend_window = backend_kv_addresses->kvmem_compact(
+            *sequence.kv->backend, budget, device.stream, {}, false,
+            backend_kv_addresses->kvmem_shared_prefix_pages(*sequence.kv->backend), selected);
+        if (backend_window != window) {
+            throw std::runtime_error("MTP generation reclaim produced unequal Main/backend windows");
+        }
+        resize_sequence_kv_entitlement(sequence, logical, backend_logical);
+        // Proposals were made against the old attention window. The next round
+        // verifies only the ledger anchor and creates fresh proposals normally.
+        sequence.mtp_draft_count = 0;
+        requests[sequence.lane].lookup_drafted = 0;
+        std::fprintf(stderr, "KVMEM_MTP_GENERATION_RECLAIM frontier=%u window=%u selected=%zu drafts_reset=1\n",
+                     sequence.execution_frontier, window, selected.size());
+    } else {
+        text_kv_addresses->resize_entitlement(sequence.kv->text, logical);
+    }
     if (window < sequence.text_kv_valid) { kvmem_apply_window(sequence, window); }
     return window;
 }
@@ -13963,6 +13997,14 @@ ProgramImplCore::decode_mtp_batch(std::span<const std::uint32_t> lanes,
 
     const auto started = Clock::now();
     try {
+        // Resolve the preceding round before entering here. No batch ingress
+        // names the old slots yet; reclaim both tiers before sizing envelopes.
+        maximum_frontier = 0;
+        for (const auto lane : lanes) {
+            auto& sequence = active_sequence(lane);
+            (void)kvmem_reclaim_generation(sequence, verify_window + 1U);
+            maximum_frontier = std::max(maximum_frontier, sequence.execution_frontier);
+        }
         std::optional<nvtx::ScopedRange> submit_range;
         submit_range.emplace(nvtx::Name::DecodeMtpSubmit, nvtx::Category::Mtp,
                              static_cast<std::uint64_t>(lanes.size()));

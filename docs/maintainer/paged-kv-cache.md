@@ -859,10 +859,16 @@ physical pool and logical entitlement. Admission uses this same claim limit.
 MTP's independent full-context/provisional pool keeps its own entitlement and
 must not inherit Main's selected-window cap. DFlash2 cyclic KV remains owned by
 StateImage and has no full backend history pool. All allocation still consumes
-real free/reserved pages. A speculative execution unit pins its geometry; if its
-funded tail is exhausted, it fails explicitly rather than shrinking selected
-history or reusing an in-flight page. Final request batches retire before reusable
-checkpoint publication; see the current CLI/serving and live validation scope.
+real free/reserved pages. A running speculative execution unit pins its geometry.
+MTP may reclaim between committed rounds, before constructing the next ingress:
+Main selects the generation window, backend follows the exact same block IDs,
+both restore their growth entitlements, and old proposals are discarded. The
+committed recurrent state and logical token ledger remain intact; subsequent
+attention uses the compacted window, as in ordinary KVMem generation. This is
+bounded working-set attention, not full-context attention over all generated
+tokens. Published endpoints and masked-draft backends still pin their geometry;
+an unfundable next unit fails explicitly. Final request batches retire before
+reusable checkpoint publication; see the current CLI/serving validation scope.
 
 
 ### KVMem pre-query lexical restore (2026-10-20)
